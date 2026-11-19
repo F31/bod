@@ -132,6 +132,14 @@
   status: implemented
   evidence: cargo test -p bod-app context_handoff
   note: 会话按 (agent, company, project) 分区；工作区 id 由调用方（workspace_safety）提供，本模块只断言跨项目必不同与历史不串用，不创建 worktree
+- id: I-38
+  kind: invariant
+  requirement: 普通回答不能静默改变规格、权限或验收
+  module: bod-app::clarity_dialogue
+  tests: bod-app::clarity_dialogue::tests::invariant_i_38_comment_never_creates_control_effect
+  status: implemented
+  evidence: cargo test -p bod-app clarity_dialogue
+  note: 评论/回答/回调都不写业务状态，只产出 ControlCommand 描述；LGTM 类文本只在前端信号分类里标 approval_like，不参与授权。转换须显式命令 + 授权依据 + 对象/修订一致，且结果仅为 Proposed
 - id: I-51
   kind: invariant
   requirement: 外部完成/回合结束不直接成为业务接受，自动接受必须有授权策略

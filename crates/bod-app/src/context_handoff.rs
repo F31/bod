@@ -208,6 +208,17 @@ fn validate_revision(field: &'static str, value: &str) -> Result<(), AssemblyErr
     Ok(())
 }
 
+/// 判断一个修订标识是否是确定修订：非空，且不是 `latest`/`HEAD` 这类可变指针。
+///
+/// 澄清模块（`clarity_dialogue`）在把评论转成决策时用同一判定，避免两处口径漂移。
+pub fn is_definite_revision(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !MUTABLE_REVISIONS
+            .iter()
+            .any(|pointer| value.eq_ignore_ascii_case(pointer))
+}
+
 // ---------------------------------------------------------------------------
 // 权限快照
 // ---------------------------------------------------------------------------

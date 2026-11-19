@@ -30,10 +30,14 @@
 
 ## 3. 讨论与澄清
 
-- [ ] 3.1 实现 Issue 讨论记录（author/时间/关联修订/来源与编辑历史），验证评论编辑保留原文与修订。
-- [ ] 3.2 实现评论无副作用与 Question→NeedsInput，验证 `invariant_i_38`：LGTM 不结单、不派发、不授权，Question 记录答复主体与重新唤醒条件。
-- [ ] 3.3 实现有权限的评论→Decision/FeedbackProposal 显式转换与外部回调认证，验证伪造批准回调不产生接受/发布效果，转换后决策绑定对象与修订。
-- [ ] 3.4 编写澄清状态与超时处理说明到 `docs/spec-notes/p1-clarity.md`，验证每个稳定状态与恢复条件对应具体 scenario。
+- [x] 3.1 实现 Issue 讨论记录（author/时间/关联修订/来源与编辑历史），验证评论编辑保留原文与修订。
+  - 证据（2026-11-19/20，`cargo test -p bod-app clarity_dialogue` → 7 passed）：`Comment` 记录 author、created_at、来源（host/im/web/external_api/agent_output）、目标 `{object_id, revision}`；`edit` 把旧正文压进 `history`（`edited_by`/`edited_at`），当前正文换新值，`target` 不变；正文相同的编辑不产生历史。`comment_edit_keeps_original_body_and_revision` 两次编辑后历史 2 条且顺序为「初版 → 修订」，`target.revision` 仍为 `spec-r7`；审计条目只含元数据与 `sha256(body)`，`audit_line()` 断言不含任何正文片段（对应「评论正文与审计摘要分开存储」）。
+- [x] 3.2 实现评论无副作用与 Question→NeedsInput，验证 `invariant_i_38`：LGTM 不结单、不派发、不授权，Question 记录答复主体与重新唤醒条件。
+  - 证据：唯一事件→命令映射 `commands_for`：`Comment`/`UnverifiedMaterial` 恒为空，`Answer` 只在已记录答复且答复人合规时给 `WakeAttempt`，`Converted` 只给「开启接受/反馈流程」而非接受本身。`invariant_i_38_comment_never_creates_control_effect` 对 LGTM/同意/approved/+1/批准 逐条断言 `signal=ApprovalLike` 但 `commands` 为空、`converted()` 为空、`acceptance_revision` 不变；信号分类只用于界面提示，不进入授权。`ClarificationQuestion` 绑定 attempt 与确定 input 修订，记录 `answerers`、`BlockedScope`、`WakeCondition`；`question_sets_needs_input_and_timeout_stays_pending` 断言 NeedsInput 三要素齐全、`task-migrate` 被挡而 `task-unrelated` 不被挡、超时只增 `timeout_notices` 且状态保持 `pending`/命令为空（不猜答案、不放行）、非指定答复人被拒、指定答复人答复只产生 `WakeAttempt`。`cancelled_question_leaves_needs_input_without_commands` 覆盖撤销退出 NeedsInput 且不可再答复。
+- [x] 3.3 实现有权限的评论→Decision/FeedbackProposal 显式转换与外部回调认证，验证伪造批准回调不产生接受/发布效果，转换后决策绑定对象与修订。
+  - 证据：`convert` 前置四检——`base_revision` 必须是确定修订（`latest` → `IndefiniteRevision`）、对象一致（`ObjectMismatch`）、修订一致（`RevisionMismatch`）、持有该 kind 的授权（`NotAuthorized`）；结果 `ConvertedDecision{kind, object_id, base_revision, source_comment_id, decided_by, grant_basis, status=proposed}`，`acceptance_revision` 不变。`explicit_conversion_binds_object_revision_and_grant` 覆盖 Decision/ScopeDecision/FeedbackProposal 三种绑定（命令分别为 `BeginAcceptanceFlow`/`BeginFeedbackReview`）、无授权时记录数不变、修订不一致与可变指针均被拒。`forged_approval_callback_only_registers_untrusted_material`：未认证回调（自称「客户已批准」）只登记为 `UnverifiedMaterial`（`trust=untrusted`、`reason=unauthenticated`），`comments()`/`converted()` 为空、`commands_for` 为空、验收不变；已认证但无发言权 → `Rejected(NotAuthorized)`；已认证且有权限 → 只成为普通评论且不自动转决策。`callback_rejections_are_explicit` 覆盖 MissingSubject/ObjectMismatch/IndefiniteRevision。
+- [x] 3.4 编写澄清状态与超时处理说明到 `docs/spec-notes/p1-clarity.md`，验证每个稳定状态与恢复条件对应具体 scenario。
+  - 证据：文档 §4 给出 `pending / answered / cancelled` 三态表（进入条件、允许动作、退出条件）并逐行标注对应场景「执行端请求澄清」与「LGTM 不结单」；超时行为单列（只记提示、保持 pending、零命令），§3 给出事件→命令映射表，§5/§6 给出转换四检与回调五步判定；§7 明列 6 项未覆盖（持久化、评论去重、NeedsInput 未写入 Condition、接受流程未接线、评论权限仅布尔入参、撤回/删除未实现）。
 
 ## 4. 直派闭环与工作台
 

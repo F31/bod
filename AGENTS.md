@@ -43,7 +43,11 @@
   `bod-app::context_handoff` 提供确定装配的 ContextBundle（I-17）、按 revision/digest 的不可变片段缓存与撤权复核、
   指令优先级与 Question 归口、会话复用与角色/Profile/授权重置（I-36、G-11 implemented；G-48 因容量与热点回源未实现而登记 `unverified`）。
   **本切片内存值类型 + 只读装配，未落 `workspaces`/`context_bundles` 表**，落库留到 4.x 直派闭环。
-  P1 的讨论/澄清、直派闭环、工作台与出口切片尚未开始。
+  已完成切片 3「讨论与澄清」（任务 3.1—3.4）——`bod-app::clarity_dialogue` 提供带编辑历史的讨论记录、
+  事件→控制命令的唯一映射（评论/不可信材料恒零命令）、Question/NeedsInput 三态与超时保持 pending、
+  评论→Decision/ScopeDecision/FeedbackProposal 的显式转换（四检 + `proposed`）、外部回调「认证→主体→
+  对象→修订→授权」顺序（伪造批准只登记不可信材料）；I-38 登记 implemented，同样未落表。
+  P1 的直派闭环、工作台与出口切片尚未开始。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 
