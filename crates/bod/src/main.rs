@@ -24,8 +24,98 @@ const USAGE: &str = "\
   bod adapter conformance          运行 Fake + 本机真实适配器的 conformance 报告
   bod smoke                        跑通指派→执行→候选登记→重启找回的最小冒烟
   bod smoke --json                 同上，输出机器可读结果
+  bod fault-matrix                 执行 P0 五个核心故障场景并输出实测报告
+  bod fault-matrix --json          同上，输出机器可读结果
+  bod perf                         实测空闲负担与 §38.2 性能预算可测项
   bod --help                       显示本帮助
 ";
+
+/// 实测环境必须如实记录：OS/架构 + 实际 rustc 版本；取不到就写 unknown，不猜。
+fn environment_note() -> String {
+    let rustc = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "{} / {} / {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        rustc
+    )
+}
+
+/// commit 从现有构建信息读取；取不到时写明 unknown，不伪造短哈希。
+fn commit_note() -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn report_json(report: &bod_app::fault_matrix::FaultMatrixReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{{");
+    let _ = writeln!(
+        out,
+        "  \"environment\": {},",
+        json_string(&report.environment)
+    );
+    let _ = writeln!(out, "  \"commit\": {},", json_string(&report.commit));
+    let _ = writeln!(out, "  \"passed\": {},", report.passed_count());
+    let _ = writeln!(out, "  \"total\": {},", report.scenarios.len());
+    let _ = writeln!(out, "  \"all_passed\": {},", report.all_passed());
+    let _ = writeln!(out, "  \"scenarios\": [");
+    for (index, scenario) in report.scenarios.iter().enumerate() {
+        let comma = if index + 1 == report.scenarios.len() {
+            ""
+        } else {
+            ","
+        };
+        let _ = writeln!(out, "    {{");
+        let _ = writeln!(out, "      \"name\": {},", json_string(scenario.name));
+        let _ = writeln!(out, "      \"fault\": {},", json_string(scenario.fault));
+        let _ = writeln!(
+            out,
+            "      \"requirement\": {},",
+            json_string(scenario.requirement)
+        );
+        let _ = writeln!(out, "      \"passed\": {},", scenario.passed);
+        let _ = writeln!(out, "      \"facts\": {},", json_array(&scenario.facts));
+        let _ = writeln!(
+            out,
+            "      \"assertions\": {},",
+            json_array(&scenario.assertions)
+        );
+        let _ = writeln!(
+            out,
+            "      \"next_step\": {}",
+            json_string(&scenario.next_step)
+        );
+        let _ = writeln!(out, "    }}{comma}");
+    }
+    let _ = writeln!(out, "  ]");
+    out.push('}');
+    out
+}
+
+fn json_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}
+
+fn json_array(values: &[String]) -> String {
+    let items: Vec<String> = values.iter().map(|item| json_string(item)).collect();
+    format!("[{}]", items.join(", "))
+}
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -101,6 +191,18 @@ fn run(args: &[String]) -> Result<String, String> {
         [cmd, flag] if cmd == "smoke" && flag == "--json" => {
             let report = smoke::run()?;
             Ok(format!("{}\n", report.to_json()))
+        }
+        [cmd] if cmd == "fault-matrix" => {
+            let report = bod_app::fault_matrix::run(&environment_note(), &commit_note())?;
+            Ok(bod_app::fault_matrix::render_markdown(&report))
+        }
+        [cmd, flag] if cmd == "fault-matrix" && flag == "--json" => {
+            let report = bod_app::fault_matrix::run(&environment_note(), &commit_note())?;
+            Ok(format!("{}\n", report_json(&report)))
+        }
+        [cmd] if cmd == "perf" => {
+            let report = bod_app::perf_probe::run(&environment_note(), &commit_note())?;
+            Ok(bod_app::perf_probe::render_markdown(&report))
         }
         [cmd, sub] if cmd == "adapter" && sub == "describe" => {
             let adapter = adapter_or_err()?;

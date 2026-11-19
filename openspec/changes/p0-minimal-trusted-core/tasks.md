@@ -56,12 +56,12 @@
 
 ## 7. D6 恢复、doctor、清理与 P0 故障矩阵
 
-- [ ] 7.1 实现一致性备份（DB+WAL+CAS 引用+配置/适配版本+密钥恢复说明）与新宿主恢复流程（recovery-cleanup: 备份内容、恢复到新宿主），验证 `bod-app::migration_safety` 的 G-6/G-49：缺 WAL 的备份不标可恢复、恢复后在途 Effect 先对账才开放派发。
-- [ ] 7.2 实现 doctor 与 ReconciliationCase（recovery-cleanup: 最小 doctor、对账案件），验证 `invariant_i_26` 与 G-20：磁盘满停止新派发、Unknown 保留风险占用且不被 TTL 回收、每个案件有处理人与下一步。
-- [ ] 7.3 实现删除请求、CleanupBlocked、Abandon 与外部共享资源边界（recovery-cleanup: 删除请求与清理阻塞、外部共享资源边界；resource-state: 删除请求与清理边界），验证 `invariant_i_55`：停止未确认/费用未结时阻塞清理、外部仓库与 Formal Manifest 引用不随项目删除消失、Abandon 记录残留。
-- [ ] 7.4 迁移元数据含 migration_id/checksum/依赖/兼容窗口/恢复说明，破坏性 DDL 默认阻断（recovery-cleanup: 迁移与恢复测试），验证 `cargo run -p xtask -- migration-check` 与旧库样本恢复测试通过、已发布脚本不可原地改写。
-- [ ] 7.5 执行 P0 核心故障矩阵：外部成功但回包丢失、已预留后宿主崩溃、磁盘满、权限被撤销、备份恢复到新宿主，验证每个故障留下事实记录与可操作下一步，报告注明实际环境、commit 与断言摘要。
-- [ ] 7.6 实测空闲负担与 §38 性能预算项（宿主空闲 CPU/内存、队列扫描成本、写线程等待），验证报告给出测量方法与环境；未测项保留 Target/Unverified，不以设计值代替实测。
+- [x] 7.1 实现一致性备份（DB+WAL+CAS 引用+配置/适配版本+密钥恢复说明）与新宿主恢复流程（recovery-cleanup: 备份内容、恢复到新宿主），验证 `bod-app::migration_safety` 的 G-6/G-49：缺 WAL 的备份不标可恢复、恢复后在途 Effect 先对账才开放派发。
+- [x] 7.2 实现 doctor 与 ReconciliationCase（recovery-cleanup: 最小 doctor、对账案件），验证 `invariant_i_26` 与 G-20：磁盘满停止新派发、Unknown 保留风险占用且不被 TTL 回收、每个案件有处理人与下一步。
+- [x] 7.3 实现删除请求、CleanupBlocked、Abandon 与外部共享资源边界（recovery-cleanup: 删除请求与清理阻塞、外部共享资源边界；resource-state: 删除请求与清理边界），验证 `invariant_i_55`：停止未确认/费用未结时阻塞清理、外部仓库与 Formal Manifest 引用不随项目删除消失、Abandon 记录残留。
+- [x] 7.4 迁移元数据含 migration_id/checksum/依赖/兼容窗口/恢复说明，破坏性 DDL 默认阻断（recovery-cleanup: 迁移与恢复测试），验证 `cargo run -p xtask -- migration-check` 与旧库样本恢复测试通过、已发布脚本不可原地改写。
+- [x] 7.5 执行 P0 核心故障矩阵：外部成功但回包丢失、已预留后宿主崩溃、磁盘满、权限被撤销、备份恢复到新宿主，验证每个故障留下事实记录与可操作下一步，报告注明实际环境、commit 与断言摘要。
+- [x] 7.6 实测空闲负担与 §38 性能预算项（宿主空闲 CPU/内存、队列扫描成本、写线程等待），验证报告给出测量方法与环境；未测项保留 Target/Unverified，不以设计值代替实测。
 
 ## 8. 桌面连接原型、验证索引与发布纪律
 

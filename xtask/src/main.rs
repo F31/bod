@@ -213,6 +213,16 @@ const MIGRATION_TABLES: &[(&str, &[&str])] = &[
             "publications",
         ],
     ),
+    (
+        "006_recovery.sql",
+        &[
+            "migration_registry",
+            "backups",
+            "reconciliation_cases",
+            "cleanup_requests",
+            "cleanup_abandons",
+        ],
+    ),
 ];
 
 fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str>, Vec<String>) {
@@ -237,6 +247,31 @@ fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str
 fn migration_check(root: &Path) -> bool {
     let mut ok = true;
     let mut total_tables = 0usize;
+
+    // 目录里有脚本但未登记 = 新增迁移未被检查覆盖，必须失败而不是静默放过。
+    match fs::read_dir(root.join("crates/bod-app/migrations")) {
+        Ok(entries) => {
+            let mut unregistered: Vec<String> = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.ends_with(".sql"))
+                .filter(|name| !MIGRATION_TABLES.iter().any(|(file, _)| file == name))
+                .collect();
+            unregistered.sort();
+            if !unregistered.is_empty() {
+                ok = false;
+                println!(
+                    "[migration-check] FAIL 未登记的迁移脚本: {}",
+                    unregistered.join(", ")
+                );
+            }
+        }
+        Err(err) => {
+            ok = false;
+            println!("[migration-check] FAIL 无法读取迁移目录: {err}");
+        }
+    }
+
     for (file, required) in MIGRATION_TABLES {
         let path = root.join("crates/bod-app/migrations").join(file);
         let sql = match fs::read_to_string(&path) {

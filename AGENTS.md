@@ -5,7 +5,7 @@
 
 ## 当前切片
 
-- **阶段**：P0 最小可信核心，D0 + D1 + D2 + D3 + D4 + D5 已完成（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6）。
+- **阶段**：P0 最小可信核心，D0—D6 已完成（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6）。
 - **已落地**：五 crate workspace（`bod-core` / `bod-app` / `bod` / `bod-desktop` / `xtask`）、
   最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录、
   §37.14 配置 schema 与 `config explain` / `config validate`（保留来源与语义）、
@@ -20,8 +20,12 @@
   D5 成果与接受（SHA-256 内容寻址 CAS「临时文件→digest→原子转正→事务登记」、孤儿 GC dry-run
   与外部对象保护、不可变修订 trigger、验证状态机与 Waived≠通过、接受绑定五元组与指针 CAS、
   实现者自批拒绝、多工作包完成条件、失败转 NeedsRevision 新 Attempt、控制 API 403/409 稳定码、
-  只读零派发、`bod smoke` 全流程冒烟）。
-- **未落地**：恢复清理与故障矩阵（D6）、桌面连接原型与 P0 收口（8.1—8.4）。
+  只读零派发、`bod smoke` 全流程冒烟）、
+  D6 恢复与清理（迁移登记与 checksum 漂移检测、`VACUUM INTO` 一致性备份与不可恢复判定、
+  新宿主恢复与派发门禁、doctor 9 项检查与 ReconciliationCase 幂等开案、删除请求与四项清理条件、
+  CleanupBlocked 稳定阻塞码、Abandon 残留清单、外部仓库/正式 Manifest/接受交付永不自动销毁、
+  清理 Effect Gate 幂等、`bod fault-matrix` 5 场景与 `bod perf` 实测）。
+- **未落地**：桌面连接原型与 P0 收口（8.1—8.4）。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

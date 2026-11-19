@@ -10,6 +10,7 @@ use crate::domain::model::{
 };
 use crate::domain::rules::{authorize, update_control};
 use crate::domain::{DomainError, Version};
+use crate::recovery_models::{CleanupState, CleanupTargetKind};
 use crate::store::{SqliteStore, StoreError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -382,6 +383,39 @@ impl ControlApi {
             issue.spec.assignment.as_ref(),
         )
         .map_err(|denial| ApiError::forbidden(ctx.request_id, &denial))?;
+
+        // 删除请求优先于派发：目标范围内已登记删除请求时停止新派发（§8.5、resource-state）。
+        // Completed 表示清理已结束，不再阻止后续正常派发。
+        for (kind, target) in [
+            (
+                CleanupTargetKind::Project,
+                issue
+                    .meta
+                    .project_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_string()),
+            ),
+            (CleanupTargetKind::Issue, Some(issue_uid.to_string())),
+        ] {
+            let Some(target_id) = target else { continue };
+            let request = uow
+                .get_cleanup_request(ctx.scope.company_id.as_str(), kind, &target_id)
+                .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
+            if let Some(request) = request
+                && request.state != CleanupState::Completed
+            {
+                return Err(ApiError::conflict(
+                    ctx.request_id,
+                    "BOD_CLEANUP_IN_PROGRESS",
+                    &format!(
+                        "{} 已登记删除请求（{}），停止新派发",
+                        target_id,
+                        request.state.as_str()
+                    ),
+                    "等待清理完成，或记录 Abandon 与对账入口后再派发",
+                ));
+            }
+        }
 
         let queue_key = format!("issue:{}", issue_uid);
         let existing = uow
@@ -831,6 +865,49 @@ mod tests {
                 .unwrap();
             assert!(second.already_queued, "同一代不新建第二个消费者");
             assert_eq!(api.dispatch_probe().count(), 1);
+        }
+
+        #[test]
+        fn cleanup_request_stops_new_dispatch() {
+            let (mut store, _path) = store();
+            seed(&mut store);
+            let api = ControlApi::new();
+            let scope = scope();
+            let coder = Principal {
+                id: id("coder-1"),
+                kind: PrincipalKind::Agent,
+                claimed_roles: Vec::new(),
+            };
+            let coder_grants = dispatch_grants("coder-1", 1);
+
+            let cleanup_scope =
+                crate::cleanup_recovery::CleanupScope::project("company-default", "project-1");
+            crate::cleanup_recovery::request_cleanup(
+                &mut store,
+                &cleanup_scope,
+                "user-1",
+                &crate::cleanup_recovery::CleanupPolicy::disposed("临时工作区已删除"),
+                "clr-1",
+                NOW,
+            )
+            .unwrap();
+
+            let blocked = api
+                .request_dispatch(
+                    &mut store,
+                    &ctx("req-cleanup", &coder, &scope),
+                    "issue-1",
+                    &coder_grants,
+                    NOW,
+                )
+                .unwrap_err();
+            assert_eq!(blocked.status, 409);
+            assert_eq!(blocked.reason_code, "BOD_CLEANUP_IN_PROGRESS");
+            assert_eq!(api.dispatch_probe().count(), 0, "停止派发不得计入派发探针");
+            assert!(
+                store.list_queue("company-default").unwrap().is_empty(),
+                "没有创建新的队列消费者"
+            );
         }
 
         #[test]

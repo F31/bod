@@ -25,20 +25,44 @@ use crate::domain::model::{
 };
 use crate::domain::queue::{EffectStatus, OutboxDelivery, QueueState, WakeReceipt, WorkQueueEntry};
 use crate::domain::{DenialReason, DomainId, Version};
+use crate::recovery_models::{
+    BackupRecord, BackupStatus, CaseState, CleanupAbandon, CleanupRequest, CleanupState,
+    CleanupTargetKind, MigrationRecord, MigrationRisk, ReconciliationCase, RevisionPin,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fmt;
 use std::fs;
 use std::path::Path;
 
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
-/// 004 为 D4 执行协议，005 为 D5 成果/修订/接受；新增迁移只能追加，不可原地改写。
+/// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理；
+/// 新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_queue.sql"),
     include_str!("../migrations/003_budget.sql"),
     include_str!("../migrations/004_execution.sql"),
     include_str!("../migrations/005_artifacts.sql"),
+    include_str!("../migrations/006_recovery.sql"),
 ];
+
+/// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
+pub const MIGRATION_NAMES: &[&str] = &[
+    "001_initial.sql",
+    "002_queue.sql",
+    "003_budget.sql",
+    "004_execution.sql",
+    "005_artifacts.sql",
+    "006_recovery.sql",
+];
+
+/// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
+pub fn migration_sources() -> impl Iterator<Item = (&'static str, &'static str)> {
+    MIGRATION_NAMES
+        .iter()
+        .copied()
+        .zip(MIGRATIONS.iter().copied())
+}
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -413,6 +437,430 @@ impl SqliteStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+    // -----------------------------------------------------------------------
+    // D6 迁移登记、备份、对账与清理（任务 7.1—7.4）
+    // -----------------------------------------------------------------------
+
+    pub fn list_migration_records(&self) -> Result<Vec<MigrationRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT migration_id, checksum, depends_on, schema_range, software_range, risk,
+                    compatibility_window, backup_notes, data_notes, applied_at_ms
+             FROM migration_registry ORDER BY migration_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let depends: String = row.get(2)?;
+            Ok(MigrationRecord {
+                migration_id: row.get(0)?,
+                checksum: row.get(1)?,
+                depends_on: MigrationRecord::parse_depends(&depends),
+                schema_range: row.get(3)?,
+                software_range: row.get(4)?,
+                risk: MigrationRisk::parse(&row.get::<_, String>(5)?),
+                compatibility_window: row.get(6)?,
+                backup_notes: row.get(7)?,
+                data_notes: row.get(8)?,
+                applied_at_ms: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 一致性快照：VACUUM INTO 生成独立数据库文件，已提交的 WAL 内容被合并。
+    pub fn vacuum_into(&self, path: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("VACUUM INTO ?1", params![path])
+            .map_err(StoreError::Sql)?;
+        Ok(())
+    }
+
+    /// 供恢复报告使用的核心行数（不读取业务内容）。
+    pub fn core_row_counts(&self) -> Result<CoreRowCounts, StoreError> {
+        let issues = self.count_table("issues")?;
+        let revisions = self.count_table("artifact_revisions")?;
+        let invocations = self.count_table("invocations")?;
+        let acceptances = self.count_table("acceptances")?;
+        Ok(CoreRowCounts {
+            issues,
+            revisions,
+            invocations,
+            acceptances,
+        })
+    }
+
+    fn count_table(&self, table: &str) -> Result<i64, StoreError> {
+        // 表名来自本函数的固定字面量，不接受外部输入。
+        self.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .map_err(StoreError::Sql)
+    }
+
+    pub fn latest_backup(&self, company_id: &str) -> Result<Option<BackupRecord>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT backup_id, path, db_sha256, db_bytes, wal_included, snapshot_method,
+                        cas_object_count, config_revision, adapter_versions, key_recovery_note,
+                        status, problems, created_at_ms
+                 FROM backups WHERE company_id = ?1 ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+                params![company_id],
+                |row| {
+                    let problems: String = row.get(11)?;
+                    Ok(BackupRecord {
+                        backup_id: row.get(0)?,
+                        company_id: DomainId::new(company_id.to_string()),
+                        path: row.get(1)?,
+                        db_sha256: row.get(2)?,
+                        db_bytes: row.get(3)?,
+                        wal_included: row.get::<_, i64>(4)? == 1,
+                        snapshot_method: row.get(5)?,
+                        cas_object_count: row.get(6)?,
+                        config_revision: row.get(7)?,
+                        adapter_versions: row.get(8)?,
+                        key_recovery_note: row.get(9)?,
+                        status: BackupStatus::parse(&row.get::<_, String>(10)?),
+                        problems: split_list(&problems),
+                        created_at_ms: row.get(12)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 冻结一组具体修订（§21.4）。本切片只写入，不改写已有 Manifest 修订。
+    // 参数多但都是 Manifest 的必填事实；拆结构体会掩盖"哪些字段来自接受记录"。
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_manifest(
+        &self,
+        company_id: &str,
+        manifest_id: &str,
+        project_id: &str,
+        revision: i64,
+        artifact_revision_refs: &[String],
+        acceptance_refs: &[String],
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO manifests (
+                uid, company_id, project_id, revision, milestone,
+                artifact_revision_refs, acceptance_refs, signature_ref, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, NULL, ?7)",
+            params![
+                manifest_id,
+                company_id,
+                project_id,
+                revision,
+                artifact_revision_refs.join(ARRAY_SEP),
+                acceptance_refs.join(ARRAY_SEP),
+                now_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 引用该修订的正式 Manifest：用分隔符包裹后精确匹配，避免子串误判。
+    pub fn manifest_referencing(&self, artifact_revision: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid FROM manifests
+             WHERE instr(?2 || artifact_revision_refs || ?2, ?2 || ?1 || ?2) > 0",
+        )?;
+        let rows = stmt.query_map(params![artifact_revision, ARRAY_SEP], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目下仍在运行的 Issue 数（清理阻塞判定）。
+    pub fn count_running_issues(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM issues
+                 WHERE company_id = ?1 AND project_id = ?2
+                   AND phase IN ('Running', 'Blocked')",
+                params![company_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
+    /// 项目下的成果身份（用于列出必须保留的外部引用）。
+    pub fn list_artifacts(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<Artifact>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, kind, title, owner_id, visibility, accepted_revision
+             FROM artifacts WHERE company_id = ?1 AND project_id = ?2 ORDER BY uid",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok(Artifact {
+                id: DomainId::new(row.get::<_, String>(0)?),
+                company_id: DomainId::new(company_id.to_string()),
+                project_id: DomainId::new(project_id.to_string()),
+                kind: ArtifactKind::parse(&row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                owner: DomainId::new(row.get::<_, String>(3)?),
+                visibility: ArtifactVisibility::parse(&row.get::<_, String>(4)?),
+                accepted_revision: row.get::<_, Option<String>>(5)?.map(DomainId::new),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目运行 ID 列表：预算与执行事实按 Run 归属，需先落到项目范围。
+    pub fn list_project_run_ids(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT runs.uid FROM runs JOIN issues ON issues.uid = runs.issue_uid
+             WHERE runs.company_id = ?1 AND issues.project_id = ?2 ORDER BY runs.uid",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目范围内全部 invocation 状态（停止是否已确认的事实来源）。
+    pub fn list_project_invocation_states(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT invocations.state
+             FROM invocations
+             JOIN runs ON runs.uid = invocations.run_id
+             JOIN issues ON issues.uid = runs.issue_uid
+             WHERE invocations.company_id = ?1 AND issues.project_id = ?2
+             ORDER BY invocations.invocation_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 单个 Run 的 invocation 状态。
+    pub fn list_run_invocation_states(
+        &self,
+        company_id: &str,
+        run_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT state FROM invocations
+             WHERE company_id = ?1 AND run_id = ?2 ORDER BY invocation_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, run_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 目标归属反查（只读）：Issue → project_id。跨 Company 视为不存在。
+    pub fn issue_project_id(
+        &self,
+        company_id: &str,
+        issue_uid: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT project_id FROM issues WHERE company_id = ?1 AND uid = ?2",
+                params![company_id, issue_uid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(StoreError::Sql)
+    }
+
+    /// 目标归属反查（只读）：Artifact → project_id。跨 Company 视为不存在。
+    pub fn artifact_project_id(
+        &self,
+        company_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT project_id FROM artifacts WHERE company_id = ?1 AND uid = ?2",
+                params![company_id, artifact_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// Issue 的删除请求标记（毫秒字符串）；`None` 表示未请求删除。
+    pub fn issue_deletion_requested_at(
+        &self,
+        company_id: &str,
+        issue_uid: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT deletion_requested_at FROM issues WHERE company_id = ?1 AND uid = ?2",
+                params![company_id, issue_uid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(StoreError::Sql)
+    }
+
+    /// Run 是否存在：Run 级清理不按项目聚合，但目标必须可解析。
+    ///
+    /// 只要 `runs` 行或该 run_id 的 invocation 存在即成立——P0 切片尚无 runs 写入者，
+    /// 仅按 `runs` 判定会把真实存在的 Run 判成不存在。
+    pub fn run_exists(&self, company_id: &str, run_id: &str) -> Result<bool, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM runs WHERE company_id = ?1 AND uid = ?2
+                 UNION ALL
+                 SELECT 1 FROM invocations WHERE company_id = ?1 AND run_id = ?2
+                 LIMIT 1",
+                params![company_id, run_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|found| found.is_some())
+            .map_err(StoreError::Sql)
+    }
+
+    /// 无法归属到 Run 的 invocation 数：缺少 `runs` 行时停止事实不可判定，
+    /// 必须计入 Unknown，而不是当作"没有在途执行"。
+    pub fn count_unattributed_invocations(&self, company_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM invocations
+                 WHERE company_id = ?1 AND run_id NOT IN (
+                     SELECT uid FROM runs WHERE company_id = ?1
+                 )",
+                params![company_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
+    /// 仍处于 requested/blocked 的清理请求：删除尚未完成的事实来源。
+    pub fn list_open_cleanup_requests(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<CleanupRequest>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT request_id, target_kind, target_id, state, blockers, requested_by,
+                    created_at_ms, updated_at_ms
+             FROM cleanup_requests
+             WHERE company_id = ?1 AND state IN ('requested', 'blocked')
+             ORDER BY created_at_ms, request_id",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            let kind: String = row.get(1)?;
+            let blockers: String = row.get(4)?;
+            Ok(CleanupRequest {
+                request_id: row.get(0)?,
+                company_id: DomainId::new(company_id.to_string()),
+                target_kind: CleanupTargetKind::parse(&kind),
+                target_id: row.get(2)?,
+                state: CleanupState::parse(&row.get::<_, String>(3)?),
+                blockers: split_list(&blockers),
+                requested_by: row.get(5)?,
+                created_at_ms: row.get(6)?,
+                updated_at_ms: row.get(7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目内修订的固定线索：接受指针 + 正式 Manifest 引用。
+    ///
+    /// Manifest 引用按修订逐个回查（P0 规模可接受）；此处只读，不写任何修订。
+    pub fn list_project_revision_pins(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<RevisionPin>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.revision_id, r.artifact_id, r.storage_kind, r.storage_ref,
+                    a.accepted_revision
+             FROM artifact_revisions r
+             JOIN artifacts a ON a.uid = r.artifact_id
+             WHERE r.company_id = ?1 AND a.project_id = ?2
+             ORDER BY r.revision_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            let revision_id: String = row.get(0)?;
+            let kind: String = row.get(2)?;
+            let reference: String = row.get(3)?;
+            let accepted_revision: Option<String> = row.get(4)?;
+            let storage = if kind == "external" {
+                StorageRef::External(reference)
+            } else {
+                StorageRef::Cas(reference)
+            };
+            Ok(RevisionPin {
+                accepted: accepted_revision.as_deref() == Some(revision_id.as_str()),
+                revision_id,
+                artifact_id: row.get(1)?,
+                storage,
+                manifest_refs: Vec::new(),
+            })
+        })?;
+        let mut pins = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sql)?;
+        for pin in &mut pins {
+            pin.manifest_refs = self.manifest_referencing(&pin.revision_id)?;
+        }
+        Ok(pins)
+    }
+
+    pub fn list_reconciliation_cases(
+        &self,
+        company_id: &str,
+        only_open: bool,
+    ) -> Result<Vec<ReconciliationCase>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT case_id, invocation_id, logical_action_key, impact_scope,
+                    risk_reservation_refs, known_evidence, assignee, next_step, state,
+                    created_at_ms, updated_at_ms
+             FROM reconciliation_cases
+             WHERE company_id = ?1 AND (?2 = 0 OR state = 'open')
+             ORDER BY created_at_ms",
+        )?;
+        let rows = stmt.query_map(params![company_id, i64::from(u8::from(only_open))], |row| {
+            let refs: String = row.get(4)?;
+            Ok(ReconciliationCase {
+                case_id: row.get(0)?,
+                company_id: DomainId::new(company_id.to_string()),
+                invocation_id: row.get(1)?,
+                logical_action_key: row.get(2)?,
+                impact_scope: row.get(3)?,
+                risk_reservation_refs: split_list(&refs),
+                known_evidence: row.get(5)?,
+                assignee: row.get(6)?,
+                next_step: row.get(7)?,
+                state: CaseState::parse(&row.get::<_, String>(8)?),
+                created_at_ms: row.get(9)?,
+                updated_at_ms: row.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    pub fn get_cleanup_request(
+        &self,
+        company_id: &str,
+        kind: CleanupTargetKind,
+        target_id: &str,
+    ) -> Result<Option<CleanupRequest>, StoreError> {
+        read_cleanup_request(&self.conn, company_id, kind, target_id)
     }
 }
 
@@ -2093,6 +2541,227 @@ impl<'a> UnitOfWork<'a> {
             )
             .map_err(StoreError::Sql)
     }
+
+    pub fn put_migration_record(&self, record: &MigrationRecord) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO migration_registry (
+                migration_id, checksum, depends_on, schema_range, software_range, risk,
+                compatibility_window, backup_notes, data_notes, applied_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(migration_id) DO NOTHING",
+            params![
+                record.migration_id,
+                record.checksum,
+                record.depends_on_text(),
+                record.schema_range,
+                record.software_range,
+                record.risk.as_str(),
+                record.compatibility_window,
+                record.backup_notes,
+                record.data_notes,
+                record.applied_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_backup_record(&self, record: &BackupRecord) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO backups (
+                backup_id, company_id, path, db_sha256, db_bytes, wal_included,
+                snapshot_method, cas_object_count, config_revision, adapter_versions,
+                key_recovery_note, status, problems, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                record.backup_id,
+                record.company_id.as_str(),
+                record.path,
+                record.db_sha256,
+                record.db_bytes,
+                i64::from(u8::from(record.wal_included)),
+                record.snapshot_method,
+                record.cas_object_count,
+                record.config_revision,
+                record.adapter_versions,
+                record.key_recovery_note,
+                record.status.as_str(),
+                record.problems.join(ARRAY_SEP),
+                record.created_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_reconciliation_case(&self, case: &ReconciliationCase) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO reconciliation_cases (
+                case_id, company_id, invocation_id, logical_action_key, impact_scope,
+                risk_reservation_refs, known_evidence, assignee, next_step, state,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(case_id) DO UPDATE SET
+                known_evidence = excluded.known_evidence,
+                assignee = excluded.assignee,
+                next_step = excluded.next_step,
+                state = excluded.state,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                case.case_id,
+                case.company_id.as_str(),
+                case.invocation_id,
+                case.logical_action_key,
+                case.impact_scope,
+                case.risk_reservation_refs.join(ARRAY_SEP),
+                case.known_evidence,
+                case.assignee,
+                case.next_step,
+                case.state.as_str(),
+                case.created_at_ms,
+                case.updated_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 幂等写入：同一目标只保留一条清理记录，重复请求返回已存在记录。
+    pub fn put_cleanup_request(&self, request: &CleanupRequest) -> Result<bool, StoreError> {
+        let rows = self.conn.execute(
+            "INSERT INTO cleanup_requests (
+                request_id, company_id, target_kind, target_id, state, blockers,
+                requested_by, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(company_id, target_kind, target_id) DO NOTHING",
+            params![
+                request.request_id,
+                request.company_id.as_str(),
+                request.target_kind.as_str(),
+                request.target_id,
+                request.state.as_str(),
+                request.blockers.join(ARRAY_SEP),
+                request.requested_by,
+                request.created_at_ms,
+                request.updated_at_ms,
+            ],
+        )?;
+        Ok(rows == 1)
+    }
+
+    pub fn update_cleanup_state(
+        &self,
+        request_id: &str,
+        state: CleanupState,
+        blockers: &[String],
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE cleanup_requests SET state = ?1, blockers = ?2, updated_at_ms = ?3
+             WHERE request_id = ?4",
+            params![state.as_str(), blockers.join(ARRAY_SEP), now_ms, request_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_cleanup_abandon(&self, abandon: &CleanupAbandon) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO cleanup_abandons (
+                abandon_id, company_id, request_id, residual_resources, risks, owner,
+                reconciliation_entry, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                abandon.abandon_id,
+                abandon.company_id.as_str(),
+                abandon.request_id,
+                abandon.residual_resources.join(ARRAY_SEP),
+                abandon.risks.join(ARRAY_SEP),
+                abandon.owner,
+                abandon.reconciliation_entry,
+                abandon.created_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 事务内读取清理请求：派发门禁必须在同一事务里看到删除标记。
+    pub fn get_cleanup_request(
+        &self,
+        company_id: &str,
+        kind: CleanupTargetKind,
+        target_id: &str,
+    ) -> Result<Option<CleanupRequest>, StoreError> {
+        read_cleanup_request(self.conn, company_id, kind, target_id)
+    }
+
+    /// 标记项目内 Issue 的 `deletionRequestedAt`（幂等：已有标记不覆盖）。
+    ///
+    /// 该标记是"停止新派发"的事实来源，与 `cleanup_requests` 行一起在同一事务写入。
+    pub fn mark_project_deletion_requested(
+        &self,
+        company_id: &str,
+        project_id: &str,
+        now_ms: i64,
+    ) -> Result<usize, StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE issues SET deletion_requested_at = ?3
+             WHERE company_id = ?1 AND project_id = ?2 AND deletion_requested_at IS NULL",
+            params![company_id, project_id, now_ms.to_string()],
+        )?;
+        Ok(rows)
+    }
+
+    /// 标记单个 Issue 的删除请求。
+    pub fn mark_issue_deletion_requested(
+        &self,
+        company_id: &str,
+        issue_uid: &str,
+        now_ms: i64,
+    ) -> Result<usize, StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE issues SET deletion_requested_at = ?3
+             WHERE company_id = ?1 AND uid = ?2 AND deletion_requested_at IS NULL",
+            params![company_id, issue_uid, now_ms.to_string()],
+        )?;
+        Ok(rows)
+    }
+}
+
+/// 事务外/内共用的清理请求读取：`SqliteStore` 与 `UnitOfWork` 走同一 SQL。
+fn read_cleanup_request(
+    conn: &Connection,
+    company_id: &str,
+    kind: CleanupTargetKind,
+    target_id: &str,
+) -> Result<Option<CleanupRequest>, StoreError> {
+    conn.query_row(
+        "SELECT request_id, state, blockers, requested_by, created_at_ms, updated_at_ms
+         FROM cleanup_requests
+         WHERE company_id = ?1 AND target_kind = ?2 AND target_id = ?3",
+        params![company_id, kind.as_str(), target_id],
+        |row| {
+            let blockers: String = row.get(2)?;
+            Ok(CleanupRequest {
+                request_id: row.get(0)?,
+                company_id: DomainId::new(company_id.to_string()),
+                target_kind: kind,
+                target_id: target_id.to_string(),
+                state: CleanupState::parse(&row.get::<_, String>(1)?),
+                blockers: split_list(&blockers),
+                requested_by: row.get(3)?,
+                created_at_ms: row.get(4)?,
+                updated_at_ms: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(StoreError::Sql)
+}
+
+/// 恢复报告用的核心行数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CoreRowCounts {
+    pub issues: i64,
+    pub revisions: i64,
+    pub invocations: i64,
+    pub acceptances: i64,
 }
 
 /// 列表字段的稳定分隔符（与既有 acceptance 文本一致）。
@@ -2246,8 +2915,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 32,
-            "应创建 9 张 D1 表 + 3 张 D2 队列表 + 4 张 D3 预算表 + 6 张 D4 执行协议表 + 10 张 D5 成果表"
+            count, 37,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 表"
         );
     }
 

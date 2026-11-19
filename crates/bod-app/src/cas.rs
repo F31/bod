@@ -159,6 +159,30 @@ impl CasStore {
         self.object_path(digest).is_file()
     }
 
+    /// 已转正对象数量（备份报告与 GC 统计用）。
+    pub fn object_count(&self) -> usize {
+        let objects = self.root.join("objects");
+        let Ok(dirs) = fs::read_dir(&objects) else {
+            return 0;
+        };
+        dirs.filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .filter_map(|entry| fs::read_dir(entry.path()).ok())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        is_digest_name(&entry.file_name().to_string_lossy())
+                            && entry
+                                .file_type()
+                                .map(|kind| kind.is_file())
+                                .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
     /// 先落临时文件并 fsync，再按内容摘要原子转正。
     /// 返回时字节已持久化，调用方才可以开启事务登记引用。
     pub fn stage(&self, bytes: &[u8], mime: &str) -> Result<CasObject, CasError> {
