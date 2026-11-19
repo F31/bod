@@ -5,12 +5,18 @@
 
 pub use bod_core as domain;
 
+pub mod adapter_conformance;
 pub mod authorization;
 pub mod backoff;
 pub mod budget_admission;
 pub mod claim_concurrency;
 pub mod config;
+pub mod descriptor_schema;
 pub mod effect_recovery;
+pub mod fake_executor;
+pub mod invocation;
+pub mod local_process;
+pub mod protocol_reliability;
 pub mod resource_state;
 pub mod store;
 pub mod wakeup;

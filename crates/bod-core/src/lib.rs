@@ -4,11 +4,13 @@
 //! D1 起承载领域对象、授权交集、资源外壳与状态机规则。
 
 pub mod budget;
+pub mod execution;
 pub mod model;
 pub mod queue;
 pub mod rules;
 
 pub use budget::*;
+pub use execution::*;
 pub use model::*;
 pub use queue::*;
 

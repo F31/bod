@@ -38,12 +38,12 @@
 
 ## 5. D4 执行端协议与一个真实适配器
 
-- [ ] 5.1 实现 `bod-execution/v1` 最小契约与 schema（describe、probe、start、inspect、observe、分项能力声明），验证 `bod-app::descriptor_schema` 与 G-5：schema fixture 覆盖全部必需操作且未知能力标 unsupported/unknown。
-- [ ] 5.2 实现 invocation 持久去重、同 ID 异参拒绝与回包丢失先对账（execution-adapter: Start 请求与持久去重、回包丢失先对账），验证 `invariant_i_04` 与 G-17：重复 start 返回原 execution_id、无幂等能力时进入 Unknown 且不新建 Attempt。
-- [ ] 5.3 实现执行状态映射与观察信封边界（execution-adapter: 接收状态与终态边界、观察信封与缺口），验证 Completed 不等于 Accepted、退出码 0 不触发接受、乱序观察不越过缺口 ACK、ACK 不表示业务完成。
-- [ ] 5.4 实现 Fake Executor 与最小 conformance 样本集（重复 start、同 ID 参数变化、开始回执丢失、乱序/断档、进程退出、取消请求与确认分离、认证失效、超大日志、最终费用迟到），验证 `bod-app::adapter_conformance` 的 G-17 列出全部命名用例与真实断言。
-- [ ] 5.5 接入一种本机已就绪的真实执行配置，完成 describe/probe/start/inspect/observe 与分项能力声明（execution-adapter: 必需操作与分项探测、能力分项声明），验证真实 conformance 报告注明运行时版本与探测结果，不支持的 cancel/ACK/配额能力在界面显示限制且不写入支持矩阵 Supported。
-- [ ] 5.6 记录执行端能力覆盖声明与证据等级到 `docs/spec-notes/p0-adapter-matrix.md`，验证每项声明含来源与观测时间，等级不高于证据来源且 Fake Executor 未被列为生产能力。
+- [x] 5.1 实现 `bod-execution/v1` 最小契约与 schema（describe、probe、start、inspect、observe、分项能力声明），验证 `bod-app::descriptor_schema` 与 G-5：schema fixture 覆盖全部必需操作且未知能力标 unsupported/unknown。
+- [x] 5.2 实现 invocation 持久去重、同 ID 异参拒绝与回包丢失先对账（execution-adapter: Start 请求与持久去重、回包丢失先对账），验证 `invariant_i_04` 与 G-17：重复 start 返回原 execution_id、无幂等能力时进入 Unknown 且不新建 Attempt。
+- [x] 5.3 实现执行状态映射与观察信封边界（execution-adapter: 接收状态与终态边界、观察信封与缺口），验证 Completed 不等于 Accepted、退出码 0 不触发接受、乱序观察不越过缺口 ACK、ACK 不表示业务完成。
+- [x] 5.4 实现 Fake Executor 与最小 conformance 样本集（重复 start、同 ID 参数变化、开始回执丢失、乱序/断档、进程退出、取消请求与确认分离、认证失效、超大日志、最终费用迟到），验证 `bod-app::adapter_conformance` 的 G-17 列出全部命名用例与真实断言。
+- [x] 5.5 接入一种本机已就绪的真实执行配置，完成 describe/probe/start/inspect/observe 与分项能力声明（execution-adapter: 必需操作与分项探测、能力分项声明），验证真实 conformance 报告注明运行时版本与探测结果，不支持的 cancel/ACK/配额能力在界面显示限制且不写入支持矩阵 Supported。
+- [x] 5.6 记录执行端能力覆盖声明与证据等级到 `docs/spec-notes/p0-adapter-matrix.md`，验证每项声明含来源与观测时间，等级不高于证据来源且 Fake Executor 未被列为生产能力。
 
 ## 6. D5 成果修订、最小接受与控制 API
 

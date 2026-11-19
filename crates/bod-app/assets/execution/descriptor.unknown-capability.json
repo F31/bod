@@ -1,0 +1,29 @@
+{
+  "protocol": "bod-execution/v1",
+  "adapter_id": "adapter.future-runtime",
+  "adapter_version": "9.9.9",
+  "capability_id": "bod.future-runtime.v9",
+  "platform": "linux-x86_64",
+  "transport": "http",
+  "effect_class": "external_side_effect",
+  "operations": ["describe", "probe", "start", "inspect", "observe"],
+  "observe": "stream",
+  "capabilities": [
+    {
+      "name": "quantum_tool_router",
+      "level": "supported",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000
+    },
+    {
+      "name": "model_control",
+      "level": "future_level_name",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "reason": "新版本引入的诊断等级"
+    }
+  ],
+  "limitations": ["未知能力必须显示为不支持，不得空称成功"]
+}

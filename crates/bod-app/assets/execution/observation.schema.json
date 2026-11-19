@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bod.dev/schemas/bod-execution/v1/observation.schema.json",
+  "title": "bod-execution/v1 ObservationEnvelope",
+  "description": "观察信封：ACK/重放绑定 invocation + source_epoch + stream_id；ACK 只表示已持久接收。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invocation_id",
+    "source_epoch",
+    "stream_id",
+    "source_sequence",
+    "observed_at_ms",
+    "type",
+    "payload",
+    "origin"
+  ],
+  "properties": {
+    "invocation_id": { "type": "string", "minLength": 1 },
+    "source_epoch": { "type": "integer", "minimum": 1 },
+    "stream_id": { "type": "string", "minLength": 1 },
+    "source_sequence": { "type": "integer", "minimum": 1 },
+    "observed_at_ms": { "type": "integer", "minimum": 0 },
+    "type": {
+      "enum": [
+        "progress",
+        "question",
+        "permission_request",
+        "artifact",
+        "usage",
+        "log",
+        "state_change",
+        "final_result",
+        "error"
+      ]
+    },
+    "payload": { "type": "string" },
+    "origin": { "type": "string", "minLength": 1 }
+  }
+}

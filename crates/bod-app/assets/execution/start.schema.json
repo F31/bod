@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bod.dev/schemas/bod-execution/v1/start.schema.json",
+  "title": "bod-execution/v1 StartRequest",
+  "description": "start 请求：所有引用按授权解析，不能把任意 ref 解释为可读全公司；参数与 invocation_id 绑定。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "invocation_id",
+    "run_id",
+    "work_package_revision",
+    "attempt_id",
+    "binding_id",
+    "fencing_token",
+    "agent_ref",
+    "runtime_config_revision",
+    "context_bundle_ref",
+    "workspace_ref",
+    "grant_ref",
+    "reservation_refs"
+  ],
+  "properties": {
+    "protocol": { "const": "bod-execution/v1" },
+    "invocation_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "work_package_revision": { "type": "string", "minLength": 1 },
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "binding_id": { "type": "string", "minLength": 1 },
+    "fencing_token": { "type": "integer", "minimum": 0 },
+    "agent_ref": { "type": "string", "minLength": 1 },
+    "runtime_config_revision": { "type": "string", "minLength": 1 },
+    "context_bundle_ref": { "type": "string", "minLength": 1 },
+    "workspace_ref": { "type": "string", "minLength": 1 },
+    "grant_ref": { "type": "string", "minLength": 1 },
+    "reservation_refs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "deadline_at_ms": { "type": ["integer", "null"] }
+  }
+}

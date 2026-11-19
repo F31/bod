@@ -1,10 +1,14 @@
 //! bod 宿主 CLI：P0 D0 阶段提供最小 headless 启动与配置 schema/explain 入口。
 //! HTTP 控制面与真实宿主启动在后续切片接入；当前不启动服务、不写运行时数据。
 
+use bod_app::adapter_conformance::{run_fake_suite, run_live_suite};
 use bod_app::config::{BodConfig, FIELD_DOCS};
+use bod_app::local_process::{default_adapter, descriptor_json};
 use bod_app::{explain, load_from_str, schema_text};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const USAGE: &str = "\
 用法:
@@ -13,8 +17,24 @@ const USAGE: &str = "\
   bod config explain               解释内置默认值、来源与语义
   bod config explain --file <p>    解释指定 TOML 文件的生效值与来源
   bod config validate --file <p>   仅校验配置文件是否符合 schema
+  bod adapter describe             输出本机真实适配器的描述符 JSON
+  bod adapter probe                分项探测本机执行端（不调用模型、不付费）
+  bod adapter conformance          运行 Fake + 本机真实适配器的 conformance 报告
   bod --help                       显示本帮助
 ";
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn adapter_or_err() -> Result<bod_app::local_process::LocalProcessAdapter, String> {
+    default_adapter(now_ms()).ok_or_else(|| {
+        "未找到本机可用运行时（尝试 python3 / python / node）；未就绪时不假装可用".to_string()
+    })
+}
 
 fn read_config_file(path: &str) -> Result<String, String> {
     fs::read_to_string(path).map_err(|err| format!("无法读取配置文件 {path}: {err}"))
@@ -45,6 +65,64 @@ fn run(args: &[String]) -> Result<String, String> {
                     loaded.overridden.len()
                 ))
             }
+        }
+        [cmd, sub] if cmd == "adapter" && sub == "describe" => {
+            let adapter = adapter_or_err()?;
+            Ok(format!("{}\n", descriptor_json(adapter.descriptor())))
+        }
+        [cmd, sub] if cmd == "adapter" && sub == "probe" => {
+            let adapter = adapter_or_err()?;
+            let report = adapter.probe(now_ms());
+            let version = adapter
+                .version_string()
+                .unwrap_or_else(|err| format!("未取得版本: {err}"));
+            let mut out = String::new();
+            let _ = writeln!(
+                out,
+                "适配器 {} v{}  运行时: {}",
+                report.adapter_id, report.adapter_version, version
+            );
+            for item in &report.items {
+                let _ = writeln!(
+                    out,
+                    "  {:<12} {:<11} {}（scope={}, observed_at={}）",
+                    item.aspect.as_str(),
+                    item.status.as_str(),
+                    item.reason,
+                    item.scope,
+                    item.observed_at_ms
+                );
+            }
+            let _ = writeln!(out, "整体结论: {}", report.overall().as_str());
+            if report.blocking_items().is_empty() {
+                let _ = writeln!(out, "阻塞项: 无（不适用项不阻塞，但也不代表已验证）");
+            } else {
+                let blocking: Vec<&str> = report
+                    .blocking_items()
+                    .iter()
+                    .map(|item| item.aspect.as_str())
+                    .collect();
+                let _ = writeln!(out, "阻塞项: {}", blocking.join(", "));
+            }
+            Ok(out)
+        }
+        [cmd, sub] if cmd == "adapter" && sub == "conformance" => {
+            let now = now_ms();
+            let fake = run_fake_suite(now);
+            let mut adapter = adapter_or_err()?;
+            let version = adapter
+                .version_string()
+                .unwrap_or_else(|err| format!("未取得版本: {err}"));
+            let live = run_live_suite(&mut adapter, now);
+            let mut out = String::new();
+            let _ = writeln!(
+                out,
+                "# Fake Executor（仅故障 conformance，不提供生产能力）\n"
+            );
+            out.push_str(&fake.to_markdown());
+            let _ = writeln!(out, "\n# 本机真实适配器（运行时 {version}）\n");
+            out.push_str(&live.to_markdown());
+            Ok(out)
         }
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }

@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bod.dev/schemas/bod-execution/v1/describe.schema.json",
+  "title": "bod-execution/v1 AdapterDescriptor",
+  "description": "宿主—执行端 describe 响应的最小契约。未知能力必须标 unsupported/unknown，不得空称成功。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "adapter_id",
+    "adapter_version",
+    "capability_id",
+    "platform",
+    "transport",
+    "effect_class",
+    "operations",
+    "observe",
+    "capabilities"
+  ],
+  "properties": {
+    "protocol": { "const": "bod-execution/v1" },
+    "adapter_id": { "type": "string", "minLength": 1 },
+    "adapter_version": { "type": "string", "minLength": 1 },
+    "capability_id": { "type": "string", "minLength": 1 },
+    "platform": { "type": "string", "minLength": 1 },
+    "transport": { "type": "string", "minLength": 1 },
+    "effect_class": {
+      "enum": ["read_only", "workspace_write", "process_execution", "external_side_effect"]
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/operation" }
+    },
+    "observe": { "$ref": "#/$defs/observe_transport" },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "dedup_retention_ms": { "type": ["integer", "null"], "minimum": 1 },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "operation": {
+      "enum": [
+        "describe",
+        "probe",
+        "start",
+        "inspect",
+        "observe",
+        "cancel",
+        "resume",
+        "reconcile",
+        "quota_windows",
+        "acknowledge",
+        "replay",
+        "input_response",
+        "permission_response",
+        "artifact_transfer",
+        "source_replay"
+      ]
+    },
+    "observe_transport": { "enum": ["stream", "poll", "stream+poll", "none"] },
+    "support_level": { "enum": ["supported", "unsupported", "unknown"] },
+    "evidence_source": {
+      "enum": ["self_declared", "platform_probe", "test_result", "manual_override"]
+    },
+    "evidence_level": {
+      "enum": [
+        "self_declared",
+        "configuration_checked",
+        "probe_verified",
+        "runtime_observed",
+        "independently_verified"
+      ]
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "level", "source", "evidence_level", "observed_at_ms"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "level": { "$ref": "#/$defs/support_level" },
+        "mode": { "type": "string", "minLength": 1 },
+        "source": { "$ref": "#/$defs/evidence_source" },
+        "evidence_level": { "$ref": "#/$defs/evidence_level" },
+        "observed_at_ms": { "type": "integer", "minimum": 0 },
+        "expires_at_ms": { "type": ["integer", "null"] },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "probe_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aspect", "status", "reason", "source", "scope", "observed_at_ms"],
+      "properties": {
+        "aspect": {
+          "enum": ["environment", "credentials", "model", "quota", "workspace", "network"]
+        },
+        "status": { "enum": ["ready", "not_ready", "unsupported", "unknown"] },
+        "reason": { "type": "string" },
+        "source": { "$ref": "#/$defs/evidence_source" },
+        "scope": { "type": "string" },
+        "observed_at_ms": { "type": "integer", "minimum": 0 },
+        "expires_at_ms": { "type": ["integer", "null"] }
+      }
+    }
+  }
+}

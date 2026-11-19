@@ -187,6 +187,17 @@ const MIGRATION_TABLES: &[(&str, &[&str])] = &[
             "usage_reports",
         ],
     ),
+    (
+        "004_execution.sql",
+        &[
+            "invocations",
+            "start_audits",
+            "observations",
+            "observation_cursors",
+            "adapter_capabilities",
+            "probe_results",
+        ],
+    ),
 ];
 
 fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str>, Vec<String>) {

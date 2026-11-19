@@ -14,5 +14,8 @@ bod-core = { path = "../bod-core" }
 # serde/toml 均已在 openspec/config.yaml §9 列为目标组件，不引入服务进程或运行时插件。
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
+# D4 任务 5.1：bod-execution/v1 描述符、Start 请求与观察信封是 JSON 契约，需要严格解析与未知字段拒绝。
+# serde_json 1.0.154 已在 openspec/config.yaml §9 组件清单中列为目标版本。
+serde_json = "1.0.154"
 # D0 任务 2.6：SQLite 持久化与 UnitOfWork。bundled 避免依赖系统 SQLite；不用 ORM/SQLx。
 rusqlite = { version = "0.43.0", features = ["bundled"] }

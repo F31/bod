@@ -1,0 +1,106 @@
+{
+  "protocol": "bod-execution/v1",
+  "adapter_id": "adapter.local-process",
+  "adapter_version": "1.0.0",
+  "capability_id": "bod.local-process.v1",
+  "platform": "windows-x86_64",
+  "transport": "stdio",
+  "effect_class": "process_execution",
+  "operations": [
+    "describe",
+    "probe",
+    "start",
+    "inspect",
+    "observe",
+    "cancel",
+    "reconcile"
+  ],
+  "observe": "poll",
+  "dedup_retention_ms": null,
+  "capabilities": [
+    {
+      "name": "model_control",
+      "level": "unsupported",
+      "mode": "opaque",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "本机进程内模型由外部程序自行选择，宿主不控制路由或提示词"
+    },
+    {
+      "name": "tool_control",
+      "level": "unsupported",
+      "mode": "opaque",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "工具调用发生在子进程内部，宿主只看得到 stdout/stderr"
+    },
+    {
+      "name": "workspace_isolation",
+      "level": "unsupported",
+      "mode": "none",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "只设置独立工作目录，不做文件系统隔离或沙箱"
+    },
+    {
+      "name": "metering",
+      "level": "unsupported",
+      "mode": "none",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "本地进程不提供用量口径，宿主只记录墙钟时长"
+    },
+    {
+      "name": "cancellation",
+      "level": "supported",
+      "mode": "process_tree",
+      "source": "test_result",
+      "evidence_level": "runtime_observed",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "宿主终止进程树并以 wait 状态确认停止"
+    },
+    {
+      "name": "recovery",
+      "level": "unsupported",
+      "mode": "none",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "子进程无会话恢复语义，重启只能重新派发"
+    },
+    {
+      "name": "external_idempotency",
+      "level": "unsupported",
+      "mode": "none",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "任意脚本没有持久去重，重发可能重复副作用"
+    },
+    {
+      "name": "reliable_observation",
+      "level": "unsupported",
+      "mode": "poll",
+      "source": "self_declared",
+      "evidence_level": "self_declared",
+      "observed_at_ms": 1763500000000,
+      "expires_at_ms": null,
+      "reason": "轮询 stdout/stderr 无法回放，宿主重启期间可能丢事件"
+    }
+  ],
+  "limitations": [
+    "不提供配额窗口与可靠 ACK；--version 之外不探测模型凭据",
+    "退出码只表示进程结果，验收另走 D5"
+  ]
+}
