@@ -14,6 +14,7 @@ pub mod cas;
 pub mod claim_concurrency;
 pub mod cleanup_recovery;
 pub mod config;
+pub mod context_handoff;
 pub mod control_api;
 pub mod descriptor_schema;
 pub mod effect_recovery;

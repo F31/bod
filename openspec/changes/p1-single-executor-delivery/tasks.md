@@ -17,11 +17,16 @@
 
 ## 2. Context 与 Profile
 
-- [ ] 2.1 实现 ContextBundle 清单与确定装配，覆盖 spec/profile/skill/preference/input/adapter/runtime/assembly 版本与 omitted_refs，验证 `bod-app::context_handoff` 的 `invariant_i_17`：相同输入生成相同清单与摘要。
-- [ ] 2.2 实现按 revision/digest 的不可变片段缓存与权限复核，验证撤权后缓存命中被拒绝并重新装配（G-48 的同类断言）。
-- [ ] 2.3 实现指令优先级与冲突检测，外部网页/Issue/工具输出标不可信，验证工具输出要求改验收时形成 Question 且原验收不变。
-- [ ] 2.4 实现会话复用条件与角色变更重置，验证同一 Agent 跨两个项目的会话、工作区与密钥分离（`invariant_i_36`）。
-- [ ] 2.5 记录上下文装配与缓存失效说明到 `docs/spec-notes/p1-context.md`，验证其中每个缓存对象与失效条件可追溯到本 Change 的 requirement。
+- [x] 2.1 实现 ContextBundle 清单与确定装配，覆盖 spec/profile/skill/preference/input/adapter/runtime/assembly 版本与 omitted_refs，验证 `bod-app::context_handoff` 的 `invariant_i_17`：相同输入生成相同清单与摘要。
+  - 证据（2026-11-19，`cargo test -p bod-app context_handoff` → 12 passed）：`assemble` 冻结 spec/profile 修订、三类引用（`kind:id@revision#sha256:…`）、adapter 版本、`runtime_config_hash`、常量 `assembly_version=ctx-assembly/1`、`omitted_refs`、密钥引用、验收与 Question。`invariant_i_17_same_input_replays_identical_manifest` 断言重复装配得到 `PartialEq` 相等结构、相同 `digest()` 与 `manifest_text()`；把三类引用全部 reverse 后摘要不变（排序去重生效）；`profile_revision` 改一版即换 `context_bundle_id`。`assembly_rejects_mutable_revisions_and_empty_fields` 证明 `latest` 被 `MutableRevision` 拒绝、空 `attempt_id` 与越界权限快照分别报 `EmptyField`/`UnscopedPermission`。清单字段与派生规则见 `docs/spec-notes/p1-context.md` §2。
+- [x] 2.2 实现按 revision/digest 的不可变片段缓存与权限复核，验证撤权后缓存命中被拒绝并重新装配（G-48 的同类断言）。
+  - 证据：`FragmentCache` 键为 `kind:id@revision#digest`，`insert` 要求 `sha256(body)` 等于引用摘要，否则 `ContentDigestMismatch` 且不落条目（`cache_requires_matching_content_digest_and_new_keys_on_change`）；换内容必须换 digest，旧键保留、新键独立（`len == 2`），不覆盖旧内容。`permission_revocation_rejects_cache_hit_and_reassembles`：同权限命中并返回正文；`without_project` 撤权后 `lookup` 返回 `PermissionChanged`（不返回旧正文），重新装配时该引用进入 `omitted_refs`（`not_permitted`），清单摘要随权限变化。`cache_rejects_cross_company_reads` 覆盖跨 Company 拒绝。G-48 只覆盖隔离/撤权/清空，**容量与热点回源未实现**，故在 `verification/gates.yaml` 登记为 `unverified` 而非 implemented。
+- [x] 2.3 实现指令优先级与冲突检测，外部网页/Issue/工具输出标不可信，验证工具输出要求改验收时形成 Question 且原验收不变。
+  - 证据：层级固定为 `user_goal_and_acceptance > project_authorization > profile > preference > external_material`；`Instruction` 字段私有，外部来源只能经 `Instruction::external` 构造，非外部 `OriginKind` 报 `ExternalOriginRequired`，因此无法伪造 `Trusted`（`external_sources_are_untrusted_by_construction` 逐类断言 WebPage/IssueBody/ToolOutput/Feedback）。`instruction_priority_requires_question_not_silent_override` 三段：工具输出 → `acceptance` 与输入逐字相等、`applied` 为空、`RejectionReason::UntrustedSource` + 1 条 `trust=untrusted` 的 Question（`subject` 含工具名、`status=pending`）；项目规则 → `LowerPriorityLayer` + Question，验收仍不变；用户目标 → 追加一条验收、无 Question。`Constraint` 键本切片只标 `UnsupportedKey` 拒绝，留给 P2，不假装已协调。
+- [x] 2.4 实现会话复用条件与角色变更重置，验证同一 Agent 跨两个项目的会话、工作区与密钥分离（`invariant_i_36`）。
+  - 证据：`SessionRegistry` 按 `(agent, company, project)` 分区，复用要求 Company/Project/输入修订/Profile 修订/角色集/权限摘要/工作区/清单全同，否则按 `RoleChanged`/`ProfileChanged`/`AuthorizationChanged` 等新建并记录 `ResetEvent`（`from_session → to_session + reason`），被替换会话进入 `retired()` 且 `closed` 标原因。`session_reuse_requires_same_scope_and_role_change_resets` 断言同请求第二次为 `Reuse` 且 attempts 累积、换角色为 `New(RoleChanged)` 且 `reset_log` 可核对。`invariant_i_36_...` 断言两个项目的 session id、workspace id、ContextBundle id、`secret_namespace()` 两两不同，项目 B 的 attempts 不含项目 A 的 Attempt（历史不串用）。工作区由 `workspace_safety` 创建，本模块只校验对应关系，不宣称强隔离。
+- [x] 2.5 记录上下文装配与缓存失效说明到 `docs/spec-notes/p1-context.md`，验证其中每个缓存对象与失效条件可追溯到本 Change 的 requirement。
+  - 证据：文档 §3 以表格逐行给出唯一缓存对象 `CachedFragment` 的键、命中前三项复核（Company/Project/权限摘要）与三种拒绝条件，并标注追溯来源（`不可变修订复用` 场景「撤权后命中旧缓存」、G-48 同类断言）；§2 列出清单字段来源与排序规则，§4/§5 给出优先级与会话重置换算，§7 明列 5 项未覆盖（容量/热点回源、落表与重启查询、真实 Agent 接入、强隔离、Constraint 键协调），§8 给出 12 个用例与任务的对应表。
 
 ## 3. 讨论与澄清
 

@@ -100,6 +100,14 @@
   status: implemented
   evidence: cargo test -p bod-app authorization
   note: ""
+- id: I-17
+  kind: invariant
+  requirement: Attempt 固定 Profile、输入、偏好与装配版本
+  module: bod-app::context_handoff
+  tests: bod-app::context_handoff::tests::invariant_i_17_same_input_replays_identical_manifest
+  status: implemented
+  evidence: cargo test -p bod-app context_handoff
+  note: 装配为内存值类型 + 只读装配，未落 workspaces/context_bundles 表（4.x 直派闭环再落库）；清单摘要由规范化正文派生，省略项与引用按稳定键排序，声明顺序不影响摘要
 - id: I-26
   kind: invariant
   requirement: 控制面常规协调不依赖协调 Agent 在线或模型返回
@@ -116,6 +124,14 @@
   status: implemented
   evidence: cargo test -p bod-app resource_state
   note: ""
+- id: I-36
+  kind: invariant
+  requirement: 跨项目 Agent 复用不复用未授权会话、凭据和上下文
+  module: bod-app::context_handoff
+  tests: bod-app::context_handoff::tests::invariant_i_36_cross_project_agent_does_not_share_session_workspace_or_context
+  status: implemented
+  evidence: cargo test -p bod-app context_handoff
+  note: 会话按 (agent, company, project) 分区；工作区 id 由调用方（workspace_safety）提供，本模块只断言跨项目必不同与历史不串用，不创建 worktree
 - id: I-51
   kind: invariant
   requirement: 外部完成/回合结束不直接成为业务接受，自动接受必须有授权策略
@@ -212,6 +228,14 @@
   status: implemented
   evidence: cargo run -p bod -- smoke
   note: §39.14 登记为 bod-app::platform_smoke；P0 实现在 CLI crate 的 smoke 模块，未在 bod-app 建同名模块
+- id: G-11
+  kind: gate
+  requirement: Profile 与上下文 conformance
+  module: bod-app::context_handoff
+  tests: bod-app::context_handoff::tests::g_11_profile_and_context_conformance
+  status: implemented
+  evidence: cargo test -p bod-app context_handoff
+  note: 覆盖 Profile/规格修订固定、引用摘要完整、撤权后引用转 omitted_refs 且原因可解释；指令优先级（reconcile）与缓存撤权（FragmentCache）断言在同模块其余用例中补充，未单列 G-11 子用例
 - id: G-17
   kind: gate
   requirement: 执行端 conformance（重复 start、回包丢失、乱序、取消与确认分离等）
@@ -260,6 +284,13 @@
   status: implemented
   evidence: cargo test -p bod-app budget_admission
   note: ""
+- id: G-48
+  kind: gate
+  requirement: 缓存隔离/撤权/清空/容量与热点回源
+  module: bod-app::context_handoff
+  status: unverified
+  evidence: cargo test -p bod-app context_handoff
+  note: 本切片只覆盖隔离（跨 Company/Project 拒绝命中）、撤权（权限摘要变化即拒绝）与清空；容量上限与热点回源未实现，按未验证登记，不判通过
 - id: G-49
   kind: gate
   requirement: 迁移 lint/旧库升级/高风险例外/恢复
