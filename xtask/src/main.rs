@@ -2,7 +2,7 @@
 //!
 //! 当前实现：
 //! - `verify --stage P0`：G-1 依赖方向守卫 + AGENTS.md 存在性校验。
-//! - `migration-check`：D0 占位（迁移脚本尚未生成，明确报告占位而非假装通过）。
+//! - `migration-check`：校验 D1 初始迁移含全部必需表且不含破坏性 DDL。
 //! - `--self-test`：违例注入测试，证明守卫确实能阻断违例（不是永远返回通过）。
 //!
 //! 守卫规则来自 V2.9.6 §37.2 与 P0 design 决策 11：
@@ -158,10 +158,67 @@ fn verify_stage_p0(root: &Path) -> bool {
     ok
 }
 
-fn migration_check(_root: &Path) -> bool {
-    // D0 阶段尚无迁移脚本；如实报告占位，不把“无迁移”当成“检查通过”。
-    println!("[migration-check] PLACEHOLDER 迁移脚本在 D1 任务 2.6 生成后启用真实检查");
-    true
+const REQUIRED_D1_TABLES: &[&str] = &[
+    "events",
+    "issues",
+    "work_package_revisions",
+    "runs",
+    "attempts",
+    "leases",
+    "members",
+    "grants",
+    "config_revisions",
+];
+
+fn inspect_migration(sql: &str) -> (Vec<&'static str>, Vec<String>) {
+    let missing: Vec<&'static str> = REQUIRED_D1_TABLES
+        .iter()
+        .copied()
+        .filter(|table| !sql.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")))
+        .collect();
+    let destructive: Vec<String> = sql
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            let upper = line.to_ascii_uppercase();
+            upper.starts_with("DROP ") || upper.starts_with("DELETE ")
+        })
+        .map(str::to_string)
+        .collect();
+    (missing, destructive)
+}
+
+/// D1 任务 2.6：真实检查初始迁移脚本，不再返回占位。
+fn migration_check(root: &Path) -> bool {
+    let path = root.join("crates/bod-app/migrations/001_initial.sql");
+    let sql = match fs::read_to_string(&path) {
+        Ok(sql) => sql,
+        Err(_) => {
+            println!("[migration-check] FAIL 缺少初始迁移脚本 001_initial.sql");
+            return false;
+        }
+    };
+
+    let (missing, destructive) = inspect_migration(&sql);
+
+    if missing.is_empty() && destructive.is_empty() {
+        println!(
+            "[migration-check] PASS 初始迁移含 {} 张必需表且无破坏性 DDL",
+            REQUIRED_D1_TABLES.len()
+        );
+        true
+    } else {
+        if !missing.is_empty() {
+            println!("[migration-check] FAIL 缺少表: {}", missing.join(", "));
+        }
+        if !destructive.is_empty() {
+            println!(
+                "[migration-check] FAIL 初始迁移含破坏性语句: {}",
+                destructive.join(" | ")
+            );
+        }
+        false
+    }
 }
 
 /// 违例注入自测：证明 check_manifest 确实能阻断违例，而非恒真。
@@ -198,7 +255,7 @@ serde = "1"
 fn print_help() {
     println!("usage: xtask <command> [options]");
     println!("  verify --stage P0   G-1 依赖方向与 AGENTS.md 声明校验");
-    println!("  migration-check     迁移脚本检查（D1 前为占位）");
+    println!("  migration-check     初始迁移表覆盖与破坏性 DDL 检查");
     println!("  --self-test         违例注入自测");
 }
 
@@ -274,5 +331,36 @@ proptest = "1"
     #[test]
     fn self_test_passes() {
         assert!(self_test());
+    }
+
+    #[test]
+    fn migration_inspector_accepts_clean_script() {
+        let mut sql = String::new();
+        for table in REQUIRED_D1_TABLES {
+            sql.push_str(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY);\n"
+            ));
+        }
+        let (missing, destructive) = inspect_migration(&sql);
+        assert!(missing.is_empty());
+        assert!(destructive.is_empty());
+    }
+
+    #[test]
+    fn migration_inspector_detects_missing_table_and_destructive_ddl() {
+        let sql = "CREATE TABLE IF NOT EXISTS events (id TEXT);\nDROP TABLE issues;\n";
+        let (missing, destructive) = inspect_migration(sql);
+        assert!(missing.contains(&"issues"));
+        assert_eq!(destructive, vec!["DROP TABLE issues;".to_string()]);
+    }
+
+    #[test]
+    fn repository_migration_passes() {
+        let root = workspace_root();
+        let path = root.join("crates/bod-app/migrations/001_initial.sql");
+        let sql = fs::read_to_string(path).expect("迁移脚本应存在");
+        let (missing, destructive) = inspect_migration(&sql);
+        assert!(missing.is_empty(), "缺少表: {missing:?}");
+        assert!(destructive.is_empty(), "含破坏性 DDL: {destructive:?}");
     }
 }

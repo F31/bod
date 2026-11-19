@@ -5,7 +5,10 @@
 
 pub use bod_core as domain;
 
+pub mod authorization;
 pub mod config;
+pub mod resource_state;
+pub mod store;
 
 pub use config::{
     BodConfig, ConfigError, LoadedConfig, explain, load_from_str, schema_text, validate_shape,

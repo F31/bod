@@ -11,13 +11,13 @@
 
 ## 2. D1 领域对象、权限与单写事务
 
-- [ ] 2.1 实现默认 Company、Project、Agent、Issue 的最小记录与直接指派（identity-access: 默认 Company 与归属、直接指派），验证 `bod-app::authorization` 中无 Team 配置可完成指派且 Coding Issue 缺项目/仓库上下文时被拒绝。
-- [ ] 2.2 实现权限交集与当前授权复核（identity-access: 权限交集与当前复核、执行反馈与主体身份分离），验证 `invariant_i_09`、`invariant_i_12` 覆盖撤权后拒绝、角色称号与 payload 自报不扩权。
-- [ ] 2.3 实现稳定拒绝原因码、审计字段与本地监听边界（identity-access: 拒绝可解释与审计、本地部署边界），验证每个拒绝含 actor/scope/修订/重新激活条件，且默认配置只绑定本地地址。
-- [ ] 2.4 实现资源外壳与状态机（resource-state: 资源身份与条件更新、期望与执行约定分离、条件与 phase 各司其职），验证 `bod-app::resource_state` 的 `invariant_i_27` 覆盖版本冲突、观察不改 generation、运行中拒绝改验收标准。
-- [ ] 2.5 实现状态写入所有权与稳定停止状态（resource-state: 状态写入所有权、正确停止状态），验证执行端自报不能写 Attempt 状态、AwaitingApproval/InsufficientBudget/ExternalOutcomeUnknown 不产生热重试、Succeeded 不重跑。
-- [ ] 2.6 实现初始 SQLite 迁移与 UnitOfWork（events、issues、work_package_revisions、runs、attempts、leases、members、grants、config_revisions），使用 WAL、BEGIN IMMEDIATE 与版本号条件更新，验证 `cargo run -p xtask -- migration-check` 通过且并发写测试中只有一个条件更新成功。
-- [ ] 2.7 记录 D1 的领域状态迁移与权限矩阵到 `docs/spec-notes/p0-resource-state.md`，验证文档中每个枚举与写入者都能追溯到本 Change 的对应 requirement 与测试 case。
+- [x] 2.1 实现默认 Company、Project、Agent、Issue 的最小记录与直接指派（identity-access: 默认 Company 与归属、直接指派），验证 `bod-app::authorization` 中无 Team 配置可完成指派且 Coding Issue 缺项目/仓库上下文时被拒绝。
+- [x] 2.2 实现权限交集与当前授权复核（identity-access: 权限交集与当前复核、执行反馈与主体身份分离），验证 `invariant_i_09`、`invariant_i_12` 覆盖撤权后拒绝、角色称号与 payload 自报不扩权。
+- [x] 2.3 实现稳定拒绝原因码、审计字段与本地监听边界（identity-access: 拒绝可解释与审计、本地部署边界），验证每个拒绝含 actor/scope/修订/重新激活条件，且默认配置只绑定本地地址。
+- [x] 2.4 实现资源外壳与状态机（resource-state: 资源身份与条件更新、期望与执行约定分离、条件与 phase 各司其职），验证 `bod-app::resource_state` 的 `invariant_i_27` 覆盖版本冲突、观察不改 generation、运行中拒绝改验收标准。
+- [x] 2.5 实现状态写入所有权与稳定停止状态（resource-state: 状态写入所有权、正确停止状态），验证执行端自报不能写 Attempt 状态、AwaitingApproval/InsufficientBudget/ExternalOutcomeUnknown 不产生热重试、Succeeded 不重跑。
+- [x] 2.6 实现初始 SQLite 迁移与 UnitOfWork（events、issues、work_package_revisions、runs、attempts、leases、members、grants、config_revisions），使用 WAL、BEGIN IMMEDIATE 与版本号条件更新，验证 `cargo run -p xtask -- migration-check` 通过且并发写测试中只有一个条件更新成功。
+- [x] 2.7 记录 D1 的领域状态迁移与权限矩阵到 `docs/spec-notes/p0-resource-state.md`，验证文档中每个枚举与写入者都能追溯到本 Change 的对应 requirement 与测试 case。
 
 ## 3. D2 唤醒回执、资源队列与 outbox
 
