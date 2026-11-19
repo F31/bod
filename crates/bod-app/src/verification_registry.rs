@@ -29,6 +29,10 @@ pub fn shipped_registry() -> &'static str {
 /// 路径指向归档目录：P0 于 2026-11-19 归档（`openspec archive`），Change 正文移到
 /// `openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/`。归档是单一来源，
 /// 不复制副本；若再次归档导致目录名变化，这里必须同步，否则编译期即失败（不会静默漏检）。
+///
+/// P1 期间仍只覆盖 P0 来源：新增的 G-29 会出现在 `unreferenced` 提示里（不判失败）。
+/// P1 出口（任务 5.3）把来源切到 `openspec/changes/p1-single-executor-delivery/` 时，
+/// 必须同时补齐 P1 引用的 I-10/I-17/I-26/I-36/I-55 与 G-11/G-15/G-16/G-51。
 pub const BINDING_SOURCES: &[(&str, &str)] = &[
     (
         "proposal",

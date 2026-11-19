@@ -37,6 +37,10 @@
   图标为占位、未断言页面渲染内容；Tauri 窗口只覆盖关窗与进程退出，未覆盖系统关机/崩溃路径；
   前端证据仅 headless 与窗口启动，不含页面 DOM 断言。详见 `docs/spec-notes/p0-desktop.md` §2.4 与
   `docs/spec-notes/p0-support-matrix.md`。
+- **当前推进**：P1 单执行者交付，切片 1「工作区与 Git 基线」已完成（任务 1.1—1.5）——
+  `bod-app::workspace_safety` 提供每 Attempt 独立 worktree/分支、`write_scope` diff 门禁、
+  共享资源（migration/API/公共类型等）登记与合并门禁、脏现场保留登记、端口与目录隔离；
+  G-29 已登记为 implemented。P1 的 Context/澄清/直派/工作台切片尚未开始。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

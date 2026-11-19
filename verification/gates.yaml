@@ -1,4 +1,5 @@
-# P0 最小可信核心 —— I/G 验证索引（G-50）
+# 最小可信核心 —— I/G 验证索引（G-50）
+# P0 条目来自已归档的 p0-minimal-trusted-core；P1 起按切片追加（G-29 为首条）。
 #
 # 本文件是 G-50 的机器可读索引：每条绑定给出不变量/门禁的权威语义、实现模块、
 # 承载断言的测试路径与当前状态。`bod verify-index` 与
@@ -235,6 +236,14 @@
   status: implemented
   evidence: cargo test -p bod-app control_api
   note: ""
+- id: G-29
+  kind: gate
+  requirement: 并行 Attempt 不共用暂存区，也不读取对方未提交内容
+  module: bod-app::workspace_safety
+  tests: bod-app::workspace_safety::tests::g_29_parallel_attempts_use_separate_indexes
+  status: implemented
+  evidence: cargo test -p bod-app workspace_safety
+  note: "P1 任务 1.1 的验收口径（config §39 未展开 G-28 之后的逐条语义，故按 tasks.md 原文登记，不代写方案文档措辞）；worktree 只算协作隔离，强隔离不在本门禁内（§20.10）"
 - id: G-44
   kind: gate
   requirement: 唤醒并发/新代数/去重窗口/崩溃恢复

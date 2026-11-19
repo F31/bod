@@ -31,6 +31,7 @@ pub mod resource_state;
 pub mod store;
 pub mod verification_registry;
 pub mod wakeup;
+pub mod workspace_safety;
 
 pub use config::{
     BodConfig, ConfigError, LoadedConfig, explain, load_from_str, schema_text, validate_shape,
