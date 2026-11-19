@@ -6,9 +6,13 @@
 pub use bod_core as domain;
 
 pub mod authorization;
+pub mod backoff;
+pub mod claim_concurrency;
 pub mod config;
+pub mod effect_recovery;
 pub mod resource_state;
 pub mod store;
+pub mod wakeup;
 
 pub use config::{
     BodConfig, ConfigError, LoadedConfig, explain, load_from_str, schema_text, validate_shape,

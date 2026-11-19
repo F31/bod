@@ -21,11 +21,11 @@
 
 ## 3. D2 唤醒回执、资源队列与 outbox
 
-- [ ] 3.1 实现 wake_receipts 逻辑键去重与保留窗口（coordination-loop: 唤醒回执去重），验证 `bod-app::wakeup` 的 `invariant_i_68`、`invariant_i_69` 覆盖重复命令返回原回执、同键异参拒绝、定时 occurrence 不伪装重试。
-- [ ] 3.2 实现 work_queue 的 wanted/claimed/completed_generation 与运行中新增不丢失（coordination-loop: 运行中新工作不丢失），验证 `invariant_i_70` 在执行中注入新唤醒后仍处理新增代数且不创建第二个消费者。
-- [ ] 3.3 实现原子认领、lease_token 与 fencing（coordination-loop: 原子认领与租约；effect-gate: 取消确认与 fencing），验证 `bod-app::claim_concurrency` 的 `invariant_i_01`—`invariant_i_03` 与 G-2：并发认领唯一成功、旧 token 被拒绝、同逻辑键重试返回原租约。
-- [ ] 3.4 实现提交后 outbox 派发与重启恢复（coordination-loop: 重启恢复；effect-gate: 提交后派发），验证 `bod-app::effect_recovery` 的 `invariant_i_04`、`invariant_i_11` 覆盖提交后崩溃、重放不触发副作用、先 inspect/reconcile 再派发。
-- [ ] 3.5 实现有界退避、稳定 Blocked 与 dead 状态及队列观测指标（coordination-loop: 稳定等待与有界退避、队列可观测），验证故障注入中权限/预算阻塞无热重试、超预算转 dead 且 doctor 能列出队列深度与最老未处理时间。
+- [x] 3.1 实现 wake_receipts 逻辑键去重与保留窗口（coordination-loop: 唤醒回执去重），验证 `bod-app::wakeup` 的 `invariant_i_68`、`invariant_i_69` 覆盖重复命令返回原回执、同键异参拒绝、定时 occurrence 不伪装重试。
+- [x] 3.2 实现 work_queue 的 wanted/claimed/completed_generation 与运行中新增不丢失（coordination-loop: 运行中新工作不丢失），验证 `invariant_i_70` 在执行中注入新唤醒后仍处理新增代数且不创建第二个消费者。
+- [x] 3.3 实现原子认领、lease_token 与 fencing（coordination-loop: 原子认领与租约；effect-gate: 取消确认与 fencing），验证 `bod-app::claim_concurrency` 的 `invariant_i_01`—`invariant_i_03` 与 G-2：并发认领唯一成功、旧 token 被拒绝、同逻辑键重试返回原租约。
+- [x] 3.4 实现提交后 outbox 派发与重启恢复（coordination-loop: 重启恢复；effect-gate: 提交后派发），验证 `bod-app::effect_recovery` 的 `invariant_i_04`、`invariant_i_11` 覆盖提交后崩溃、重放不触发副作用、先 inspect/reconcile 再派发。
+- [x] 3.5 实现有界退避、稳定 Blocked 与 dead 状态及队列观测指标（coordination-loop: 稳定等待与有界退避、队列可观测），验证故障注入中权限/预算阻塞无热重试、超预算转 dead 且 doctor 能列出队列深度与最老未处理时间。
 
 ## 4. D3 预算准入与不可变账本
 

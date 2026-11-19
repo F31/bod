@@ -4,9 +4,11 @@
 //! D1 起承载领域对象、授权交集、资源外壳与状态机规则。
 
 pub mod model;
+pub mod queue;
 pub mod rules;
 
 pub use model::*;
+pub use queue::*;
 
 /// 领域稳定标识的基类型。具体 ID 在 D1 按资源类型细化。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

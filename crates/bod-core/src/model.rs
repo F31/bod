@@ -245,7 +245,7 @@ pub enum DomainError {
     ScopeMismatch,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DenialReason {
     InsufficientPermission,
     MissingProjectContext,
@@ -254,6 +254,10 @@ pub enum DenialReason {
     ImmutableDuringRun,
     WrongWriter,
     ScopeMismatch,
+    /// 预算不足：稳定阻塞，不得周期性热重试（§9.12、D2）。
+    InsufficientBudget,
+    /// 外部动作结果未知：冻结盲重试，先对账（§10.4、D2）。
+    ExternalOutcomeUnknown,
 }
 
 /// 稳定拒绝原因 + 审计字段：实际主体、依据修订、重新激活条件。

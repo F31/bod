@@ -5,13 +5,14 @@
 
 ## 当前切片
 
-- **阶段**：P0 最小可信核心，D0 + D1 已完成（任务 1.1—1.4、2.1—2.7）。
+- **阶段**：P0 最小可信核心，D0 + D1 + D2 已完成（任务 1.1—1.4、2.1—2.7、3.1—3.5）。
 - **已落地**：五 crate workspace（`bod-core` / `bod-app` / `bod` / `bod-desktop` / `xtask`）、
   最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录、
   §37.14 配置 schema 与 `config explain` / `config validate`（保留来源与语义）、
-  D1 领域对象/权限交集/资源状态机、SQLite WAL 初始迁移与 BEGIN IMMEDIATE 单写 UnitOfWork。
-- **未落地**：队列/outbox（D2）、
-  预算（D3）、执行适配（D4）、成果接受（D5）、恢复清理（D6）、桌面连接原型（8.1）。
+  D1 领域对象/权限交集/资源状态机、SQLite WAL 初始迁移与 BEGIN IMMEDIATE 单写 UnitOfWork、
+  D2 持久 wake_receipts/work_queue/outbox（唤醒去重、代数合并、原子认领/fencing、
+  提交后派发与重启对账、有界退避/dead/doctor 指标），UnitOfWork 错误路径自动回滚。
+- **未落地**：预算（D3）、执行适配（D4）、成果接受（D5）、恢复清理（D6）、桌面连接原型（8.1）。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

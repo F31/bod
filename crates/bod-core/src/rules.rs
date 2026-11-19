@@ -19,6 +19,12 @@ fn denial(reason: DenialReason, actor: &DomainId, scope: &Scope, revision: Optio
         }
         DenialReason::WrongWriter => "由该数据类别的主写入者提交命令".to_string(),
         DenialReason::ScopeMismatch => "按 invocation 实际绑定 scope 重新提交".to_string(),
+        DenialReason::InsufficientBudget => {
+            "等待预算补充或显式提高限额后重新唤醒，不自动重试".to_string()
+        }
+        DenialReason::ExternalOutcomeUnknown => {
+            "先 inspect/reconcile 外部 invocation 与费用，确认后再决定下一步".to_string()
+        }
     };
     Denial {
         reason,
