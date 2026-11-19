@@ -5,6 +5,12 @@
 //! 不在事务内执行网络、Agent 或人工等待。
 
 use crate::config::BodConfig;
+use crate::domain::artifact::{
+    AcceptanceBinding, AcceptanceDecision, AcceptanceRecord, Artifact, ArtifactKind,
+    ArtifactRevision, ArtifactVisibility, DependencyKind, Digest, DigestAlgorithm,
+    RevisionDependency, StorageRef, VerificationRecord, VerificationState, Waiver,
+    WorkPackageState,
+};
 use crate::domain::budget::{
     BudgetLimit, BudgetScopeKind, BudgetUsage, Dimension, LedgerEntry, LedgerEntryKind, Measure,
     Reservation, ReservationState,
@@ -13,7 +19,10 @@ use crate::domain::execution::{
     AdapterDescriptor, EvidenceLevel, EvidenceSource, ExecutionState, InvocationRecord, MatrixRow,
     ObservationCursor, ObservationEnvelope, ObservationType, ProbeReport, SupportLevel,
 };
-use crate::domain::model::{AcceptanceCriteria, Grant, Issue, IssueKind, OwnerKind, Permission};
+use crate::domain::model::{
+    AcceptanceCriteria, Assignment, Grant, Issue, IssueKind, IssueSpec, Owner, OwnerKind,
+    Permission, Phase, RepositoryContext, ResourceMeta, ResourceStatus, Scope,
+};
 use crate::domain::queue::{EffectStatus, OutboxDelivery, QueueState, WakeReceipt, WorkQueueEntry};
 use crate::domain::{DenialReason, DomainId, Version};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -22,12 +31,13 @@ use std::fs;
 use std::path::Path;
 
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
-/// 004 为 D4 执行协议；新增迁移只能追加，不可原地改写。
+/// 004 为 D4 执行协议，005 为 D5 成果/修订/接受；新增迁移只能追加，不可原地改写。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_queue.sql"),
     include_str!("../migrations/003_budget.sql"),
     include_str!("../migrations/004_execution.sql"),
+    include_str!("../migrations/005_artifacts.sql"),
 ];
 
 #[derive(Debug)]
@@ -491,6 +501,91 @@ impl<'a> UnitOfWork<'a> {
             ],
         )?;
         Ok(())
+    }
+
+    /// 读取 Issue 的完整投影；只读路径不得因此触发任何派发。
+    pub fn get_issue(&self, uid: &str) -> Result<Option<Issue>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT company_id, project_id, kind, repo_provider, repo_id, title, acceptance,
+                        owner_id, owner_kind, assignment_grant_revision, resource_version,
+                        generation, observed_generation, phase
+                 FROM issues WHERE uid = ?1",
+                params![uid],
+                |row| {
+                    let company_id = DomainId::new(row.get::<_, String>(0)?);
+                    let project_id = row.get::<_, Option<String>>(1)?.map(DomainId::new);
+                    let kind = match row.get::<_, String>(2)?.as_str() {
+                        "Coding" => IssueKind::Coding,
+                        _ => IssueKind::General,
+                    };
+                    let provider: Option<String> = row.get(3)?;
+                    let repository_id: Option<String> = row.get(4)?;
+                    let repository = match (provider, repository_id) {
+                        (Some(provider), Some(repository_id)) => Some(RepositoryContext {
+                            provider,
+                            repository_id,
+                        }),
+                        _ => None,
+                    };
+                    let acceptance: String = row.get(6)?;
+                    let owner_id: Option<String> = row.get(7)?;
+                    let owner_kind: Option<String> = row.get(8)?;
+                    let grant_revision: Option<i64> = row.get(9)?;
+                    let assignment = match (owner_id, owner_kind) {
+                        (Some(owner_id), Some(owner_kind)) => Some(Assignment {
+                            owner: Owner {
+                                kind: if owner_kind == "User" {
+                                    OwnerKind::User
+                                } else {
+                                    OwnerKind::Agent
+                                },
+                                id: DomainId::new(owner_id),
+                            },
+                            scope: Scope {
+                                company_id: company_id.clone(),
+                                project_id: project_id.clone(),
+                                issue_id: Some(DomainId::new(uid.to_string())),
+                            },
+                            grant_revision: grant_revision.unwrap_or(0) as u64,
+                        }),
+                        _ => None,
+                    };
+                    let phase = match row.get::<_, String>(13)?.as_str() {
+                        "Running" => Phase::Running,
+                        "Blocked" => Phase::Blocked,
+                        "Succeeded" => Phase::Succeeded,
+                        "Cancelled" => Phase::Cancelled,
+                        _ => Phase::Pending,
+                    };
+                    Ok(Issue {
+                        meta: ResourceMeta {
+                            uid: DomainId::new(uid.to_string()),
+                            company_id,
+                            project_id,
+                            resource_version: Version(row.get::<_, i64>(10)? as u64),
+                            generation: row.get::<_, i64>(11)? as u64,
+                            deletion_requested_at: None,
+                        },
+                        kind,
+                        repository,
+                        spec: IssueSpec {
+                            title: row.get(5)?,
+                            assignment,
+                            acceptance: AcceptanceCriteria {
+                                criteria: split_acceptance(&acceptance),
+                            },
+                        },
+                        status: ResourceStatus {
+                            phase,
+                            observed_generation: row.get::<_, i64>(12)? as u64,
+                            conditions: Vec::new(),
+                        },
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
     }
 
     /// 条件更新：只有 resource_version 匹配才写入；返回当前版本以便调用方重试。
@@ -1545,6 +1640,470 @@ impl<'a> UnitOfWork<'a> {
         }
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // D5 成果、修订与接受（任务 6.1—6.4）
+    // -----------------------------------------------------------------------
+
+    pub fn insert_artifact(&self, artifact: &Artifact, now_ms: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO artifacts (
+                uid, company_id, project_id, kind, title, owner_id, visibility,
+                accepted_revision, resource_version, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                artifact.id.as_str(),
+                artifact.company_id.as_str(),
+                artifact.project_id.as_str(),
+                artifact.kind.as_str(),
+                artifact.title,
+                artifact.owner.as_str(),
+                artifact.visibility.as_str(),
+                artifact.accepted_revision.as_ref().map(DomainId::as_str),
+                1_i64,
+                now_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_artifact(&self, artifact_id: &str) -> Result<Option<Artifact>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT company_id, project_id, kind, title, owner_id, visibility, accepted_revision
+                 FROM artifacts WHERE uid = ?1",
+                params![artifact_id],
+                |row| {
+                    Ok(Artifact {
+                        id: DomainId::new(artifact_id.to_string()),
+                        company_id: DomainId::new(row.get::<_, String>(0)?),
+                        project_id: DomainId::new(row.get::<_, String>(1)?),
+                        kind: ArtifactKind::parse(&row.get::<_, String>(2)?),
+                        title: row.get(3)?,
+                        owner: DomainId::new(row.get::<_, String>(4)?),
+                        visibility: ArtifactVisibility::parse(&row.get::<_, String>(5)?),
+                        accepted_revision: row.get::<_, Option<String>>(6)?.map(DomainId::new),
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 接受指针的 compare-and-swap：只有当前指针仍等于 `expected` 才写入。
+    /// 返回 false 表示并发接受已发生，调用方必须要求重新读取而不是覆盖。
+    pub fn cas_accepted_revision(
+        &self,
+        artifact_id: &str,
+        expected: Option<&str>,
+        next_revision: &str,
+    ) -> Result<bool, StoreError> {
+        let rows = match expected {
+            Some(expected) => self.conn.execute(
+                "UPDATE artifacts SET accepted_revision = ?1, resource_version = resource_version + 1
+                 WHERE uid = ?2 AND accepted_revision = ?3",
+                params![next_revision, artifact_id, expected],
+            )?,
+            None => self.conn.execute(
+                "UPDATE artifacts SET accepted_revision = ?1, resource_version = resource_version + 1
+                 WHERE uid = ?2 AND accepted_revision IS NULL",
+                params![next_revision, artifact_id],
+            )?,
+        };
+        Ok(rows == 1)
+    }
+
+    pub fn insert_artifact_revision(
+        &self,
+        company_id: &str,
+        revision: &ArtifactRevision,
+    ) -> Result<(), StoreError> {
+        let (storage_kind, storage_ref) = match &revision.storage {
+            StorageRef::Cas(value) => ("cas", value.clone()),
+            StorageRef::External(value) => ("external", value.clone()),
+        };
+        self.conn.execute(
+            "INSERT INTO artifact_revisions (
+                revision_id, company_id, artifact_id, base_revision, storage_kind, storage_ref,
+                digest_algorithm, digest, size_bytes, mime, produced_by, source_note, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                revision.revision_id.as_str(),
+                company_id,
+                revision.artifact_id.as_str(),
+                revision.base_revision.as_ref().map(DomainId::as_str),
+                storage_kind,
+                storage_ref,
+                revision.digest.algorithm.as_str(),
+                revision.digest.value,
+                revision.size_bytes,
+                revision.mime,
+                revision.produced_by.as_str(),
+                revision.source_note,
+                revision.created_at_ms,
+            ],
+        )?;
+        for dependency in &revision.depends_on {
+            self.conn.execute(
+                "INSERT INTO artifact_dependencies (revision_id, depends_on_revision, kind)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    revision.revision_id.as_str(),
+                    dependency.revision_id.as_str(),
+                    dependency.kind.as_str(),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_artifact_revision(
+        &self,
+        revision_id: &str,
+    ) -> Result<Option<ArtifactRevision>, StoreError> {
+        let mut revision = self
+            .conn
+            .query_row(
+                "SELECT artifact_id, base_revision, storage_kind, storage_ref,
+                        digest_algorithm, digest, size_bytes, mime, produced_by, source_note,
+                        created_at_ms
+                 FROM artifact_revisions WHERE revision_id = ?1",
+                params![revision_id],
+                |row| {
+                    let storage_kind: String = row.get(2)?;
+                    let storage_ref: String = row.get(3)?;
+                    Ok(ArtifactRevision {
+                        revision_id: DomainId::new(revision_id.to_string()),
+                        artifact_id: DomainId::new(row.get::<_, String>(0)?),
+                        base_revision: row.get::<_, Option<String>>(1)?.map(DomainId::new),
+                        storage: if storage_kind == "external" {
+                            StorageRef::External(storage_ref)
+                        } else {
+                            StorageRef::Cas(storage_ref)
+                        },
+                        digest: Digest {
+                            algorithm: DigestAlgorithm::parse(&row.get::<_, String>(4)?)
+                                .unwrap_or(DigestAlgorithm::Sha256),
+                            value: row.get(5)?,
+                        },
+                        size_bytes: row.get(6)?,
+                        mime: row.get(7)?,
+                        produced_by: DomainId::new(row.get::<_, String>(8)?),
+                        source_note: row.get(9)?,
+                        depends_on: Vec::new(),
+                        created_at_ms: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        if let Some(found) = revision.as_mut() {
+            let mut stmt = self.conn.prepare(
+                "SELECT depends_on_revision, kind FROM artifact_dependencies WHERE revision_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![revision_id], |row| {
+                Ok(RevisionDependency {
+                    revision_id: DomainId::new(row.get::<_, String>(0)?),
+                    kind: DependencyKind::parse(&row.get::<_, String>(1)?),
+                })
+            })?;
+            found.depends_on = rows.collect::<Result<Vec<_>, _>>()?;
+        }
+        Ok(revision)
+    }
+
+    /// 供 GC 使用的引用集合：本地 CAS digest 与外部引用计数分开统计。
+    pub fn referenced_storage(&self, company_id: &str) -> Result<(Vec<String>, usize), StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT storage_kind, storage_ref FROM artifact_revisions WHERE company_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut cas = Vec::new();
+        let mut external = 0usize;
+        for row in rows {
+            let (kind, value) = row?;
+            if kind == "cas" {
+                cas.push(value);
+            } else {
+                external += 1;
+            }
+        }
+        Ok((cas, external))
+    }
+
+    pub fn insert_verification_record(
+        &self,
+        record_id: &str,
+        company_id: &str,
+        record: &VerificationRecord,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO verification_records (
+                record_id, company_id, revision_id, state, actor_id, reason, evidence_refs,
+                verification_rules, environment, observed_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                record_id,
+                company_id,
+                record.revision_id.as_str(),
+                record.state.as_str(),
+                record.actor.as_str(),
+                record.reason,
+                record.evidence_refs.join(ARRAY_SEP),
+                record.verification_rules.as_str(),
+                record.environment.as_str(),
+                record.observed_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 最新一条验证状态；按写入顺序取最后一条。
+    pub fn latest_verification(
+        &self,
+        revision_id: &str,
+    ) -> Result<Option<VerificationRecord>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT state, actor_id, reason, evidence_refs, verification_rules, environment,
+                        observed_at_ms
+                 FROM verification_records WHERE revision_id = ?1
+                 ORDER BY observed_at_ms DESC, rowid DESC LIMIT 1",
+                params![revision_id],
+                |row| {
+                    let state = VerificationState::parse(&row.get::<_, String>(0)?)
+                        .unwrap_or(VerificationState::Pending);
+                    let refs: String = row.get(3)?;
+                    Ok(VerificationRecord {
+                        revision_id: DomainId::new(revision_id.to_string()),
+                        state,
+                        actor: DomainId::new(row.get::<_, String>(1)?),
+                        reason: row.get(2)?,
+                        evidence_refs: split_list(&refs),
+                        verification_rules: DomainId::new(row.get::<_, String>(4)?),
+                        environment: DomainId::new(row.get::<_, String>(5)?),
+                        observed_at_ms: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    pub fn insert_waiver(
+        &self,
+        waiver_id: &str,
+        company_id: &str,
+        waiver: &Waiver,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO waivers (
+                waiver_id, company_id, revision_id, actor_id, reason,
+                scope_company, scope_project, scope_issue, granted_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                waiver_id,
+                company_id,
+                waiver.applies_to_revision.as_str(),
+                waiver.actor.as_str(),
+                waiver.reason,
+                waiver.scope.company_id.as_str(),
+                waiver.scope.project_id.as_ref().map(DomainId::as_str),
+                waiver.scope.issue_id.as_ref().map(DomainId::as_str),
+                waiver.granted_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_acceptance(
+        &self,
+        company_id: &str,
+        record: &AcceptanceRecord,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO acceptances (
+                acceptance_id, company_id, artifact_id, work_package_revision, input_baseline,
+                artifact_revision, verification_rules, target_environment, merge_combination,
+                decision, actor_id, reason, evidence_refs, accepted_at_ms, superseded_by
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                record.acceptance_id.as_str(),
+                company_id,
+                record.artifact_id.as_str(),
+                record.binding.work_package_revision.as_str(),
+                record.binding.input_baseline.as_str(),
+                record.binding.artifact_revision.as_str(),
+                record.binding.verification_rules.as_str(),
+                record.binding.target_environment.as_str(),
+                record
+                    .binding
+                    .merge_combination
+                    .as_ref()
+                    .map(DomainId::as_str),
+                record.decision.as_str(),
+                record.actor.as_str(),
+                record.reason,
+                record.evidence_refs.join(ARRAY_SEP),
+                record.accepted_at_ms,
+                record.superseded_by.as_ref().map(DomainId::as_str),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 新接受生效时把同一 Artifact 的**其他**旧接受标记为被取代（保留历史，不删除）。
+    pub fn supersede_acceptances(
+        &self,
+        artifact_id: &str,
+        superseded_by: &str,
+    ) -> Result<usize, StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE acceptances SET superseded_by = ?1
+             WHERE artifact_id = ?2 AND superseded_by IS NULL AND acceptance_id <> ?1",
+            params![superseded_by, artifact_id],
+        )?;
+        Ok(rows)
+    }
+
+    pub fn list_acceptances(&self, artifact_id: &str) -> Result<Vec<AcceptanceRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acceptance_id, work_package_revision, input_baseline, artifact_revision,
+                    verification_rules, target_environment, merge_combination, decision,
+                    actor_id, reason, evidence_refs, accepted_at_ms, superseded_by
+             FROM acceptances WHERE artifact_id = ?1 ORDER BY accepted_at_ms ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![artifact_id], |row| {
+            let decision = AcceptanceDecision::parse(&row.get::<_, String>(7)?)
+                .unwrap_or(AcceptanceDecision::RequiresHuman);
+            let evidence: String = row.get(10)?;
+            Ok(AcceptanceRecord {
+                acceptance_id: DomainId::new(row.get::<_, String>(0)?),
+                artifact_id: DomainId::new(artifact_id.to_string()),
+                binding: AcceptanceBinding {
+                    work_package_revision: DomainId::new(row.get::<_, String>(1)?),
+                    input_baseline: DomainId::new(row.get::<_, String>(2)?),
+                    artifact_revision: DomainId::new(row.get::<_, String>(3)?),
+                    verification_rules: DomainId::new(row.get::<_, String>(4)?),
+                    target_environment: DomainId::new(row.get::<_, String>(5)?),
+                    merge_combination: row.get::<_, Option<String>>(6)?.map(DomainId::new),
+                },
+                decision,
+                actor: DomainId::new(row.get::<_, String>(8)?),
+                reason: row.get(9)?,
+                evidence_refs: split_list(&evidence),
+                accepted_at_ms: row.get(11)?,
+                superseded_by: row.get::<_, Option<String>>(12)?.map(DomainId::new),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    pub fn insert_decision(
+        &self,
+        company_id: &str,
+        record: &crate::domain::artifact::DecisionRecord,
+    ) -> Result<(), StoreError> {
+        let revisions = record
+            .revision_refs
+            .iter()
+            .map(DomainId::as_str)
+            .collect::<Vec<_>>()
+            .join(ARRAY_SEP);
+        self.conn.execute(
+            "INSERT INTO decisions (
+                decision_id, company_id, actor_id, scope_company, scope_project, scope_issue,
+                decision, reason, evidence_refs, revision_refs, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                record.decision_id.as_str(),
+                company_id,
+                record.actor.as_str(),
+                record.scope.company_id.as_str(),
+                record.scope.project_id.as_ref().map(DomainId::as_str),
+                record.scope.issue_id.as_ref().map(DomainId::as_str),
+                record.decision,
+                record.reason,
+                record.evidence_refs.join(ARRAY_SEP),
+                revisions,
+                record.created_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_work_package_state(
+        &self,
+        company_id: &str,
+        issue_uid: &str,
+        state: &WorkPackageState,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO work_package_states (
+                company_id, issue_uid, revision_id, required, accepted_revision, running, blockers
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(issue_uid, revision_id) DO UPDATE SET
+                required = excluded.required,
+                accepted_revision = excluded.accepted_revision,
+                running = excluded.running,
+                blockers = excluded.blockers",
+            params![
+                company_id,
+                issue_uid,
+                state.revision.as_str(),
+                i64::from(u8::from(state.required)),
+                state.accepted_revision.as_ref().map(DomainId::as_str),
+                i64::from(u8::from(state.running)),
+                state.blockers.join(ARRAY_SEP),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_work_package_states(
+        &self,
+        issue_uid: &str,
+    ) -> Result<Vec<WorkPackageState>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT revision_id, required, accepted_revision, running, blockers
+             FROM work_package_states WHERE issue_uid = ?1 ORDER BY revision_id",
+        )?;
+        let rows = stmt.query_map(params![issue_uid], |row| {
+            let blockers: String = row.get(4)?;
+            Ok(WorkPackageState {
+                revision: DomainId::new(row.get::<_, String>(0)?),
+                required: row.get::<_, i64>(1)? == 1,
+                accepted_revision: row.get::<_, Option<String>>(2)?.map(DomainId::new),
+                running: row.get::<_, i64>(3)? == 1,
+                blockers: split_list(&blockers),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 某 Issue 的决策记录条数（供控制 API 与冒烟断言）。
+    pub fn count_decisions(&self, issue_uid: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM decisions WHERE scope_issue = ?1",
+                params![issue_uid],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+}
+
+/// 列表字段的稳定分隔符（与既有 acceptance 文本一致）。
+const ARRAY_SEP: &str = "\u{1f}";
+
+fn split_list(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        value.split(ARRAY_SEP).map(str::to_string).collect()
+    }
 }
 
 fn denial_reason_str(reason: DenialReason) -> &'static str {
@@ -1614,6 +2173,14 @@ fn acceptance_text(acceptance: &AcceptanceCriteria) -> String {
     acceptance.criteria.join("\u{1f}")
 }
 
+fn split_acceptance(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\u{1f}').map(str::to_string).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1679,8 +2246,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 22,
-            "应创建 9 张 D1 表 + 3 张 D2 队列表 + 4 张 D3 预算表 + 6 张 D4 执行协议表"
+            count, 32,
+            "应创建 9 张 D1 表 + 3 张 D2 队列表 + 4 张 D3 预算表 + 6 张 D4 执行协议表 + 10 张 D5 成果表"
         );
     }
 

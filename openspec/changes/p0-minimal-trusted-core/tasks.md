@@ -47,12 +47,12 @@
 
 ## 6. D5 成果修订、最小接受与控制 API
 
-- [ ] 6.1 实现 Artifact/Revision 与 CAS 临时文件→digest→原子转正→事务登记（artifact-acceptance: 不可变成果修订），验证 `bod-app::artifact_acceptance` 的 `invariant_i_07`：崩溃孤儿不被当有效成果、外部仓库对象不被 GC 删除。
-- [ ] 6.2 实现验证状态机与 Waived 语义（artifact-acceptance: 候选与验收分离），验证执行 Completed 后验收为 Pending、Waived 记录主体/理由/版本且不显示「测试已通过」。
-- [ ] 6.3 实现 Acceptance 绑定输入基线、工作包修订、产物修订、验证规则与目标环境，并拒绝实现者自批（artifact-acceptance: 接受绑定确定修订、不可隐式自批），验证 `invariant_i_08`、`invariant_i_51` 与 G-9：旧接受不能批准新产物、自报通过不改变接受主体。
-- [ ] 6.4 实现 Issue 多工作包完成条件与修订失败回路（artifact-acceptance: 多工作包完成条件、决策记录），验证部分工作包接受不完成 Issue、验收失败形成 NeedsRevision 与新 Attempt 且不覆盖历史约定。
-- [ ] 6.5 实现控制 API 的最小资源/命令入口、稳定错误码与 409 冲突语义，并保证只读查询不启动 Agent（resource-state: 资源身份与条件更新；identity-access: 执行反馈与主体身份分离），验证 `bod-app::authorization` 的 G-21：越权 403、版本冲突 409、只读请求零派发。
-- [ ] 6.6 用 Fake Executor 跑通一次从 Issue 指派到候选结果登记的最小 CLI 冒烟，验证全流程可在宿主重启后按 invocation 找回且没有把候选结果误标为 Accepted。
+- [x] 6.1 实现 Artifact/Revision 与 CAS 临时文件→digest→原子转正→事务登记（artifact-acceptance: 不可变成果修订），验证 `bod-app::artifact_acceptance` 的 `invariant_i_07`：崩溃孤儿不被当有效成果、外部仓库对象不被 GC 删除。
+- [x] 6.2 实现验证状态机与 Waived 语义（artifact-acceptance: 候选与验收分离），验证执行 Completed 后验收为 Pending、Waived 记录主体/理由/版本且不显示「测试已通过」。
+- [x] 6.3 实现 Acceptance 绑定输入基线、工作包修订、产物修订、验证规则与目标环境，并拒绝实现者自批（artifact-acceptance: 接受绑定确定修订、不可隐式自批），验证 `invariant_i_08`、`invariant_i_51` 与 G-9：旧接受不能批准新产物、自报通过不改变接受主体。
+- [x] 6.4 实现 Issue 多工作包完成条件与修订失败回路（artifact-acceptance: 多工作包完成条件、决策记录），验证部分工作包接受不完成 Issue、验收失败形成 NeedsRevision 与新 Attempt 且不覆盖历史约定。
+- [x] 6.5 实现控制 API 的最小资源/命令入口、稳定错误码与 409 冲突语义，并保证只读查询不启动 Agent（resource-state: 资源身份与条件更新；identity-access: 执行反馈与主体身份分离），验证 `bod-app::authorization` 的 G-21：越权 403、版本冲突 409、只读请求零派发。
+- [x] 6.6 用 Fake Executor 跑通一次从 Issue 指派到候选结果登记的最小 CLI 冒烟，验证全流程可在宿主重启后按 invocation 找回且没有把候选结果误标为 Accepted。
 
 ## 7. D6 恢复、doctor、清理与 P0 故障矩阵
 

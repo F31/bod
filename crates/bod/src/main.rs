@@ -10,6 +10,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod smoke;
+
 const USAGE: &str = "\
 用法:
   bod                              显示 headless 骨架信息
@@ -20,6 +22,8 @@ const USAGE: &str = "\
   bod adapter describe             输出本机真实适配器的描述符 JSON
   bod adapter probe                分项探测本机执行端（不调用模型、不付费）
   bod adapter conformance          运行 Fake + 本机真实适配器的 conformance 报告
+  bod smoke                        跑通指派→执行→候选登记→重启找回的最小冒烟
+  bod smoke --json                 同上，输出机器可读结果
   bod --help                       显示本帮助
 ";
 
@@ -65,6 +69,38 @@ fn run(args: &[String]) -> Result<String, String> {
                     loaded.overridden.len()
                 ))
             }
+        }
+        [cmd] if cmd == "smoke" => {
+            let report = smoke::run()?;
+            let mut out = String::new();
+            let _ = writeln!(out, "冒烟结果: {}", report.result);
+            let _ = writeln!(out, "  工作目录: {}", report.work_dir);
+            let _ = writeln!(
+                out,
+                "  Issue {} → invocation {} → execution {}",
+                report.issue, report.invocation, report.execution_id
+            );
+            let _ = writeln!(
+                out,
+                "  候选修订 {} 验收状态 {}（accepted={}）",
+                report.candidate_revision, report.verification_state, report.accepted
+            );
+            let _ = writeln!(
+                out,
+                "  重启找回: {}，只读派发次数: {}，资源版本 {} → {}",
+                report.restart_recovered,
+                report.read_only_dispatches,
+                report.resource_version_before,
+                report.resource_version_after
+            );
+            for note in &report.notes {
+                let _ = writeln!(out, "  - {note}");
+            }
+            Ok(out)
+        }
+        [cmd, flag] if cmd == "smoke" && flag == "--json" => {
+            let report = smoke::run()?;
+            Ok(format!("{}\n", report.to_json()))
         }
         [cmd, sub] if cmd == "adapter" && sub == "describe" => {
             let adapter = adapter_or_err()?;

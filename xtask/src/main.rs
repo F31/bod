@@ -198,6 +198,21 @@ const MIGRATION_TABLES: &[(&str, &[&str])] = &[
             "probe_results",
         ],
     ),
+    (
+        "005_artifacts.sql",
+        &[
+            "artifacts",
+            "artifact_revisions",
+            "artifact_dependencies",
+            "verification_records",
+            "waivers",
+            "acceptances",
+            "decisions",
+            "work_package_states",
+            "manifests",
+            "publications",
+        ],
+    ),
 ];
 
 fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str>, Vec<String>) {
