@@ -23,6 +23,7 @@ V2.9.6 把 P0 定义为「最小可信核心」（§40.1），出口证据是重
 
 ### New Capabilities
 
+- `configuration`: §37.14 部署配置的集中 schema、默认值来源、未知字段拒绝与 explain 语义（任务 1.2）。
 - `identity-access`: 本地单用户下 Company/Project/Agent/Issue 的身份、成员与项目授权、最小权限交集、直接指派与拒绝/审计语义。
 - `resource-state`: 资源外壳、期望与实际分离、版本/代数、状态机与写入所有权、删除请求与终态语义。
 - `coordination-loop`: 持久唤醒回执、资源队列代数与租约、确定性控制器推进、稳定停止状态、重启恢复与积压处理。

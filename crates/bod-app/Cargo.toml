@@ -10,3 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 bod-core = { path = "../bod-core" }
+# D0 任务 1.2：配置 schema 需要严格 TOML 解析与未知字段拒绝。
+# serde/toml 均已在 openspec/config.yaml §9 列为目标组件，不引入服务进程或运行时插件。
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.1"

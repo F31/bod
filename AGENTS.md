@@ -5,10 +5,11 @@
 
 ## 当前切片
 
-- **阶段**：P0 最小可信核心，D0 基线（任务 1.1 / 1.3 / 1.4）。
+- **阶段**：P0 最小可信核心，D0 基线（任务 1.1 / 1.2 / 1.3 / 1.4）。
 - **已落地**：五 crate workspace（`bod-core` / `bod-app` / `bod` / `bod-desktop` / `xtask`）、
-  最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录。
-- **未落地**：配置 schema/explain（1.2）、领域对象与单写事务（D1）、队列/outbox（D2）、
+  最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录、
+  §37.14 配置 schema 与 `config explain` / `config validate`（保留来源与语义）。
+- **未落地**：领域对象与单写事务（D1）、队列/outbox（D2）、
   预算（D3）、执行适配（D4）、成果接受（D5）、恢复清理（D6）、桌面连接原型（8.1）。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
@@ -25,7 +26,7 @@
 6. **禁止假测试报告**：planned 不等于通过；Unknown、跳过、过期报告如实记录，不把设计当证据。
 7. **禁止破坏依赖方向（G-1）**：`bod-core` 不依赖 DB/Web/Tauri/Agent SDK 或上层 crate；
    `bod-app` 不反向依赖 CLI/桌面壳。
-8. **禁止无证据引入重依赖**：新增默认依赖或一级对象须记录复杂度准入理由（§2.4）并锁定版本。
+8. **禁止无证据引入重依赖**：新增默认依赖或一级对象须记录复杂度准入理由（§2.4）并锁定版本。当前唯一新增依赖是 `serde`/`toml`（任务 1.2 配置 schema），理由与锁定版本见 `docs/spec-notes/p0-d0-config.md`；`bod-core` 仍保持零外部依赖。
 9. **禁止把 Fake Executor 当生产能力**：它只用于故障 conformance，不写入支持矩阵 Supported。
 
 ## 验证与完成规则

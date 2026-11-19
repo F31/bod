@@ -5,6 +5,12 @@
 
 pub use bod_core as domain;
 
+pub mod config;
+
+pub use config::{
+    BodConfig, ConfigError, LoadedConfig, explain, load_from_str, schema_text, validate_shape,
+};
+
 /// 应用层的稳定错误码前缀，供控制 API 与 CLI 统一映射。
 pub const ERROR_PREFIX: &str = "BOD";
 
