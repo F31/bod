@@ -23,7 +23,7 @@ P3 能让工作包在真实提交组合上被接受，但用户最终关心的�
 
 ### Modified Capabilities
 
-无。P0—P3 Change 尚未归档；本 Change 以新 capability 路径建立 P4 行为基线，不改写既有历史约定。
+无。截至 P0 归档（2026-11-19），现行 `openspec/specs/` 仅有 P0 的 9 个 capability；本 Change 的能力与之均不同名，全部以 ADDED 新增，不改写既有规格与历史约定。
 
 ## Impact
 

@@ -1,11 +1,12 @@
 # AGENTS.md — bod 仓库协作边界
 
-> 本文件是给 Coding Agent 的硬边界声明。当前切片与禁止行为由 P0 Change 的
-> `openspec/changes/p0-minimal-trusted-core/tasks.md` 驱动；修改本声明需同步该 Change。
+> 本文件是给 Coding Agent 的硬边界声明。P0 已归档（2026-11-19），现行能力规格在
+> `openspec/specs/`，P0 历史约定见 `openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/tasks.md`；
+> 后续切片由 `openspec/changes/` 下对应 Change 驱动。修改本声明需同步现行规格。
 
 ## 当前切片
 
-- **阶段**：P0 最小可信核心，D0—D7 全部完成（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.1—8.4）。
+- **阶段**：P0 最小可信核心，D0—D7 全部完成并**已归档**（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.1—8.4；44/44 勾选，`openspec archive` 于 2026-11-19 将 9 份 spec delta 的 57 条需求、66 个场景同步进 `openspec/specs/`）。
 - **已落地**：五 crate workspace（`bod-core` / `bod-app` / `bod` / `bod-desktop` / `xtask`）、
   最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录、
   §37.14 配置 schema 与 `config explain` / `config validate`（保留来源与语义）、
@@ -32,8 +33,10 @@
   P0 支持矩阵与已知限制、
   宿主控制面 `bod serve`（受保护握手/健康检查/授权停止，6 项单测 + 2 项真实子进程 e2e）、
   `apps/workbench` 前端工作台（TS + `node --test`，ci/typecheck/test/build 四项实测通过）。
-- **未落地**：Tauri 2 窗口本体（加入 tauri 依赖后本机 cargo 在 435 包图上持续停滞，已回退；
-  实测数据与恢复步骤见 `docs/spec-notes/p0-desktop.md` §2）。
+- **已知限制**（P0 归档时如实保留，未作为 Supported 承诺）：桌面壳 `bundle.active=false` 未打安装包、
+  图标为占位、未断言页面渲染内容；Tauri 窗口只覆盖关窗与进程退出，未覆盖系统关机/崩溃路径；
+  前端证据仅 headless 与窗口启动，不含页面 DOM 断言。详见 `docs/spec-notes/p0-desktop.md` §2.4 与
+  `docs/spec-notes/p0-support-matrix.md`。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 
@@ -57,5 +60,5 @@
 - 每个切片自带实现、测试与验证索引；不把测试路径存在当作测试通过。
 - 依赖方向用 `cargo run -p xtask -- verify --stage P0` 校验，违例必须被阻断（可用 `--self-test` 证明守卫有效）。
 - 编译检查：`cargo check --workspace --all-targets`，测试：`cargo test --workspace`。
-- 里程碑出口：相关 I/G 门禁有真实证据后才勾选 tasks.md；归档在 P0 全部出口证据齐全后进行。
+- 里程碑出口：相关 I/G 门禁有真实证据后才勾选 tasks.md；每个阶段 Change 在自己出口证据齐全后归档，P0 已于 2026-11-19 归档，后续阶段不回溯修改 P0 历史约定。
 - 工具链调用前先 `export PATH="$CARGO_HOME/bin:$PATH"`（详见 `docs/compat/toolchain.md`）。

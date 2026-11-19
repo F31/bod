@@ -66,7 +66,7 @@ context: |
   - P7 是评估与决策门：按真实 RTO、写入争用、数据体积和多机需求评估，不按日事件数机械迁移，容量结论不自动扩大支持矩阵。
 
   ## 8. OpenSpec 工件约定
-  - 现行 openspec/specs/ 尚未归档任何 capability。未归档阶段的 capability 使用 ADDED；只有归档后现行规格存在同名 capability 时才用 MODIFIED/REMOVED，禁止引用不存在的现行规格。
+  - 现行 openspec/specs/ 已归档 P0 的 9 个 capability（2026-11-19 归档：artifact-acceptance、budget-admission、configuration、coordination-loop、effect-gate、execution-adapter、identity-access、recovery-cleanup、resource-state，共 57 条需求 / 66 个场景）。后续 Change 修改既有能力用 MODIFIED/REMOVED，新增能力用 ADDED；禁止引用不存在的现行规格，也不得把已归档规格当可随意改写的草稿。
   - 规格需求用 SHALL 表达可测试义务，每条至少配一个 Given/When/Then 场景，并绑定相关 I/G/RM/MD/AZ/SB 编号或方案文档章节。
   - 任务按垂直切片和依赖排序，逐条带验证出口；未取得真实证据不得勾选，也不得把设计路径写成已通过。
   - 方案文档是产品与技术权威来源；若本上下文与文档冲突，以文档为准并同步修订本配置。

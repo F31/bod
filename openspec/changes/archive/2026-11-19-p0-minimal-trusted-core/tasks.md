@@ -75,5 +75,12 @@
 
 ## Workflow follow-up
 
-- 在评审确认全部 P0 出口证据后归档本 Change，并由单一归档入口把 8 份 spec delta 同步到 `openspec/specs/`。
-- 归档后验证现行规格与 tasks.md 的需求覆盖一致；P1—P7 以新的 Change 承接，不修改本 Change 的历史约定。
+- [x] 归档本 Change，由单一归档入口把 9 份 spec delta 同步到 `openspec/specs/`。
+  - 更正：原文写「8 份」，与实际 `specs/` 下的 9 个 capability 目录不符；按目录实数更正后执行，未改任何 delta 内容。
+  - 执行：`openspec archive p0-minimal-trusted-core --yes --json` → `archivedAs: 2026-11-19-p0-minimal-trusted-core`、`specsUpdated: true`、`totals: added 57 / modified 0 / removed 0 / renamed 0`。
+  - 产物：`openspec/specs/<capability>/spec.md` 9 份；正文与原 delta 逐字节一致，仅头部由 `# Spec Delta: <name>` + `## ADDED Requirements` 规范化为 `# <name> Specification` + `## Requirements`。
+- [x] 归档后验证现行规格与本 Change 的需求覆盖一致；P1—P7 以新的 Change 承接，不修改本 Change 的历史约定。
+  - 覆盖核对：归档前快照 9 份 delta 的 `### Requirement:` 标题逐条与 `openspec/specs/` 比对，9/9 一致，合计 57 条需求 / 66 个 Scenario，与归档 JSON 的 `added: 57` 相符。
+  - 引用修正：`crates/bod-app/src/verification_registry.rs` 的 `include_str!` 由 Change 路径改为归档路径（编译期失败优于静默漏检），G-50 覆盖来源不变。
+  - 校验：`openspec validate --all --strict` → 16 项全通过（9 spec + 7 后续 Change 骨架）；`cargo run -q -p xtask -- verify --stage P0` 仍 PASS。
+- 后续：P1—P7 已各自有 Change 骨架（`openspec/changes/p1-…` 至 `p7-…`），按阶段逐个提案、实施、归档；本 Change 历史约定不再修改。

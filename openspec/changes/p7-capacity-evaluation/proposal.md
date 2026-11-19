@@ -21,7 +21,7 @@ P0—P6 建立了完整能力，但没有真实负载证据就容易凭日事件
 
 ### Modified Capabilities
 
-无。P0—P6 Change 尚未归档；本 Change 以新 capability 路径建立 P7 评估基线，不改写既有历史约定。
+无。截至 P0 归档（2026-11-19），现行 `openspec/specs/` 仅有 P0 的 9 个 capability；本 Change 的能力与之均不同名，全部以 ADDED 新增，不改写既有规格与历史约定。
 
 ## Impact
 

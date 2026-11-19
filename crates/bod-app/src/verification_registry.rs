@@ -22,16 +22,25 @@ pub fn shipped_registry() -> &'static str {
 
 /// 绑定意图来源（名称 → 正文），用于引用覆盖检查。
 ///
-/// 只取 `proposal.md` 与 `tasks.md`：8 份 spec delta 只描述行为，不含 I/G 编号；
+/// 只取 `proposal.md` 与 `tasks.md`：9 份 spec delta 只描述行为，不含 I/G 编号
+/// （实测 9 份现行规格里 `I-`/`G-` 命中数均为 0，唯一命中在 proposal），
 /// 把 spec 正文当来源会得到"零引用"的假覆盖。
+///
+/// 路径指向归档目录：P0 于 2026-11-19 归档（`openspec archive`），Change 正文移到
+/// `openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/`。归档是单一来源，
+/// 不复制副本；若再次归档导致目录名变化，这里必须同步，否则编译期即失败（不会静默漏检）。
 pub const BINDING_SOURCES: &[(&str, &str)] = &[
     (
         "proposal",
-        include_str!("../../../openspec/changes/p0-minimal-trusted-core/proposal.md"),
+        include_str!(
+            "../../../openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/proposal.md"
+        ),
     ),
     (
         "tasks",
-        include_str!("../../../openspec/changes/p0-minimal-trusted-core/tasks.md"),
+        include_str!(
+            "../../../openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/tasks.md"
+        ),
     ),
 ];
 

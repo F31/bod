@@ -23,7 +23,7 @@ P1/P2 解决单个执行者与接续，但真实小团队会遇到共享接口�
 
 ### Modified Capabilities
 
-无。P0—P2 Change 尚未归档；本 Change 以新 capability 路径建立 P3 行为基线，不改写既有历史约定。
+无。截至 P0 归档（2026-11-19），现行 `openspec/specs/` 仅有 P0 的 9 个 capability；本 Change 的能力与之均不同名，全部以 ADDED 新增，不改写既有规格与历史约定。
 
 ## Impact
 
