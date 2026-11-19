@@ -29,12 +29,12 @@
 
 ## 4. D3 预算准入与不可变账本
 
-- [ ] 4.1 实现固定次序的分层准入事务（Company→Project→Agent→Run→WorkPackage→槽位→session/workspace→Reservation/Binding/派发意图）（budget-admission: 分层准入事务），验证 `bod-app::budget_admission` 的 `invariant_i_05` 在并发申请最后额度时只有一个成功且失败方无残留 Binding。
-- [ ] 4.2 实现 C/R/U 互斥记账与取消/过期转换（budget-admission: 确认、预留与风险互斥），验证 `invariant_i_10` 的同类场景：同一金额不同时计入 R 与 U，取消转风险占用一减一增且总量不变。
-- [ ] 4.3 实现不可变账本分录、外部 usage_key 唯一与超额调整（budget-admission: 超额如实入账），验证 `invariant_i_06`：迟到且高于预留的账单如实入账、超额被记录且阻止后续派发，不出现截断 actual 的假平衡。
-- [ ] 4.4 实现多维约束、定点金额与 Busy 有界重试（budget-admission: 多维约束与计量单位、Busy 与稳定 request_id），验证不同模型 token 不相加为现金、跨维度任一触限即拒绝、Busy 超时保留稳定 request_id 且整体重读重试。
-- [ ] 4.5 实现默认无隐式付费授权与预算解释（budget-admission: 默认无隐式付费授权、预算解释与拒绝原因），验证首次启动无默认消费额度、观察/免费模式明确标识、拒绝解释列出 C/R/U 与来源且未知不显示为可用。
-- [ ] 4.6 编写 D3 预算准入顺序与错误码说明到 `docs/spec-notes/p0-budget.md`，验证其中每条原因码与本 Change 的 scenario 及 `bod-app::budget_admission` 用例一一对应。
+- [x] 4.1 实现固定次序的分层准入事务（Company→Project→Agent→Run→WorkPackage→槽位→session/workspace→Reservation/Binding/派发意图）（budget-admission: 分层准入事务），验证 `bod-app::budget_admission` 的 `invariant_i_05` 在并发申请最后额度时只有一个成功且失败方无残留 Binding。
+- [x] 4.2 实现 C/R/U 互斥记账与取消/过期转换（budget-admission: 确认、预留与风险互斥），验证 `invariant_i_10` 的同类场景：同一金额不同时计入 R 与 U，取消转风险占用一减一增且总量不变。
+- [x] 4.3 实现不可变账本分录、外部 usage_key 唯一与超额调整（budget-admission: 超额如实入账），验证 `invariant_i_06`：迟到且高于预留的账单如实入账、超额被记录且阻止后续派发，不出现截断 actual 的假平衡。
+- [x] 4.4 实现多维约束、定点金额与 Busy 有界重试（budget-admission: 多维约束与计量单位、Busy 与稳定 request_id），验证不同模型 token 不相加为现金、跨维度任一触限即拒绝、Busy 超时保留稳定 request_id 且整体重读重试。
+- [x] 4.5 实现默认无隐式付费授权与预算解释（budget-admission: 默认无隐式付费授权、预算解释与拒绝原因），验证首次启动无默认消费额度、观察/免费模式明确标识、拒绝解释列出 C/R/U 与来源且未知不显示为可用。
+- [x] 4.6 编写 D3 预算准入顺序与错误码说明到 `docs/spec-notes/p0-budget.md`，验证其中每条原因码与本 Change 的 scenario 及 `bod-app::budget_admission` 用例一一对应。
 
 ## 5. D4 执行端协议与一个真实适配器
 

@@ -3,10 +3,12 @@
 //! 边界（G-1）：本 crate 不依赖 DB / Web / Tauri / Agent SDK，也不依赖 bod-app / bod / xtask。
 //! D1 起承载领域对象、授权交集、资源外壳与状态机规则。
 
+pub mod budget;
 pub mod model;
 pub mod queue;
 pub mod rules;
 
+pub use budget::*;
 pub use model::*;
 pub use queue::*;
 

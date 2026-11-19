@@ -7,6 +7,7 @@ pub use bod_core as domain;
 
 pub mod authorization;
 pub mod backoff;
+pub mod budget_admission;
 pub mod claim_concurrency;
 pub mod config;
 pub mod effect_recovery;
