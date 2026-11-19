@@ -66,9 +66,10 @@
 ## 8. 桌面连接原型、验证索引与发布纪律
 
 - [ ] 8.1 实现 Tauri 2 壳的 connect_or_spawn、握手取地址与 close_action=detach 原型（不启动第二个业务 DB），验证桌面退出不终止外部已有宿主、启动密钥不出现在日志。
-  - 进度：连接控制器与两条必需断言已通过（`cargo test -p bod-desktop`，7 项）；Tauri 2 窗口未接入——`cargo metadata --offline` 因 Tauri 依赖图需要未缓存的 `rsqlite-vfs` 失败，且 P0 无 HTTP 宿主可握手。缺口见 `docs/spec-notes/p0-desktop.md`，故不勾选。
-- [ ] 8.2 运行前端检查链 `npm --prefix apps/workbench ci`、`run typecheck`、`run test`、`run build`，验证四项全部通过且桌面/headless 结果分别记录，不用 headless 结果宣称桌面通过。
-  - 进度：仓库不存在 `apps/workbench` 与任何 `package.json`，四条命令无可执行目标；不伪造通过结论，缺口见 `docs/spec-notes/p0-desktop.md` 第 3 节。
+  - 进度：宿主对端与连接控制器已完成并端到端验证——`bod serve`（受保护握手/健康检查/授权停止/原子描述文件）+ `bod-desktop::connection` 的 Std 实现；`cargo test -p bod-app host_handshake` 6 项、`cargo test -p bod --test host_handshake_e2e` 2 项（真实子进程）、`cargo test -p bod-desktop` 7 项全过。
+  - 未完成：Tauri 2 窗口本体。加入 `tauri = "2"` 后本机 cargo 在 435 包依赖图上持续停滞（20 分钟 0 行输出、无 rustc 子进程；去掉该依赖后 33 秒完成 check），已回退依赖以保证工作区可构建。恢复步骤与实测数据见 `docs/spec-notes/p0-desktop.md` §2，故不勾选。
+- [x] 8.2 运行前端检查链 `npm --prefix apps/workbench ci`、`run typecheck`、`run test`、`run build`，验证四项全部通过且桌面/headless 结果分别记录，不用 headless 结果宣称桌面通过。
+  - 证据：新建 `apps/workbench`（TypeScript + `node --test`，依赖仅 typescript/@types/node）。`npm --prefix apps/workbench ci` → added 3 packages；`run typecheck` 通过；`run test` → 8/8；`run build` → `dist/{index.html,main.js,connection.js}`。桌面侧未实测，未宣称桌面通过（见 `docs/spec-notes/p0-desktop.md` §3.3）。
 - [x] 8.3 汇总本 Change 的 I/G 验证索引并运行 `cargo run -p xtask -- verify --stage P0`、`cargo fmt --all -- --check`、`cargo clippy -p bod-core -p bod-app -p bod --all-targets -- -D warnings`、`cargo test -p bod-core`、`cargo test -p bod-app`，验证 G-50 报告列出全部绑定的 planned/implemented 状态且无未知或重复 I/G 引用。
 - [x] 8.4 编写 P0 支持矩阵与已知限制，标明第二执行端、接续、委任切换、跨模块影响图、远程与移动均为 Planned/未支持，验证矩阵中每个 Supported 项有对应 conformance 或真实测试报告，Fake Executor 与 planned 路径不计入。
 

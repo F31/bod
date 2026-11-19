@@ -1,0 +1,17 @@
+{
+  "name": "bod-workbench",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "P0 桌面壳的前端工作台：只显示连接事实，不接触会话密钥",
+  "scripts": {
+    "typecheck": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test": "node ./node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test \".test-build/**/*.test.js\"",
+    "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
+    "clean": "node -e \"for (const d of ['dist','.test-build']) require('node:fs').rmSync(d,{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2"
+  }
+}

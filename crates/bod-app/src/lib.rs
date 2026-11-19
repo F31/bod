@@ -19,6 +19,7 @@ pub mod descriptor_schema;
 pub mod effect_recovery;
 pub mod fake_executor;
 pub mod fault_matrix;
+pub mod host_handshake;
 pub mod invocation;
 pub mod lifecycle_recovery;
 pub mod local_process;

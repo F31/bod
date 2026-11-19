@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bod 工作台</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 2.5rem;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 1.35rem;
+        margin: 0 0 1.25rem;
+      }
+      .card {
+        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        max-width: 46rem;
+      }
+      .label {
+        font-size: 0.78rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        opacity: 0.65;
+      }
+      #state {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      }
+      #action {
+        opacity: 0.8;
+      }
+      p {
+        margin: 0.35rem 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>bod 桌面宿主连接</h1>
+    <div class="card">
+      <p class="label">连接</p>
+      <p id="state">正在读取连接状态…</p>
+      <p class="label">关闭窗口时</p>
+      <p id="action">—</p>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

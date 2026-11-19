@@ -9,3 +9,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+# 复用宿主侧握手实现（`bod serve` 写描述、客户端换会话密钥），
+# 避免桌面壳与宿主各写一份协议解析后漂移。
+# G-1 只禁止 bod-app → bod-desktop 的反向依赖，这个方向是允许的。
+bod-app = { path = "../../../crates/bod-app" }

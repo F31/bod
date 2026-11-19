@@ -28,6 +28,10 @@ const USAGE: &str = "\
   bod fault-matrix --json          同上，输出机器可读结果
   bod perf                         实测空闲负担与 §38.2 性能预算可测项
   bod verify-index                 输出 I/G 验证索引与 G-50 结论
+  bod serve                        启动本地控制面并写出连接描述（受保护握手）
+  bod serve --listen <addr>        指定监听地址（默认取 server.listen，可为 127.0.0.1:0）
+  bod serve --descriptor <path>    指定连接描述路径（默认 $BOD_HOME/host.endpoint.json）
+  bod serve --json                 就绪后输出机器可读的一行（不含任何令牌）
   bod --help                       显示本帮助
 ";
 
@@ -136,6 +140,9 @@ fn read_config_file(path: &str) -> Result<String, String> {
 }
 
 fn run(args: &[String]) -> Result<String, String> {
+    if args.first().map(String::as_str) == Some("serve") {
+        return serve(&args[1..]);
+    }
     match args {
         [] => Ok(format!(
             "bod {} (headless skeleton)\n配置入口: bod config explain | bod config schema\n",
@@ -306,6 +313,71 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }
+}
+
+/// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。
+///
+/// P0 的控制面只做握手与生命周期，不承载业务命令；业务 DB 仍由命令层独占，
+/// 因此这里**不打开第二个业务库**（8.1 的硬约束）。
+fn serve(flags: &[String]) -> Result<String, String> {
+    use bod_app::host_handshake::{HostServer, default_descriptor_path};
+
+    let mut listen: Option<String> = None;
+    let mut descriptor_path: Option<std::path::PathBuf> = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--listen" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--listen 需要一个地址".to_string())?;
+                listen = Some(value.clone());
+                index += 2;
+            }
+            "--descriptor" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--descriptor 需要一个路径".to_string())?;
+                descriptor_path = Some(std::path::PathBuf::from(value));
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            other => return Err(format!("serve 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+
+    let config = BodConfig::default();
+    let listen = listen.unwrap_or_else(|| config.server.listen.clone());
+    let descriptor_path = descriptor_path.unwrap_or_else(default_descriptor_path);
+    let server = HostServer::bind(&listen, &descriptor_path, now_ms())
+        .map_err(|err| format!("宿主启动失败：{err}"))?;
+    let summary = server.descriptor().public_summary();
+    if json {
+        let line = serde_json::json!({
+            "ready": true,
+            "address": server.descriptor().address,
+            "pid": server.descriptor().pid,
+            "instance_id": server.descriptor().instance_id,
+            "descriptor": descriptor_path.display().to_string(),
+        });
+        println!("{line}");
+    } else {
+        println!("控制面已就绪：{summary}");
+        println!(
+            "描述文件：{}（含握手令牌，权限 0600；不写入日志）",
+            descriptor_path.display()
+        );
+    }
+    // spawner 依赖这一行判断就绪，必须立即刷出。
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+
+    server.run().map_err(|err| format!("宿主运行失败：{err}"))?;
+    Ok("控制面已停止，连接描述已移除\n".to_string())
 }
 
 fn main() {

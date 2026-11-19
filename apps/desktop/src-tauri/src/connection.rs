@@ -96,9 +96,12 @@ pub trait HostSpawner {
     fn spawn_and_wait(&mut self) -> Result<(HostDescriptor, String), ConnectError>;
 }
 
-/// 停止宿主：实现方负责发信号/请求，且只应针对自己启动的实例。
+/// 停止宿主：实现方负责发请求，且只应针对自己启动的实例。
+///
+/// 入参是完整连接句柄而不是裸 pid：停止需要 `address`（控制面端点）与 `session_key`
+/// （授权），只凭 pid 既发不出请求，也容易误杀无关进程。
 pub trait HostControl {
-    fn shutdown(&mut self, pid: u32) -> Result<(), String>;
+    fn shutdown(&mut self, attached: &Attached) -> Result<(), String>;
 }
 
 /// 连接日志：只记录可公开事实，密钥一律脱敏。
@@ -126,6 +129,122 @@ impl ConnectionLog {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// 真实探测：读描述文件 → 健康检查 → 握手换会话密钥。
+///
+/// 复用 `bod_app::host_handshake`，避免桌面壳与宿主各写一份协议解析后漂移。
+#[derive(Debug, Clone, Copy)]
+pub struct StdHostProbe {
+    pub timeout: Duration,
+}
+
+impl HostProbe for StdHostProbe {
+    fn probe(&self, descriptor_path: &Path) -> Option<(HostDescriptor, String)> {
+        let attached = bod_app::host_handshake::probe(descriptor_path, self.timeout).ok()?;
+        Some((
+            HostDescriptor {
+                address: attached.descriptor.address,
+                pid: attached.descriptor.pid,
+                instance_id: attached.descriptor.instance_id,
+            },
+            attached.session_key,
+        ))
+    }
+}
+
+/// 真实启动：运行 `bod serve`，等它写出描述并完成握手。
+///
+/// 子进程**不放入 Job Object、不设置 kill-on-drop**：桌面退出只会 detach，
+/// 宿主按自己的生命周期继续运行（这正是 `close_action=detach` 的物理含义）。
+#[derive(Debug, Clone)]
+pub struct StdHostSpawner {
+    pub bod_bin: std::path::PathBuf,
+    pub descriptor_path: std::path::PathBuf,
+    pub startup_timeout: Duration,
+}
+
+impl StdHostSpawner {
+    /// 解析 `bod` 可执行文件：`BOD_BIN` 优先，其次与桌面壳同目录，最后靠 PATH。
+    pub fn resolve_binary() -> std::path::PathBuf {
+        if let Some(path) = std::env::var_os("BOD_BIN") {
+            return std::path::PathBuf::from(path);
+        }
+        if let Ok(current) = std::env::current_exe()
+            && let Some(dir) = current.parent()
+        {
+            for name in ["bod.exe", "bod"] {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+        std::path::PathBuf::from("bod")
+    }
+}
+
+impl HostSpawner for StdHostSpawner {
+    fn spawn_and_wait(&mut self) -> Result<(HostDescriptor, String), ConnectError> {
+        // 明确由本次启动掌管的路径：旧描述一定是过期的，删掉避免读到别人的地址。
+        let _ = std::fs::remove_file(&self.descriptor_path);
+        let mut child = std::process::Command::new(&self.bod_bin)
+            .arg("serve")
+            .arg("--listen")
+            .arg("127.0.0.1:0")
+            .arg("--descriptor")
+            .arg(&self.descriptor_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|err| {
+                ConnectError::SpawnFailed(format!("{}: {err}", self.bod_bin.display()))
+            })?;
+
+        let started = std::time::Instant::now();
+        let probe = StdHostProbe {
+            timeout: Duration::from_millis(500),
+        };
+        loop {
+            if let Some((descriptor, session_key)) = probe.probe(&self.descriptor_path) {
+                return Ok((descriptor, session_key));
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|err| ConnectError::SpawnFailed(err.to_string()))?
+            {
+                return Err(ConnectError::SpawnFailed(format!(
+                    "宿主在写出描述前退出（{status}）"
+                )));
+            }
+            if started.elapsed() >= self.startup_timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ConnectError::SpawnTimeout {
+                    waited_ms: self.startup_timeout.as_millis() as u64,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// 真实停止：带会话密钥请求 `/_bod/shutdown`，宿主自行移除描述文件。
+#[derive(Debug, Clone, Copy)]
+pub struct StdHostControl {
+    pub timeout: Duration,
+}
+
+impl HostControl for StdHostControl {
+    fn shutdown(&mut self, attached: &Attached) -> Result<(), String> {
+        bod_app::host_handshake::request_shutdown(
+            &attached.descriptor.address,
+            &attached.session_key,
+            self.timeout,
+        )
+        .map_err(|err| err.to_string())
     }
 }
 
@@ -207,7 +326,7 @@ pub fn close_connection(
         ));
         return Ok(false);
     }
-    control.shutdown(attached.descriptor.pid)?;
+    control.shutdown(attached)?;
     log.record(format!(
         "stop_host: 已请求停止本次启动的宿主 pid={}",
         attached.descriptor.pid
@@ -252,8 +371,8 @@ mod tests {
     }
 
     impl HostControl for FakeControl {
-        fn shutdown(&mut self, pid: u32) -> Result<(), String> {
-            self.calls.borrow_mut().push(pid);
+        fn shutdown(&mut self, attached: &Attached) -> Result<(), String> {
+            self.calls.borrow_mut().push(attached.descriptor.pid);
             Ok(())
         }
     }

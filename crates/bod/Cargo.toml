@@ -12,3 +12,5 @@ path = "src/main.rs"
 [dependencies]
 bod-core = { path = "../bod-core" }
 bod-app = { path = "../bod-app" }
+# serve --json 输出一行机器可读就绪信息；与 bod-app 使用同一 serde_json 版本。
+serde_json = "1.0.154"

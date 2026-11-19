@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "bod-app",
  "bod-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -34,6 +35,9 @@ version = "0.1.0"
 [[package]]
 name = "bod-desktop"
 version = "0.1.0"
+dependencies = [
+ "bod-app",
+]
 
 [[package]]
 name = "cc"
