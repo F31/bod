@@ -4,10 +4,10 @@
 
 ## 1. D0 基线、依赖方向与配置冻结
 
-- [ ] 1.1 建立 `bod-core`/`bod-app`/`bod`/`apps/desktop/src-tauri`/`xtask` workspace 与最小 CLI/headless 启动，验证 `cargo metadata --no-deps` 列出全部成员且 headless 可独立构建。
+- [x] 1.1 建立 `bod-core`/`bod-app`/`bod`/`apps/desktop/src-tauri`/`xtask` workspace 与最小 CLI/headless 启动，验证 `cargo metadata --no-deps` 列出全部成员且 headless 可独立构建。
 - [ ] 1.2 实现配置 schema 与 `explain` 输出，覆盖 §37.14 的 server/desktop/sqlite/queue/cache/reliability 字段及默认值，验证未知字段被拒绝且每个默认值在 explain 中有来源与语义说明。
-- [ ] 1.3 实现依赖方向守卫，保证 `bod-core` 不依赖存储/网络/app、`bod-app` 不反向依赖 CLI/桌面，验证 `cargo run -p xtask -- verify --stage P0` 报告 G-1 通过且违例被阻断。
-- [ ] 1.4 编写 `AGENTS.md` 当前切片与禁止行为（无自研模型循环、无内存-only 可靠队列、无默认外部 MQ、无第二业务写入者、无全权管理 Token、无假测试报告），验证 CI 或 xtask 能读取并校验该声明存在。
+- [x] 1.3 实现依赖方向守卫，保证 `bod-core` 不依赖存储/网络/app、`bod-app` 不反向依赖 CLI/桌面，验证 `cargo run -p xtask -- verify --stage P0` 报告 G-1 通过且违例被阻断。
+- [x] 1.4 编写 `AGENTS.md` 当前切片与禁止行为（无自研模型循环、无内存-only 可靠队列、无默认外部 MQ、无第二业务写入者、无全权管理 Token、无假测试报告），验证 CI 或 xtask 能读取并校验该声明存在。
 
 ## 2. D1 领域对象、权限与单写事务
 

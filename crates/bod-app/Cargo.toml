@@ -1,0 +1,12 @@
+[package]
+name = "bod-app"
+description = "可信应用层：命令/查询、UnitOfWork、授权、队列、预算、验收、恢复"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+bod-core = { path = "../bod-core" }

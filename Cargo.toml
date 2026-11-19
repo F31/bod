@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/bod-core",
+  "crates/bod-app",
+  "crates/bod",
+  "apps/desktop/src-tauri",
+  "xtask",
+]
+default-members = ["crates/bod-core", "crates/bod-app", "crates/bod"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false

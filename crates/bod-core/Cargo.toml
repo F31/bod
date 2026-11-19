@@ -1,0 +1,11 @@
+[package]
+name = "bod-core"
+description = "值类型与纯规则，不依赖存储、网络、Web 或 Agent SDK"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "bod-desktop"
+description = "Tauri 2 桌面壳：P0 任务 8.1 接入 connect_or_spawn 与生命周期原型"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
