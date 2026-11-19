@@ -1,0 +1,40 @@
+# Rust 构建产物
+/target/
+**/target/
+
+# Node / 前端
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+apps/workbench/coverage/
+
+# Tauri 打包产物与 sidecar 二进制（不把大二进制随源码提交）
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/gen/
+
+# 本地运行时数据（SQLite/WAL/CAS/日志/备份）
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+data/
+runtime/
+backups/
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 密钥与本地配置
+.env
+.env.local
+*.pem
+*.key
+secrets/

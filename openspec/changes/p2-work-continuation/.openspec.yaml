@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-11-19
+goal: 与手工交接对比，停旧写入/脏文件/丢回包用例通过
