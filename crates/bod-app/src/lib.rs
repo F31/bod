@@ -28,6 +28,7 @@ pub mod protocol_reliability;
 pub mod recovery_models;
 pub mod resource_state;
 pub mod store;
+pub mod verification_registry;
 pub mod wakeup;
 
 pub use config::{

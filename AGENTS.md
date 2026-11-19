@@ -5,7 +5,7 @@
 
 ## 当前切片
 
-- **阶段**：P0 最小可信核心，D0—D6 已完成（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6）。
+- **阶段**：P0 最小可信核心，D0—D6 已完成、D7 部分完成（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.3—8.4；8.1 仅连接控制器、8.2 无前端可测）。
 - **已落地**：五 crate workspace（`bod-core` / `bod-app` / `bod` / `bod-desktop` / `xtask`）、
   最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录、
   §37.14 配置 schema 与 `config explain` / `config validate`（保留来源与语义）、
@@ -24,8 +24,12 @@
   D6 恢复与清理（迁移登记与 checksum 漂移检测、`VACUUM INTO` 一致性备份与不可恢复判定、
   新宿主恢复与派发门禁、doctor 9 项检查与 ReconciliationCase 幂等开案、删除请求与四项清理条件、
   CleanupBlocked 稳定阻塞码、Abandon 残留清单、外部仓库/正式 Manifest/接受交付永不自动销毁、
-  清理 Effect Gate 幂等、`bod fault-matrix` 5 场景与 `bod perf` 实测）。
-- **未落地**：桌面连接原型与 P0 收口（8.1—8.4）。
+  清理 Effect Gate 幂等、`bod fault-matrix` 5 场景与 `bod perf` 实测）、
+  D7 收口（`bod-desktop::connection` 的 connect_or_spawn/握手/detach 控制器与 7 项测试、
+  `verification/gates.yaml` + `bod verify-index` + `xtask verify` 的 G-50 覆盖检查、
+  P0 支持矩阵与已知限制）。
+- **未落地**：Tauri 2 窗口与 sidecar 接线（依赖 `rsqlite-vfs` 未缓存且 P0 无 HTTP 宿主可握手）、
+  前端工作台检查链（仓库无 `apps/workbench`）。缺口见 `docs/spec-notes/p0-desktop.md`。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

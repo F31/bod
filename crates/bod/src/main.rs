@@ -27,6 +27,7 @@ const USAGE: &str = "\
   bod fault-matrix                 执行 P0 五个核心故障场景并输出实测报告
   bod fault-matrix --json          同上，输出机器可读结果
   bod perf                         实测空闲负担与 §38.2 性能预算可测项
+  bod verify-index                 输出 I/G 验证索引与 G-50 结论
   bod --help                       显示本帮助
 ";
 
@@ -199,6 +200,47 @@ fn run(args: &[String]) -> Result<String, String> {
         [cmd, flag] if cmd == "fault-matrix" && flag == "--json" => {
             let report = bod_app::fault_matrix::run(&environment_note(), &commit_note())?;
             Ok(format!("{}\n", report_json(&report)))
+        }
+        [cmd] if cmd == "verify-index" => {
+            let report =
+                bod_app::verification_registry::g50_report().map_err(|err| err.to_string())?;
+            let registry = bod_app::verification_registry::parse(
+                bod_app::verification_registry::shipped_registry(),
+            )
+            .map_err(|err| err.to_string())?;
+            let mut out = String::new();
+            let _ = writeln!(out, "# I/G 验证索引（verification/gates.yaml）\n");
+            let _ = writeln!(out, "| ID | 类型 | 状态 | 模块 | 规格语义 |");
+            let _ = writeln!(out, "| --- | --- | --- | --- | --- |");
+            for binding in &registry.bindings {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    binding.id,
+                    binding.kind.as_str(),
+                    binding.status.as_str(),
+                    if binding.module.is_empty() {
+                        "—"
+                    } else {
+                        &binding.module
+                    },
+                    binding.requirement
+                );
+            }
+            let _ = writeln!(out, "\n{}", report.summary());
+            if !report.gaps.is_empty() {
+                let _ = writeln!(out, "缺失引用: {}", report.gaps.join(", "));
+            }
+            for problem in &report.problems {
+                let _ = writeln!(out, "结构问题: {problem}");
+            }
+            for binding in registry.bindings.iter().filter(|item| {
+                item.status != bod_app::verification_registry::BindingStatus::Implemented
+            }) {
+                let _ = writeln!(out, "未完成 {}：{}", binding.id, binding.note);
+            }
+            let _ = writeln!(out, "G-50: {}", if report.ok() { "PASS" } else { "FAIL" });
+            Ok(out)
         }
         [cmd] if cmd == "perf" => {
             let report = bod_app::perf_probe::run(&environment_note(), &commit_note())?;

@@ -155,7 +155,129 @@ fn verify_stage_p0(root: &Path) -> bool {
         println!("[AGENTS] PASS 当前切片与禁止行为已声明");
     }
 
+    // G-50：验证索引全量、真实目标与断言。
+    if !g50_check(root) {
+        ok = false;
+    }
+
     ok
+}
+
+/// 遍历工作区源码，收集所有 `fn`/`mod` 名，用于确认索引里的测试路径真实存在。
+fn collect_identifiers(root: &Path) -> std::collections::BTreeSet<String> {
+    fn walk(dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                for line in text.lines() {
+                    let trimmed = line.trim_start();
+                    for prefix in ["fn ", "mod ", "pub fn ", "pub mod ", "async fn "] {
+                        if let Some(rest) = trimmed.strip_prefix(prefix) {
+                            let name: String = rest
+                                .chars()
+                                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                .collect();
+                            if !name.is_empty() {
+                                out.insert(name);
+                            }
+                        }
+                    }
+                    // 处理 `pub(crate) fn` / `const fn` 等前缀组合。
+                    if let Some(pos) = trimmed.find("fn ") {
+                        let rest = &trimmed[pos + 3..];
+                        let name: String = rest
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        if !name.is_empty() {
+                            out.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for crate_dir in ["crates", "apps", "xtask"] {
+        walk(&root.join(crate_dir), &mut out);
+    }
+    out
+}
+
+/// G-50：索引自洽 + 规格引用全覆盖 + 测试目标真实存在。
+fn g50_check(root: &Path) -> bool {
+    let report = match bod_app::verification_registry::g50_report() {
+        Ok(report) => report,
+        Err(err) => {
+            println!("[G-50] FAIL 索引无法解析：{err}");
+            return false;
+        }
+    };
+
+    let identifiers = collect_identifiers(root);
+    let registry = match bod_app::verification_registry::parse(
+        bod_app::verification_registry::shipped_registry(),
+    ) {
+        Ok(registry) => registry,
+        Err(err) => {
+            println!("[G-50] FAIL 索引无法解析：{err}");
+            return false;
+        }
+    };
+    let mut missing_targets: Vec<String> = Vec::new();
+    for binding in &registry.bindings {
+        if binding.status != bod_app::verification_registry::BindingStatus::Implemented {
+            continue;
+        }
+        let Some(tail) = binding.tests.rsplit("::").next() else {
+            continue;
+        };
+        if !identifiers.contains(tail) {
+            missing_targets.push(format!("{} -> {}", binding.id, binding.tests));
+        }
+    }
+    missing_targets.sort();
+
+    println!("[G-50] {}", report.summary());
+    for binding in registry.bindings.iter().filter(|binding| {
+        binding.status != bod_app::verification_registry::BindingStatus::Implemented
+    }) {
+        println!("  - 未完成绑定 {}：{}", binding.id, binding.note);
+    }
+    for gap in &report.gaps {
+        println!("  - 规格引用未登记：{gap}");
+    }
+    for problem in &report.problems {
+        println!("  - 结构问题：{problem}");
+    }
+    for target in &missing_targets {
+        println!("  - 测试目标不存在：{target}");
+    }
+    if !report.unreferenced.is_empty() {
+        println!(
+            "  - 提示：索引中未被规格引用的条目 {}",
+            report.unreferenced.join(", ")
+        );
+    }
+
+    if report.ok() && missing_targets.is_empty() {
+        println!("[G-50] PASS 验证索引全量、目标真实、无重复或未知引用");
+        true
+    } else {
+        println!("[G-50] FAIL 见上方问题");
+        false
+    }
 }
 
 /// 迁移脚本与其中必须出现的表。001 为 D1 领域表，002 为 D2 队列/outbox。

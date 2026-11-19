@@ -10,3 +10,6 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+# G-50 验证索引解析复用产品侧实现，避免两套解析器漂移。
+# 依赖方向：xtask 是开发工具，可以依赖 bod-app；bod-app 不反向依赖 xtask（G-1 已守）。
+bod-app = { path = "../crates/bod-app" }

@@ -1,0 +1,269 @@
+# P0 最小可信核心 —— I/G 验证索引（G-50）
+#
+# 本文件是 G-50 的机器可读索引：每条绑定给出不变量/门禁的权威语义、实现模块、
+# 承载断言的测试路径与当前状态。`bod verify-index` 与
+# `cargo run -p xtask -- verify --stage P0` 都会解析它。
+#
+# 规则：
+# - id 必须唯一；`I-NN` / `G-N` 两种形式；
+# - status ∈ implemented / planned / unverified；
+#   implemented 必须有 module 与 tests，planned 不得填 tests（避免把计划路径当证据）；
+# - requirement 用 V2.9.6 §39.13 / §39.12 / §39.14 的原文语义，不改写成任务口径；
+# - note 记录编号或范围差异，不隐藏。
+
+- id: I-01
+  kind: invariant
+  requirement: 每工作包执行实例只有一个有效提交租约
+  module: bod-app::claim_concurrency
+  tests: bod-app::claim_concurrency::tests::i_01_claim_sets_claimed_generation_and_increments_token
+  status: implemented
+  evidence: cargo test -p bod-app claim_concurrency
+  note: ""
+- id: I-03
+  kind: invariant
+  requirement: 同逻辑操作键的参数变化被拒绝或显式创建新动作
+  module: bod-app::claim_concurrency
+  tests: bod-app::claim_concurrency::tests::i_03_completion_with_newer_generation_goes_pending_not_idle
+  status: implemented
+  evidence: cargo test -p bod-app claim_concurrency
+  note: 同键异参拒绝的完整路径另由 bod-app::wakeup 的 i_69 用例覆盖
+- id: I-04
+  kind: invariant
+  requirement: 不明非幂等外部操作不自动重发
+  module: bod-app::effect_recovery
+  tests: bod-app::effect_recovery::tests::i_04_replay_only_restores_pending_intent_without_side_effect
+  status: implemented
+  evidence: cargo test -p bod-app effect_recovery
+  note: ""
+- id: I-05
+  kind: invariant
+  requirement: 每次预算预留原子检查所有适用层级
+  module: bod-app::budget_admission
+  tests: bod-app::budget_admission::tests::i_05_concurrent_admission_of_last_credit_only_one_succeeds
+  status: implemented
+  evidence: cargo test -p bod-app budget_admission
+  note: ""
+- id: I-06
+  kind: invariant
+  requirement: 实际费用如实追加；调整有来源，不能通过丢弃超额保持假平衡
+  module: bod-app::budget_admission
+  tests: bod-app::budget_admission::tests::i_06_late_bill_above_reserve_is_recorded_in_full
+  status: implemented
+  evidence: cargo test -p bod-app budget_admission
+  note: ""
+- id: I-07
+  kind: invariant
+  requirement: 已冻结 Manifest 只引用确定不可变修订
+  module: bod-app::artifact_acceptance
+  tests: bod-app::artifact_acceptance::tests::invariant_i_07
+  status: implemented
+  evidence: cargo test -p bod-app artifact_acceptance && cargo test -p bod-app cas
+  note: 备注见 I-07 的 CAS 顺序用例（cas::tests::invariant_i_07）
+- id: I-08
+  kind: invariant
+  requirement: 接受决策绑定规格、产物和验证规则的确定版本
+  module: bod-app::artifact_acceptance
+  tests: bod-app::artifact_acceptance::tests::invariant_i_08
+  status: implemented
+  evidence: cargo test -p bod-app artifact_acceptance
+  note: ""
+- id: I-09
+  kind: invariant
+  requirement: 当前权限不得因低层配置覆盖而扩大
+  module: bod-app::authorization
+  tests: bod-app::authorization::tests::invariant_i_09
+  status: implemented
+  evidence: cargo test -p bod-app authorization
+  note: ""
+- id: I-10
+  kind: invariant
+  requirement: 合并证据对应实际目标与候选组合
+  module: ""
+  tests: ""
+  status: planned
+  evidence: ""
+  note: 本 Change 未实现合并证据门禁；tasks.md 4.2 把 I-10 用于 C/R/U 互斥，该语义按 §39.12 实为 I-71，已在 I-71 条目绑定
+- id: I-11
+  kind: invariant
+  requirement: 未确认远程停止不显示全部已停止，也不清空风险预留
+  module: bod-app::effect_recovery
+  tests: bod-app::effect_recovery::tests::i_11_dispatched_without_evidence_inspects_first_then_marks_confirmed
+  status: implemented
+  evidence: cargo test -p bod-app effect_recovery && cargo test -p bod-app cleanup_recovery
+  note: outbox 侧证据不足外报 Confirmed 由 i_11 覆盖；停止确认与风险占用保留由 cleanup_recovery 的 stop/budget 条件补强
+- id: I-12
+  kind: invariant
+  requirement: 一次性同意不能授权不同逻辑动作
+  module: bod-app::authorization
+  tests: bod-app::authorization::tests::invariant_i_12
+  status: implemented
+  evidence: cargo test -p bod-app authorization
+  note: ""
+- id: I-26
+  kind: invariant
+  requirement: 控制面常规协调不依赖协调 Agent 在线或模型返回
+  module: bod-app::lifecycle_recovery
+  tests: bod-app::lifecycle_recovery::tests::disk_full_closes_dispatch_gate
+  status: implemented
+  evidence: cargo test -p bod-app lifecycle_recovery && cargo run -p bod -- fault-matrix
+  note: ""
+- id: I-27
+  kind: invariant
+  requirement: Run 固定输入与计划，控制 spec 更新不静默改验收
+  module: bod-app::resource_state
+  tests: bod-app::resource_state::tests::invariant_i_27
+  status: implemented
+  evidence: cargo test -p bod-app resource_state
+  note: ""
+- id: I-51
+  kind: invariant
+  requirement: 外部完成/回合结束不直接成为业务接受，自动接受必须有授权策略
+  module: bod-app::artifact_acceptance
+  tests: bod-app::artifact_acceptance::tests::invariant_i_51
+  status: implemented
+  evidence: cargo test -p bod-app artifact_acceptance
+  note: ""
+- id: I-55
+  kind: invariant
+  requirement: 用户只读请求不改变业务控制状态或启动 Agent；审计和有界计算允许
+  module: bod-app::control_api
+  tests: bod-app::control_api::tests::read_only_returns_view_without_mutating_state_or_dispatching
+  status: implemented
+  evidence: cargo test -p bod-app control_api
+  note: tasks.md 7.3 用 I-55 指代清理语义，属编号引用错误；清理实际绑定 I-32（见 docs/spec-notes/p0-recovery.md 第 8 节）
+- id: I-68
+  kind: invariant
+  requirement: 已接受唤醒有持久幂等回执，重发不重复增加待办代数
+  module: bod-app::wakeup
+  tests: bod-app::wakeup::tests::i_68_repeated_command_returns_original_receipt_and_no_second_generation
+  status: implemented
+  evidence: cargo test -p bod-app wakeup
+  note: ""
+- id: I-69
+  kind: invariant
+  requirement: 运行中新增唤醒在完成竞争下仍保留下一轮，不能被合并丢失
+  module: bod-app::wakeup
+  tests: bod-app::wakeup::tests::i_70_new_logical_wake_while_running_bumps_generation_without_second_consumer
+  status: implemented
+  evidence: cargo test -p bod-app wakeup
+  note: 该用例函数名带 i_70 前缀，但断言对象是 I-69 的"运行中新增唤醒不丢失"；命名沿用 D2 历史，语义以本行为准
+- id: I-70
+  kind: invariant
+  requirement: 领取/完成按当前队列 lease token 条件更新，过期不盲发已有外部执行
+  module: bod-app::claim_concurrency
+  tests: bod-app::claim_concurrency::tests::i_02_stale_token_cannot_confirm_completion
+  status: implemented
+  evidence: cargo test -p bod-app claim_concurrency
+  note: 用例函数名按 D2 历史命名为 i_02，断言对象是过期 lease token 不得确认完成
+- id: G-1
+  kind: gate
+  requirement: 依赖方向与分层（bod-core 不依赖存储/网络/UI；bod-app 不反向依赖 CLI/桌面）
+  module: xtask
+  tests: xtask::verify_stage_p0
+  status: implemented
+  evidence: cargo run -p xtask -- verify --stage P0
+  note: §39.14 登记为 bod-app::dependency_architecture；P0 由 xtask 守卫实现，未在 bod-app 建同名模块
+- id: G-2
+  kind: gate
+  requirement: 并发认领与预算准入的唯一成功路径
+  module: bod-app::claim_concurrency
+  tests: bod-app::claim_concurrency::tests::i_01_g_2_concurrent_claim_only_one_succeeds
+  status: implemented
+  evidence: cargo test -p bod-app claim_concurrency && cargo test -p bod-app budget_admission
+  note: ""
+- id: G-5
+  kind: gate
+  requirement: 执行端描述符与分项能力声明（未知能力标 unsupported/unknown）
+  module: bod-app::descriptor_schema
+  tests: bod-app::descriptor_schema::tests::fixture_covers_every_required_operation
+  status: implemented
+  evidence: cargo test -p bod-app descriptor_schema
+  note: ""
+- id: G-6
+  kind: gate
+  requirement: 备份可恢复性（缺 WAL/密钥不标可恢复）
+  module: bod-app::migration_safety
+  tests: bod-app::migration_safety::tests::backup_without_wal_is_not_recoverable
+  status: implemented
+  evidence: cargo test -p bod-app migration_safety
+  note: ""
+- id: G-8
+  kind: gate
+  requirement: 预算与 Effect Gate 的提交边界（意图先持久、副作用在提交后）
+  module: bod-app::effect_recovery
+  tests: bod-app::budget_admission::tests::i_05_admission_reserves_and_emits_outbox_in_one_transaction
+  status: implemented
+  evidence: cargo test -p bod-app budget_admission && cargo test -p bod-app effect_recovery
+  note: ""
+- id: G-9
+  kind: gate
+  requirement: 接受绑定与指针 CAS（旧接受不能批准新产物）
+  module: bod-app::artifact_acceptance
+  tests: bod-app::artifact_acceptance::tests::invariant_i_08
+  status: implemented
+  evidence: cargo test -p bod-app artifact_acceptance
+  note: ""
+- id: G-10
+  kind: gate
+  requirement: 平台冒烟（指派→执行→候选登记→重启找回）
+  module: bod
+  tests: bod::smoke::run
+  status: implemented
+  evidence: cargo run -p bod -- smoke
+  note: §39.14 登记为 bod-app::platform_smoke；P0 实现在 CLI crate 的 smoke 模块，未在 bod-app 建同名模块
+- id: G-17
+  kind: gate
+  requirement: 执行端 conformance（重复 start、回包丢失、乱序、取消与确认分离等）
+  module: bod-app::adapter_conformance
+  tests: bod-app::adapter_conformance::tests::fake_suite_passes_every_named_case
+  status: implemented
+  evidence: cargo test -p bod-app adapter_conformance && cargo run -p bod -- adapter conformance
+  note: Fake Executor 仅用于故障 conformance，不计入生产能力
+- id: G-20
+  kind: gate
+  requirement: 磁盘满停止派发、Unknown 保留风险占用且不被 TTL 回收、每案有处理人与下一步
+  module: bod-app::cleanup_recovery
+  tests: bod-app::lifecycle_recovery::tests::disk_full_closes_dispatch_gate
+  status: implemented
+  evidence: cargo test -p bod-app lifecycle_recovery && cargo run -p bod -- fault-matrix
+  note: §39.14 把 G-20 登记到 cleanup_recovery；门禁实现同时分布在 lifecycle_recovery（doctor）与 cleanup_recovery（清理阻塞）
+- id: G-21
+  kind: gate
+  requirement: 控制面准入（403）、版本冲突（409）与只读零派发
+  module: bod-app::authorization
+  tests: bod-app::control_api::tests::g_21
+  status: implemented
+  evidence: cargo test -p bod-app control_api
+  note: ""
+- id: G-44
+  kind: gate
+  requirement: 唤醒并发/新代数/去重窗口/崩溃恢复
+  module: bod-app::wakeup
+  tests: bod-app::wakeup::tests::i_68_repeated_command_returns_original_receipt_and_no_second_generation
+  status: implemented
+  evidence: cargo test -p bod-app wakeup
+  note: ""
+- id: G-45
+  kind: gate
+  requirement: 预算单写次序/Busy/在途 C-R-U 转换
+  module: bod-app::budget_admission
+  tests: bod-app::budget_admission::tests::i_71_cancel_to_risk_keeps_total_and_never_double_counts
+  status: implemented
+  evidence: cargo test -p bod-app budget_admission
+  note: ""
+- id: G-49
+  kind: gate
+  requirement: 迁移 lint/旧库升级/高风险例外/恢复
+  module: bod-app::migration_safety
+  tests: bod-app::migration_safety::tests::restore_reports_counts_and_opens_dispatch_when_clean
+  status: implemented
+  evidence: cargo test -p bod-app migration_safety && cargo run -p xtask -- migration-check
+  note: ""
+- id: G-50
+  kind: gate
+  requirement: 验证索引全量/真实目标与断言/支持声明门禁
+  module: bod-app::verification_registry
+  tests: bod-app::verification_registry::tests::registry_covers_every_spec_reference
+  status: implemented
+  evidence: cargo run -p bod -- verify-index
+  note: ""
