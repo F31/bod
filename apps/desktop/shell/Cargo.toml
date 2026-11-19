@@ -1,0 +1,20 @@
+[package]
+name = "bod-desktop-shell"
+description = "Tauri 2 窗口壳：把 bod-desktop 的连接控制器接到真实窗口（P0 任务 8.1）"
+edition = "2024"
+version = "0.1.0"
+publish = false
+
+# 刻意独立成 workspace：tauri 依赖图约 427 个包，放进主工作区会让
+# 每次 `cargo test/build` 都要解析整张图。这里用 path 依赖复用 bod-desktop，
+# 由 `cargo build --manifest-path apps/desktop/shell/Cargo.toml` 单独构建。
+[workspace]
+
+[dependencies]
+bod-desktop = { path = "../src-tauri" }
+bod-app = { path = "../../../crates/bod-app" }
+tauri = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+tauri-build = { version = "2" }

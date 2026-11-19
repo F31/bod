@@ -65,9 +65,9 @@
 
 ## 8. 桌面连接原型、验证索引与发布纪律
 
-- [ ] 8.1 实现 Tauri 2 壳的 connect_or_spawn、握手取地址与 close_action=detach 原型（不启动第二个业务 DB），验证桌面退出不终止外部已有宿主、启动密钥不出现在日志。
-  - 进度：宿主对端与连接控制器已完成并端到端验证——`bod serve`（受保护握手/健康检查/授权停止/原子描述文件）+ `bod-desktop::connection` 的 Std 实现；`cargo test -p bod-app host_handshake` 6 项、`cargo test -p bod --test host_handshake_e2e` 2 项（真实子进程）、`cargo test -p bod-desktop` 7 项、`cargo test -p bod-desktop --test detach_e2e` 2 项（真实子进程：句柄丢弃后宿主存活、外部宿主拒绝 `stop_host`、日志脱敏）全过。
-  - 未完成：Tauri 2 窗口本体。阻塞已定位到本机 cargo 而非仓库代码：只含 `tauri = "2"` 的空白 crate 可在 0.21 s 内 `--no-deps` 返回、写出 427 包锁文件，随后在零 IO、零 CPU、无套接字的状态下停滞（`registry/src` 不增长）；联网路径则因 libcurl + schannel 报 `CRYPT_E_REVOCATION_OFFLINE` / `server closed abruptly` 而失败。已回退依赖以保证工作区可构建；复现数据与恢复步骤见 `docs/spec-notes/p0-desktop.md` §2，故不勾选。
+- [x] 8.1 实现 Tauri 2 壳的 connect_or_spawn、握手取地址与 close_action=detach 原型（不启动第二个业务 DB），验证桌面退出不终止外部已有宿主、启动密钥不出现在日志。
+  - 证据（真实窗口 + 真实宿主，2026-11-19 实测）：窗口本体在独立 crate `apps/desktop/shell`（tauri 2 + serde，path 依赖 `bod-desktop`，根 `Cargo.toml` 用 `exclude` 隔离，避免 427 包拖进主工作区）。`cargo build --offline` 首次 56 分钟通过；`Start-Process` 起窗口后 `CloseMainWindow()` 关窗，两个场景都通过——A 已有外部宿主：`spawned_by_desktop=false`、`close-requested，close_action=detach stopped=false`、`detach: 断开 …宿主继续运行`，关窗后宿主进程存活、描述文件未改动；B 无宿主：`spawned_by_desktop=true` 由桌面启动，关窗后 `spawned_host_alive_after_close=True`（不在 Job Object、不 kill-on-drop）。全部输出只有 `session_key=<redacted>`，`connection_status` 命令只返回 address/pid/instance_id/spawned_by_desktop/close_action。细节见 `docs/spec-notes/p0-desktop.md` §2。
+  - 已知限制：`bundle.active=false`（未打包）、图标为占位、未断言页面渲染内容。
 - [x] 8.2 运行前端检查链 `npm --prefix apps/workbench ci`、`run typecheck`、`run test`、`run build`，验证四项全部通过且桌面/headless 结果分别记录，不用 headless 结果宣称桌面通过。
   - 证据：新建 `apps/workbench`（TypeScript + `node --test`，依赖仅 typescript/@types/node）。`npm --prefix apps/workbench ci` → added 3 packages；`run typecheck` 通过；`run test` → 8/8；`run build` → `dist/{index.html,main.js,connection.js}`。桌面侧未实测，未宣称桌面通过（见 `docs/spec-notes/p0-desktop.md` §3.3）。
 - [x] 8.3 汇总本 Change 的 I/G 验证索引并运行 `cargo run -p xtask -- verify --stage P0`、`cargo fmt --all -- --check`、`cargo clippy -p bod-core -p bod-app -p bod --all-targets -- -D warnings`、`cargo test -p bod-core`、`cargo test -p bod-app`，验证 G-50 报告列出全部绑定的 planned/implemented 状态且无未知或重复 I/G 引用。

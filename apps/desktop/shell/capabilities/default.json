@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "桌面壳默认能力：只授核心窗口能力，不开放文件系统、shell 与 HTTP 插件",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

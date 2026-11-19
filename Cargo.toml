@@ -7,6 +7,9 @@ members = [
   "apps/desktop/src-tauri",
   "xtask",
 ]
+# 窗口壳独立成 workspace：tauri 依赖图约 427 包，放进主工作区会让每次
+# cargo test/build 都解析整张图。它只依赖 bod-desktop，由自己的清单构建。
+exclude = ["apps/desktop/shell"]
 default-members = ["crates/bod-core", "crates/bod-app", "crates/bod"]
 
 [workspace.package]

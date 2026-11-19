@@ -5,7 +5,7 @@
 
 ## 当前切片
 
-- **阶段**：P0 最小可信核心，D0—D6 已完成、D7 部分完成（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.2—8.4；8.1 缺 Tauri 窗口本体）。
+- **阶段**：P0 最小可信核心，D0—D7 全部完成（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.1—8.4）。
 - **已落地**：五 crate workspace（`bod-core` / `bod-app` / `bod` / `bod-desktop` / `xtask`）、
   最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录、
   §37.14 配置 schema 与 `config explain` / `config validate`（保留来源与语义）、
@@ -26,7 +26,8 @@
   CleanupBlocked 稳定阻塞码、Abandon 残留清单、外部仓库/正式 Manifest/接受交付永不自动销毁、
   清理 Effect Gate 幂等、`bod fault-matrix` 5 场景与 `bod perf` 实测）、
   D7 收口（`bod-desktop::connection` 的 connect_or_spawn/握手/detach 控制器、真实
-  `StdHostProbe`/`StdHostSpawner`/`StdHostControl` 与 7 项测试）、
+  `StdHostProbe`/`StdHostSpawner`/`StdHostControl`，7 项单测 + 2 项真实子进程 `detach_e2e`；
+  独立 crate `apps/desktop/shell` 的 Tauri 2 窗口本体，真实窗口关窗实测两种宿主场景）、
   `verification/gates.yaml` + `bod verify-index` + `xtask verify` 的 G-50 覆盖检查、
   P0 支持矩阵与已知限制、
   宿主控制面 `bod serve`（受保护握手/健康检查/授权停止，6 项单测 + 2 项真实子进程 e2e）、
