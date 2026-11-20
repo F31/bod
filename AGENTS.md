@@ -191,6 +191,10 @@
   `OutsideScope`，撤任后子树回到项目委任；嵌套专项只由治理主体创建且只返回作用域。reportsTo 只写
   `agent_org_metadata`，写入前后比对 issues/runs/leases/grants/appointments 摘要，「没有迁移状态」
   是比对结果而不是声明（迁移 13 条 / 表 49 张，16 项命名用例）。
+  切片 3.6 在 `docs/spec-notes/p2-manager-transfer.md` §6 写出负责人切换操作手册：§41.8 出口的
+  M1—M12 每行给出接口、可执行 `cargo test` 与稳定拒绝码，§6.2 列出四个反例与阻断码，§6.3 给十步
+  顺序，§6.4 明确 N2/N4 没有样本并归属 5.1/4.4；新增 `tests/p2_manager_transfer_manual.rs`
+  逐条核对 ID、命令与错误码，文档与代码脱节即失败（3 项自检）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

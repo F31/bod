@@ -323,7 +323,20 @@
     「切换/命令重复不产生双委任」「Committed 后只向前恢复且换人用新 epoch」，实际由 3.1/3.2 覆盖；
     本切片按 manager-transfer 的「作用域边界」「组织元数据不迁移状态」两条需求落地，
     不宣称 I-62—I-64 已验收。详见 `docs/spec-notes/p2-manager-transfer.md` §5。
-- [ ] 3.6 编写负责人切换操作说明到 `docs/spec-notes/p2-manager-transfer.md`，验证 §41.8 的每项验收要求都有对应命令与拒绝样本。
+- [x] 3.6 编写负责人切换操作说明到 `docs/spec-notes/p2-manager-transfer.md`，验证 §41.8 的每项验收要求都有对应命令与拒绝样本。
+  - 证据（2026-11-20，`cargo test -p bod-app --test p2_manager_transfer_manual` → 3 passed）：
+    `p2-manager-transfer.md` §6 新增操作手册——§6.1 按 §41.8 出口流程逐条列出 M1—M12
+    （委任 A、两个员工任务、切到 B、旧票被拒、进度继续、已接受不重做、费用保留、读增量后确认、
+    授权内下一步、历史不可改写、争议待核查、组织字段不迁移状态），每行给出接口、可执行的
+    `cargo test -p bod-app <module>` 与稳定拒绝码（`ScopeAlreadyManaged` / `StaleAppointment` /
+    `RedoAccepted` / `FeeSubjectIsImmutable` / `CrossesSpecialBoundary` / `BypassAttempt` 等）；
+    §6.2 列出 §41.8 的四个反例（无条件恢复旧 epoch、默认全员重启、补造完整日志、丢弃未知预留）
+    及阻断它们的错误码；§6.3 给出十步操作顺序；§6.4 如实标注 N2（双人并发切换）与 N4（B 不可用）
+    **没有样本**，归属 5.1/4.4，M1—M12 的「已测」也只是库内断言而非真实项目演练。
+    手册不是「写完就算」：新增集成测试 `p2_manager_transfer_manual.rs` 逐条核对 ID 是否出现、
+    命令是否可执行且模块文件存在、引用的错误码是否真的在 `src/` 中（文档写不存在的错误即失败），
+    并要求未覆盖项写明归属切片。6.4 另记：§41.8 的「费用风险保留」拆成「费用主体不可改写」（M7）
+    与「Unknown 预留不丢弃」（N6/R4）两步，任何一步未过都不算保留。
 
 ## 4. 公开符合性与双运行时
 
