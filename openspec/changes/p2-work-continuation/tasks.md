@@ -115,7 +115,32 @@
     边界：不连真实连接器（查询只到「通过注册表校验的查询」为止）、不判定费用释放（属预算流程）、
     迁移仍 9 条、表仍 41 张；不写 `gates.yaml`（P2 绑定仍 planned，`invariant_i_49` 在 §39.10
     归属 `budget_admission` 与本模块的差异延续既有记录）。详见 `docs/spec-notes/p2-takeover.md` §3。
-- [ ] 2.4 实现重建预检（摘要/授权/输入差异/文件/工具依赖）与 Question 生成，验证摘要不匹配时阻止自动继续。
+- [x] 2.4 实现重建预检（摘要/授权/输入差异/文件/工具依赖）与 Question 生成，验证摘要不匹配时阻止自动继续。
+  - 证据（2026-11-20，`cargo test -p bod-app rebuild_precheck` → 20 passed；`cargo test -p bod-app
+    takeover_intent` → 20 passed）：新增 `bod-app::rebuild_precheck`，不建新表、不新增迁移。
+    「摘要不匹配不得自动继续」收进返回类型：`next_action()` 在 `Blocked` 时只返回
+    `Err(RemedyRequired)`，选措施后也只给 `Recapture`/`Manual` 两种动作，`Rebuild` 仅在无阻塞且
+    无待答问题时出现；`resolve()` 拒绝在 `Ready`（`NothingToResolve`）与 `NeedsAnswer`
+    （`RemedyNotApplicable`）时选措施，重复选择报 `RemedyAlreadyChosen`。
+    比较只覆盖 `ContentState::Included`（`Match`/`Mismatch`/`Missing`/`Unreadable`），指针、按授权
+    引用、脱敏、未导出一律进 `unverified` 而不是「通过」；差异说明只给路径与摘要前 12 位，不含内容。
+    首次实现把 `RequiredService`（`postgres://…` 含冒号）与 `ToolchainPin` 当文件比对，测试实测
+    报 `InvalidPath` 与误报 `file_missing`——已修正为「标识符条目按工具版本/服务可达性核验」，
+    两类都不进 `unverified`；`UnresolvedConflict` 单独阻断。
+    忽略规则只作用于清单外文件：额外文件被忽略后 `Ready`，清单内文件命中同一前缀仍照常比对并阻断
+    （`ignored` 为空），防止用前缀掩盖篡改；未忽略的额外文件形成 `UnexpectedFile` Question
+    （保留/删除后重取/加入忽略，`blocked_items` 只含该路径，`all_attempt=false`），系统不自动删除。
+    授权只接受宿主 `Authorization`（epoch + scope + 撤销），包内 `HandoffLevel` 无转换路径；旧 epoch、
+    已撤销、范围不含分别阻断，`Referenced` 条目的引用名同走 scope 判定。
+    预检运行只接受已登记命令引用（字符集受限，空格/管道/分号拒绝），`NotRun` 不计通过，声明必需的
+    类型无 `Passed` 报 `required_precheck_missing`，失败报 `precheck_failed` 并带证据引用。
+    目标理解三取值且 `is_candidate_only()` 恒真——「宿主自动判定一致」在类型里无法表达；歧义/冲突
+    必须给分歧点并转成 P1 `clarification_dialogue::ClarificationQuestion`，责任方取自
+    `question_owner`（空值拒绝），不由 Agent 填写。
+    接入 2.1：`Transition` 新增 `precheck`，进入 `Restored` 缺凭据报 `MissingPrecheck`（意图停在
+    `attempt_created`），attempt_id 或 input_revision 不符报 `PrecheckMismatch`，通过时把
+    「已核验 N 项 / 未核验 M 项」写进阶段历史。边界：不读写真实工作区、不执行命令、不生成接续卡片
+    （2.5）、不写 `gates.yaml`（P2 绑定仍 planned）。详见 `docs/spec-notes/p2-takeover.md` §4。
 - [ ] 2.5 实现接续可见性卡片（等级/保留成果/missing/停止状态/重建步骤），验证换人不改变验收或合并旧未验收成果。
 - [ ] 2.6 编写接管事务与故障样本说明到 `docs/spec-notes/p2-takeover.md`，验证每个阶段对应 scenario 与可注入故障点。
 

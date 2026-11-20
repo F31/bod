@@ -130,6 +130,15 @@
   缺路由记为 `unreconcilable` 而非 `skipped`；`Applied→Confirmed`、`NotApplied→Failed`、
   `StillUnknown→Unknown`，不明不能结案；`resend_guard` 只放行 `Prepared`/`Failed`；
   `block_scope` 取依赖闭包并同时给出 `free`，不冻结整个项目（18 项命名用例）。
+  切片 2.4 落地 `bod-app::rebuild_precheck`（无新表）：摘要不匹配没有「继续」出口——`next_action()`
+  在阻塞时只返回 `RemedyRequired`，选措施后只有「重取现场」或「人工处理」两种动作，`Rebuild` 仅在
+  无阻塞且无待答问题时出现；比较只覆盖 `Included`，指针/授权引用/脱敏/未导出进 `unverified` 而非
+  「通过」。`RequiredService`/`ToolchainPin` 按标识符核验（首版误当文件路径，实测报 `InvalidPath`
+  与假缺失后修正）；忽略规则只作用于清单外文件，清单内文件命中同前缀仍照常比对。额外文件形成
+  `UnexpectedFile` Question 且不自动删除；授权按 epoch/撤销/scope 当场复核，包内等级不是授权；
+  预检命令只接受已登记引用，`NotRun` 不计通过；目标理解只有候选形态，歧义/冲突转 P1 Question 且
+  责任方不由 Agent 填。`PrecheckClearance` 作为 `attempt_created → restored` 的准入凭据，缺凭据或
+  attempt/修订不符即拒绝并保持原阶段（20 + 20 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

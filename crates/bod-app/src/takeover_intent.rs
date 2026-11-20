@@ -17,6 +17,7 @@
 use crate::canonical_json::{self, CanonicalError};
 use crate::domain::DomainId;
 use crate::isolation_check::IsolationClearance;
+use crate::rebuild_precheck::PrecheckClearance;
 use crate::store::{SqliteStore, StoreError};
 use std::fmt;
 
@@ -220,6 +221,8 @@ pub struct Transition {
     pub summary_snapshot_key: Option<String>,
     /// 进入 `IsolationChecked`/`Admitted` 时必须提供：来自 2.2 的隔离判定。
     pub isolation: Option<IsolationClearance>,
+    /// 进入 `Restored` 时必须提供：来自 2.4 的重建预检通过凭据。
+    pub precheck: Option<PrecheckClearance>,
 }
 
 impl Transition {
@@ -231,6 +234,7 @@ impl Transition {
             attempt: None,
             summary_snapshot_key: None,
             isolation: None,
+            precheck: None,
         }
     }
 
@@ -251,6 +255,11 @@ impl Transition {
 
     pub fn with_isolation(mut self, clearance: IsolationClearance) -> Self {
         self.isolation = Some(clearance);
+        self
+    }
+
+    pub fn with_precheck(mut self, clearance: PrecheckClearance) -> Self {
+        self.precheck = Some(clearance);
         self
     }
 }
@@ -461,11 +470,20 @@ impl TakeoverIntent {
         let mut next = self.clone();
         next.phase = transition.to;
         next.updated_at = transition.at.clone();
-        let note = match (&transition.note, &transition.isolation) {
-            (Some(text), Some(clearance)) => Some(format!("{text}；{}", clearance.describe())),
-            (None, Some(clearance)) => Some(clearance.describe()),
-            (Some(text), None) => Some(text.clone()),
-            (None, None) => None,
+        let mut note_parts: Vec<String> = Vec::new();
+        if let Some(text) = &transition.note {
+            note_parts.push(text.clone());
+        }
+        if let Some(clearance) = &transition.isolation {
+            note_parts.push(clearance.describe());
+        }
+        if let Some(clearance) = &transition.precheck {
+            note_parts.push(clearance.describe());
+        }
+        let note = if note_parts.is_empty() {
+            None
+        } else {
+            Some(note_parts.join("；"))
         };
         next.history.push(PhaseRecord {
             phase: transition.to,
@@ -567,6 +585,27 @@ impl TakeoverIntent {
                     });
                 }
             }
+            TakeoverPhase::Restored => {
+                let clearance = transition
+                    .precheck
+                    .as_ref()
+                    .ok_or(TakeoverError::MissingPrecheck)?;
+                let attempt = self.attempt.as_ref().ok_or(TakeoverError::MissingAttempt)?;
+                if clearance.attempt_id() != attempt.attempt_id {
+                    return Err(TakeoverError::PrecheckMismatch {
+                        field: "attempt_id",
+                        expected: attempt.attempt_id.clone(),
+                        actual: clearance.attempt_id().to_string(),
+                    });
+                }
+                if clearance.input_revision() != self.request.work_package_revision.as_str() {
+                    return Err(TakeoverError::PrecheckMismatch {
+                        field: "input_revision",
+                        expected: self.request.work_package_revision.as_str().to_string(),
+                        actual: clearance.input_revision().to_string(),
+                    });
+                }
+            }
             TakeoverPhase::AttemptCreated => {
                 let attempt = transition
                     .attempt
@@ -640,6 +679,12 @@ pub enum TakeoverError {
     IsolationBlocked {
         codes: Vec<String>,
     },
+    MissingPrecheck,
+    PrecheckMismatch {
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
     SummaryNotRequested,
     FencingNotIncreased {
         baseline: u64,
@@ -683,6 +728,17 @@ impl fmt::Display for TakeoverError {
             Self::IsolationBlocked { codes } => {
                 write!(f, "隔离未通过，不能准入：{}", codes.join(","))
             }
+            Self::MissingPrecheck => {
+                write!(f, "进入 restored 必须带 2.4 的重建预检通过凭据")
+            }
+            Self::PrecheckMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "预检凭据与接管意图不一致：{field} 期望 {expected}，实际 {actual}"
+            ),
             Self::SummaryNotRequested => write!(f, "尚未请求总结，不能标记为已收到"),
             Self::FencingNotIncreased { baseline, proposed } => write!(
                 f,
@@ -966,7 +1022,56 @@ mod tests {
         ) {
             transition = transition.with_isolation(cleared_clearance());
         }
+        // 进入 restored 必须带 2.4 的重建预检通过凭据（attempt 与工作包修订须一致）。
+        if to == TakeoverPhase::Restored {
+            transition = transition.with_precheck(cleared_precheck(
+                intent
+                    .attempt
+                    .as_ref()
+                    .expect("restored 之前必须已登记 attempt")
+                    .attempt_id
+                    .as_str(),
+                intent.request.work_package_revision.as_str(),
+            ));
+        }
         intent.commit(store, expected, transition, NOW_MS).unwrap()
+    }
+
+    /// 一份真实跑通的预检报告 → `restored` 的准入凭据。
+    ///
+    /// 不用生产后门构造：走 2.4 的完整判定（清单 + 实测摘要 + 目标候选）。
+    fn cleared_precheck(attempt_id: &str, input_revision: &str) -> PrecheckClearance {
+        use crate::handoff_manifest::ManifestBuilder;
+        use crate::rebuild_precheck::{
+            Authorization, GoalAssessment, ObservedFile, ObservedWorkspace, RebuildPrecheck,
+        };
+
+        let mut builder = ManifestBuilder::new();
+        builder.add_file("src/main.rs", b"fn main() {}");
+        let manifest = builder
+            .build("company-1", "project-1", input_revision)
+            .expect("manifest");
+        let observed = ObservedWorkspace::new(vec![ObservedFile::present(
+            "src/main.rs",
+            crate::domain::artifact::Digest::of_bytes(b"fn main() {}"),
+        )])
+        .expect("observed");
+        let report = RebuildPrecheck::new(
+            attempt_id,
+            input_revision,
+            "2026-11-20T11:08:30Z",
+            "manager-1",
+            Authorization::new(2, "2026-11-20T11:00:00Z")
+                .unwrap()
+                .grant("workspace:write"),
+            2,
+            "workspace:write",
+        )
+        .unwrap()
+        .with_goal(GoalAssessment::no_material_difference(1))
+        .evaluate(&manifest, &observed)
+        .expect("report");
+        PrecheckClearance::from_report(&report).expect("clearance")
     }
 
     /// 一份「停止已确认 + 环境已销毁」的隔离判定 → `Cleared`。
@@ -1573,6 +1678,118 @@ mod tests {
         let text = admitted.describe();
         assert!(text.contains("隔离已证实"), "{text}");
         assert!(text.contains("environment_destroyed"), "{text}");
+    }
+
+    #[test]
+    fn restored_requires_precheck_clearance() {
+        let root = temp_root("precheck-missing");
+        let store = open_store(&root);
+        let mut intent = walk_to_attempt_created(&store);
+        let err = intent
+            .commit(
+                &store,
+                intent.version,
+                Transition::new(TakeoverPhase::Restored, "2026-11-20T11:09:00Z"),
+                NOW_MS,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TakeoverError::MissingPrecheck), "{err}");
+        // 拒绝后意图仍停在 attempt_created，没有半推进。
+        let reloaded = TakeoverIntent::load(&store, "company-1", "takeover-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.phase, TakeoverPhase::AttemptCreated);
+    }
+
+    #[test]
+    fn restored_rejects_precheck_for_another_attempt() {
+        let root = temp_root("precheck-mismatch");
+        let store = open_store(&root);
+        let mut intent = walk_to_attempt_created(&store);
+        let err = intent
+            .commit(
+                &store,
+                intent.version,
+                Transition::new(TakeoverPhase::Restored, "2026-11-20T11:09:00Z")
+                    .with_precheck(cleared_precheck("attempt-other", "wp-r1")),
+                NOW_MS,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TakeoverError::PrecheckMismatch {
+                    field: "attempt_id",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+
+        // 工作包修订不同同样拒绝：预检结论不能跨修订复用。
+        // 上一次拒绝没有推进版本，可复用同一意图继续测下一分支。
+        let err = intent
+            .commit(
+                &store,
+                intent.version,
+                Transition::new(TakeoverPhase::Restored, "2026-11-20T11:10:00Z")
+                    .with_precheck(cleared_precheck("attempt-new", "wp-r2")),
+                NOW_MS,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TakeoverError::PrecheckMismatch {
+                    field: "input_revision",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        // 两次拒绝都不推进：意图仍在 attempt_created。
+        assert_eq!(intent.phase, TakeoverPhase::AttemptCreated);
+    }
+
+    #[test]
+    fn restored_records_precheck_in_history() {
+        let root = temp_root("precheck-history");
+        let store = open_store(&root);
+        let mut intent = walk_to_attempt_created(&store);
+        advance(
+            &mut intent,
+            &store,
+            TakeoverPhase::Restored,
+            "2026-11-20T11:09:00Z",
+        );
+        assert_eq!(intent.phase, TakeoverPhase::Restored);
+        let record = intent
+            .history
+            .iter()
+            .find(|item| item.phase == TakeoverPhase::Restored)
+            .unwrap();
+        let text = record.describe();
+        assert!(text.contains("重建预检通过"), "{text}");
+        assert!(text.contains("已核验 1 项"), "{text}");
+        assert!(text.contains("未核验 0 项"), "{text}");
+    }
+
+    /// 走到 attempt_created（含 admitted 之前的全部阶段）。
+    fn walk_to_attempt_created(store: &SqliteStore) -> TakeoverIntent {
+        let mut intent = walk_to_admitted(store);
+        intent
+            .commit(
+                store,
+                intent.version,
+                Transition::new(TakeoverPhase::AttemptCreated, "2026-11-20T11:08:00Z")
+                    .with_attempt(AttemptCreation {
+                        attempt_id: "attempt-new".to_string(),
+                        fencing_token: 4,
+                    }),
+                NOW_MS,
+            )
+            .unwrap();
+        intent
     }
 
     /// 走到 admitted（含请求总结）。
