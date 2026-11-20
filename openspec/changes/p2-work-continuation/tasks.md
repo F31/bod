@@ -275,7 +275,35 @@
     执行者只能反馈，受委任负责人在 Grant 内可安排工作」，检查点增量与接管资料的权威编号是
     **I-65** 与 **G-42**；本切片按 I-65 + G-42 落地，不宣称 I-60 已验收。
     详见 `docs/spec-notes/p2-manager-transfer.md` §3。
-- [ ] 3.4 实现历史成果/费用不可变与争议待核查标记，验证 `invariant_i_61`：新经理不能追溯修改旧接受或费用主体。
+- [x] 3.4 实现历史成果/费用不可变与争议待核查标记，验证 `invariant_i_61`：新经理不能追溯修改旧接受或费用主体。
+  - 证据（2026-11-20，`cargo test -p bod-app history_continuity` → 21 passed）：新增
+    `bod-app::history_continuity` 与迁移 `012_history_disputes.sql`（`history_disputes`），
+    迁移 11 → 12、表 46 → 47，`xtask migration-check` 同步登记。
+    责任分三段：**阻止**靠数据库（012 新增 `acceptances_binding_immutable` 与
+    `acceptances_supersede_monotonic`，账本/修订沿用 003/005 的 no_update/no_delete），
+    **发现**靠 `HistoryView::capture` + `compare` 对 artifact / revision / manifest /
+    acceptance / ledger / decision 六类事实求指纹与 sha256 游标，**表达异议**靠
+    `history_disputes` 只写一行 `under_review`。
+    内容指纹与前进指针分开：`accepted_revision` 与 `superseded_by` 的 `None → Some` 算正常前进，
+    `Some → None` / `Some(A) → Some(B)` 判回退并报 `RewindFact`；新增事实只进 `appended`，
+    所以「换人后正常产出」不会被误判成篡改，而「改一条旧行」与「删一条旧行」分别报
+    `altered` / `vanished`，实测删除旧决定报 `HistoryRewritten{vanished:1}` 而不是当作已清理。
+    追溯请求只有一个成功出口：`ReverifyAccepted` 返回 `PreserveThenPropose{preserved,
+    requirement: "p3-impact-reverification"}`（保留旧接受、提案属 P3 2.3，本切片不建第二套重验流程），
+    `RewriteAcceptance` / `ReassignFeeSubject` / `DeleteHistory` 分别恒错
+    `AcceptanceIsImmutable` / `FeeSubjectIsImmutable` / `HistoryIsAppendOnly`。
+    争议行冻结对象与理由、已结案不能改判或重开、行不可删除（三条 trigger）；`raise` 要求
+    理由与证据且对象必须存在，同 `dispute_id` 同内容幂等、不同内容 `DisputeKeyReuse`；
+    `resolve` 用 `WHERE state='under_review'` 条件更新，并发只有一个成功；推翻只返回
+    `FollowUp`（指向 P3 提案），旧接受一字不改；`check_drift` 对「争议期间对象被改动」报
+    `FactDriftSinceCapture`；`dispute_as_ticket` 恒返回 `DisputeIsNotAuthority`。
+    核对中发现两处既有缺口并如实记录、未顺手改：005 的 `acceptances_immutable` 只冻结
+    id/修订/结论/主体/时间，五元组其余字段与理由/证据仍可 UPDATE（本切片以新增 trigger 补齐，
+    不改写 005 历史定义）；`decisions` 表没有任何不可变约束，本切片只能发现、不能阻止，
+    是否冻结留给后续切片。详见 `docs/spec-notes/p2-manager-transfer.md` §4。
+    边界：不判断「可用额度是否被重置」（预算解释属 3.1/4.x）、不实现影响图与重验调度（P3）、
+    不写 `gates.yaml`（P2 绑定仍 planned）。本任务引用的 `invariant_i_61` 与 §39.11 语义一致，
+    但同段的 G-40（费用风险保留）未因此验收。
 - [ ] 3.5 实现专项委任边界与组织元数据分离，验证项目负责人不能越过专项范围指挥，reportsTo 变更不迁移 Run/租约/权限（`invariant_i_62`—`invariant_i_64`）。
 - [ ] 3.6 编写负责人切换操作说明到 `docs/spec-notes/p2-manager-transfer.md`，验证 §41.8 的每项验收要求都有对应命令与拒绝样本。
 

@@ -42,8 +42,8 @@ use std::path::Path;
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
 /// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
 /// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图，
-/// 010 为 P2 管理委任/作用域头/命令审计，011 为 P2 检查点与接管确认；
-/// 新增迁移只能追加，不可原地改写（§33.7）。
+/// 010 为 P2 管理委任/作用域头/命令审计，011 为 P2 检查点与接管确认，
+/// 012 为 P2 历史争议与接受五元组冻结；新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_queue.sql"),
@@ -56,6 +56,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/009_takeover.sql"),
     include_str!("../migrations/010_management.sql"),
     include_str!("../migrations/011_handover_review.sql"),
+    include_str!("../migrations/012_history_disputes.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -71,6 +72,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "009_takeover.sql",
     "010_management.sql",
     "011_handover_review.sql",
+    "012_history_disputes.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -79,6 +81,62 @@ pub fn migration_sources() -> impl Iterator<Item = (&'static str, &'static str)>
         .iter()
         .copied()
         .zip(MIGRATIONS.iter().copied())
+}
+
+/// 修订正文事实（P2 3.4）：历史连续比对要覆盖摘要与大小，不能只看产出者。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionBodyRow {
+    pub revision_id: String,
+    pub artifact_id: String,
+    pub produced_by: String,
+    pub digest: String,
+    pub size_bytes: i64,
+    pub mime: String,
+    pub created_at_ms: i64,
+}
+
+/// 正式 Manifest 事实（P2 3.4）：冻结的是引用集合，不含正文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestBodyRow {
+    pub uid: String,
+    pub revision: i64,
+    pub milestone: String,
+    pub artifact_revision_refs: String,
+    pub acceptance_refs: String,
+    pub signature_ref: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// 决定事实（P2 3.4）：旧经理的决定不会因换人消失或改口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionBodyRow {
+    pub decision_id: String,
+    pub actor_id: String,
+    pub decision: String,
+    pub reason: String,
+    pub evidence_refs: String,
+    pub revision_refs: String,
+    pub created_at_ms: i64,
+}
+
+/// 争议行（`history_disputes`）：只标待核查，不改被争议的记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisputeRow {
+    pub dispute_id: String,
+    pub company_id: String,
+    pub project_id: String,
+    pub fact_kind: String,
+    pub fact_id: String,
+    pub fact_fingerprint: String,
+    pub reason: String,
+    pub evidence_refs: String,
+    pub raised_by: String,
+    pub state: String,
+    pub resolution: Option<String>,
+    pub resolved_by: Option<String>,
+    pub resolved_at_ms: Option<i64>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug)]
@@ -828,6 +886,211 @@ impl SqliteStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目范围内的历史接受（只读）：经成果归属落到项目，供换人前后逐字段比对。
+    ///
+    /// 与 `list_acceptances_for_company` 的差别只是作用域；不做字段裁剪。
+    pub fn list_project_acceptances(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<AcceptanceRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acceptances.acceptance_id, acceptances.artifact_id,
+                    acceptances.work_package_revision, acceptances.input_baseline,
+                    acceptances.artifact_revision, acceptances.verification_rules,
+                    acceptances.target_environment, acceptances.merge_combination,
+                    acceptances.decision, acceptances.actor_id, acceptances.reason,
+                    acceptances.evidence_refs, acceptances.accepted_at_ms, acceptances.superseded_by
+             FROM acceptances
+             JOIN artifacts ON artifacts.uid = acceptances.artifact_id
+             WHERE acceptances.company_id = ?1 AND artifacts.project_id = ?2
+             ORDER BY acceptances.accepted_at_ms ASC, acceptances.rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            let decision = AcceptanceDecision::parse(&row.get::<_, String>(8)?)
+                .unwrap_or(AcceptanceDecision::RequiresHuman);
+            let evidence: String = row.get(11)?;
+            Ok(AcceptanceRecord {
+                acceptance_id: DomainId::new(row.get::<_, String>(0)?),
+                artifact_id: DomainId::new(row.get::<_, String>(1)?),
+                binding: crate::domain::artifact::AcceptanceBinding {
+                    work_package_revision: DomainId::new(row.get::<_, String>(2)?),
+                    input_baseline: DomainId::new(row.get::<_, String>(3)?),
+                    artifact_revision: DomainId::new(row.get::<_, String>(4)?),
+                    verification_rules: DomainId::new(row.get::<_, String>(5)?),
+                    target_environment: DomainId::new(row.get::<_, String>(6)?),
+                    merge_combination: row.get::<_, Option<String>>(7)?.map(DomainId::new),
+                },
+                decision,
+                actor: DomainId::new(row.get::<_, String>(9)?),
+                reason: row.get(10)?,
+                evidence_refs: split_list(&evidence),
+                accepted_at_ms: row.get::<_, i64>(12)?,
+                superseded_by: row.get::<_, Option<String>>(13)?.map(DomainId::new),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目内修订正文事实（只读）：摘要/大小/mime 进指纹，便于发现「换了一条内容」。
+    pub fn list_project_revision_bodies(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<RevisionBodyRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT revisions.revision_id, revisions.artifact_id, revisions.produced_by,
+                    revisions.digest, revisions.size_bytes, revisions.mime, revisions.created_at_ms
+             FROM artifact_revisions AS revisions
+             JOIN artifacts ON artifacts.uid = revisions.artifact_id
+             WHERE revisions.company_id = ?1 AND artifacts.project_id = ?2
+             ORDER BY revisions.revision_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok(RevisionBodyRow {
+                revision_id: row.get(0)?,
+                artifact_id: row.get(1)?,
+                produced_by: row.get(2)?,
+                digest: row.get(3)?,
+                size_bytes: row.get(4)?,
+                mime: row.get(5)?,
+                created_at_ms: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目内正式 Manifest 事实（只读）。冻结的是引用集合，不是正文。
+    pub fn list_project_manifests(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<ManifestBodyRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, revision, milestone, artifact_revision_refs, acceptance_refs,
+                    signature_ref, created_at_ms
+             FROM manifests WHERE company_id = ?1 AND project_id = ?2 ORDER BY uid",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok(ManifestBodyRow {
+                uid: row.get(0)?,
+                revision: row.get(1)?,
+                milestone: row.get(2)?,
+                artifact_revision_refs: row.get(3)?,
+                acceptance_refs: row.get(4)?,
+                signature_ref: row.get(5)?,
+                created_at_ms: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目作用域内的决定（只读）：旧经理的决定不因换人消失或改口。
+    pub fn list_project_decisions(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<DecisionBodyRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT decision_id, actor_id, decision, reason, evidence_refs, revision_refs,
+                    created_at_ms
+             FROM decisions WHERE company_id = ?1 AND scope_project = ?2
+             ORDER BY created_at_ms, decision_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok(DecisionBodyRow {
+                decision_id: row.get(0)?,
+                actor_id: row.get(1)?,
+                decision: row.get(2)?,
+                reason: row.get(3)?,
+                evidence_refs: row.get(4)?,
+                revision_refs: row.get(5)?,
+                created_at_ms: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 插入争议行。主键冲突由调用方按幂等/ID 复用分别处理。
+    pub fn insert_history_dispute(&self, row: &DisputeRow) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO history_disputes (
+                dispute_id, company_id, project_id, fact_kind, fact_id, fact_fingerprint,
+                reason, evidence_refs, raised_by, state, resolution, resolved_by,
+                resolved_at_ms, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                row.dispute_id,
+                row.company_id,
+                row.project_id,
+                row.fact_kind,
+                row.fact_id,
+                row.fact_fingerprint,
+                row.reason,
+                row.evidence_refs,
+                row.raised_by,
+                row.state,
+                row.resolution,
+                row.resolved_by,
+                row.resolved_at_ms,
+                row.created_at_ms,
+                row.updated_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_history_dispute(&self, dispute_id: &str) -> Result<Option<DisputeRow>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT dispute_id, company_id, project_id, fact_kind, fact_id, fact_fingerprint,
+                        reason, evidence_refs, raised_by, state, resolution, resolved_by,
+                        resolved_at_ms, created_at_ms, updated_at_ms
+                 FROM history_disputes WHERE dispute_id = ?1",
+                params![dispute_id],
+                map_dispute_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    pub fn list_history_disputes(
+        &self,
+        company_id: &str,
+        project_id: &str,
+        state: Option<&str>,
+    ) -> Result<Vec<DisputeRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT dispute_id, company_id, project_id, fact_kind, fact_id, fact_fingerprint,
+                    reason, evidence_refs, raised_by, state, resolution, resolved_by,
+                    resolved_at_ms, created_at_ms, updated_at_ms
+             FROM history_disputes
+             WHERE company_id = ?1 AND project_id = ?2 AND (?3 IS NULL OR state = ?3)
+             ORDER BY created_at_ms, dispute_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id, state], map_dispute_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 结案：只有 `under_review` 行会被改，返回是否真的改到（并发安全）。
+    pub fn resolve_history_dispute(
+        &self,
+        dispute_id: &str,
+        state: &str,
+        resolution: &str,
+        resolved_by: &str,
+        at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE history_disputes
+             SET state = ?2, resolution = ?3, resolved_by = ?4, resolved_at_ms = ?5,
+                 updated_at_ms = ?5
+             WHERE dispute_id = ?1 AND state = 'under_review'",
+            params![dispute_id, state, resolution, resolved_by, at_ms],
+        )?;
+        Ok(changed == 1)
     }
 
     /// 项目下仍在运行的 Issue 数（清理阻塞判定）。
@@ -2008,6 +2271,26 @@ fn map_confirmation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Confirmatio
         delta_json: row.get(12)?,
         confirmed_at: row.get(13)?,
         recorded_at_ms: row.get(14)?,
+    })
+}
+
+fn map_dispute_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DisputeRow> {
+    Ok(DisputeRow {
+        dispute_id: row.get(0)?,
+        company_id: row.get(1)?,
+        project_id: row.get(2)?,
+        fact_kind: row.get(3)?,
+        fact_id: row.get(4)?,
+        fact_fingerprint: row.get(5)?,
+        reason: row.get(6)?,
+        evidence_refs: row.get(7)?,
+        raised_by: row.get(8)?,
+        state: row.get(9)?,
+        resolution: row.get(10)?,
+        resolved_by: row.get(11)?,
+        resolved_at_ms: row.get(12)?,
+        created_at_ms: row.get(13)?,
+        updated_at_ms: row.get(14)?,
     })
 }
 
@@ -4295,8 +4578,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 46,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 9 张 P2 表"
+            count, 47,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 10 张 P2 表"
         );
     }
 
