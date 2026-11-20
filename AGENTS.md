@@ -152,6 +152,16 @@
   `captured` 阶段无快照引用门禁（补门禁会改 2.1 接口，留 5.1 前待定）；2.2 的「22 passed」是子串
   过滤把 `takeover_intent` 的一条用例计入，模块实为 21 条（已更正）。61 个被引用用例名逐一与
   `--list` 比对存在。
+  切片 3.1 落地 `bod-app::manager_transfer` 与迁移 `010_management.sql`：委任按 scope 建部分唯一
+  索引，库层直接保证「一个作用域最多一个 Active 主委任」；epoch 由宿主按头指针 +1 分配（`AppointRequest`
+  没有 epoch 字段），撤任同时推进 epoch 让旧票当场失效，重新启用同一 Agent 也是新 epoch。复核入口
+  每次读权威头行，缓存条目只在头版本未变时可用——暖缓存挡不住撤任后的旧 epoch（实测断言命中数与
+  重读数）。管理票证绑定 appointment/epoch/scope/命令集/受众/时效，超过 900s 或过期/未生效/有效期
+  超出委任到期分别拒绝；票证没有 invocation/assignment 字段，不是执行凭据；治理命令在构造命令集时
+  就被拒。拒绝一律落 `management_commands` 审计（原因码+说明），且拒绝前后头行与委任行逐字段相等
+  ——本模块没有改预算/计划/派发/成果的代码路径。实测修正两处：撤任后「头 epoch 大于委任行 epoch」
+  是正常态，首版当成 `CorruptScopeHead`；epoch 因撤任也占一格，历史是 1/3/5 而非 1/3/4。暂停不递增
+  epoch，且暂停期间不能直接换人（原子切换属 3.3）（23 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

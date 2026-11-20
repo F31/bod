@@ -39,6 +39,7 @@ pub mod invocation;
 pub mod isolation_check;
 pub mod lifecycle_recovery;
 pub mod local_process;
+pub mod manager_transfer;
 pub mod migration_safety;
 pub mod perf_probe;
 pub mod protocol_reliability;

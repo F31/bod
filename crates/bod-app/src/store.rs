@@ -27,6 +27,7 @@ use crate::domain::queue::{EffectStatus, OutboxDelivery, QueueState, WakeReceipt
 use crate::domain::{DenialReason, DomainId, Version};
 use crate::handoff_event::{HandoffAcceptanceRow, HandoffEventRow};
 use crate::handoff_snapshot::HandoffSnapshotRow;
+use crate::manager_transfer::{AppointmentRow, ManagementCommandRow, ScopeHeadRow};
 use crate::recovery_models::{
     BackupRecord, BackupStatus, CaseState, CleanupAbandon, CleanupRequest, CleanupState,
     CleanupTargetKind, MigrationRecord, MigrationRisk, ReconciliationCase, RevisionPin,
@@ -39,8 +40,8 @@ use std::path::Path;
 
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
 /// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
-/// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图；
-/// 新增迁移只能追加，不可原地改写（§33.7）。
+/// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图，
+/// 010 为 P2 管理委任/作用域头/命令审计；新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_queue.sql"),
@@ -51,6 +52,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/007_handoff.sql"),
     include_str!("../migrations/008_handoff_events.sql"),
     include_str!("../migrations/009_takeover.sql"),
+    include_str!("../migrations/010_management.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -64,6 +66,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "007_handoff.sql",
     "008_handoff_events.sql",
     "009_takeover.sql",
+    "010_management.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -1432,6 +1435,284 @@ impl SqliteStore {
         )?;
         Ok(updated == 1)
     }
+
+    // -----------------------------------------------------------------------
+    // 管理委任（P2 3.1）
+    // -----------------------------------------------------------------------
+
+    /// 插入一条委任行。`(company_id, appointment_id)` 或
+    /// `(company_id, scope_key, authority_epoch)` 冲突时返回 `false`：
+    /// 同一 scope 的同一 epoch 不允许出现第二个委任，也不允许覆盖既有行。
+    pub fn insert_appointment(&self, row: &AppointmentRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO management_appointments (
+                company_id, appointment_id, scope_key, manager_agent_id, grant_ref,
+                authority_epoch, status, appointed_by, appointed_at, expires_at, audience,
+                commands_json, version, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT DO NOTHING",
+            params![
+                row.company_id,
+                row.appointment_id,
+                row.scope_key,
+                row.manager_agent_id,
+                row.grant_ref,
+                row.authority_epoch as i64,
+                row.status,
+                row.appointed_by,
+                row.appointed_at,
+                row.expires_at,
+                row.audience,
+                row.commands_json,
+                row.version as i64,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    pub fn get_appointment(
+        &self,
+        company_id: &str,
+        appointment_id: &str,
+    ) -> Result<Option<AppointmentRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{APPOINTMENT_SELECT} WHERE company_id = ?1 AND appointment_id = ?2"),
+                params![company_id, appointment_id],
+                map_appointment_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 某 scope 的历史委任，按 epoch 升序。
+    pub fn list_appointments(
+        &self,
+        company_id: &str,
+        scope_key: &str,
+    ) -> Result<Vec<AppointmentRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{APPOINTMENT_SELECT} WHERE company_id = ?1 AND scope_key = ?2
+             ORDER BY authority_epoch"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id, scope_key], map_appointment_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 条件更新委任行：`version` 必须仍等于 `expected_version`。
+    pub fn update_appointment_cas(
+        &self,
+        row: &AppointmentRow,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        let updated = self.conn.execute(
+            "UPDATE management_appointments SET
+                manager_agent_id = ?3, grant_ref = ?4, authority_epoch = ?5, status = ?6,
+                appointed_by = ?7, appointed_at = ?8, expires_at = ?9, audience = ?10,
+                commands_json = ?11, version = ?12, recorded_at_ms = ?13
+             WHERE company_id = ?1 AND appointment_id = ?2 AND version = ?14",
+            params![
+                row.company_id,
+                row.appointment_id,
+                row.manager_agent_id,
+                row.grant_ref,
+                row.authority_epoch as i64,
+                row.status,
+                row.appointed_by,
+                row.appointed_at,
+                row.expires_at,
+                row.audience,
+                row.commands_json,
+                row.version as i64,
+                row.recorded_at_ms,
+                expected_version as i64,
+            ],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// 插入作用域头。主键冲突返回 `false`：该 scope 已有头指针，必须走条件更新。
+    pub fn insert_scope_head(&self, row: &ScopeHeadRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO management_scope_heads (
+                company_id, scope_key, current_appointment_id, authority_epoch, version,
+                updated_at, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT DO NOTHING",
+            params![
+                row.company_id,
+                row.scope_key,
+                row.current_appointment_id,
+                row.authority_epoch as i64,
+                row.version as i64,
+                row.updated_at,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    pub fn get_scope_head(
+        &self,
+        company_id: &str,
+        scope_key: &str,
+    ) -> Result<Option<ScopeHeadRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{SCOPE_HEAD_SELECT} WHERE company_id = ?1 AND scope_key = ?2"),
+                params![company_id, scope_key],
+                |row| {
+                    Ok(ScopeHeadRow {
+                        company_id: row.get(0)?,
+                        scope_key: row.get(1)?,
+                        current_appointment_id: row.get(2)?,
+                        authority_epoch: row.get::<_, i64>(3)? as u64,
+                        version: row.get::<_, i64>(4)? as u64,
+                        updated_at: row.get(5)?,
+                        recorded_at_ms: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 条件更新作用域头：`version` 不等就说明别人先改了指针/epoch，返回 `false`。
+    pub fn update_scope_head_cas(
+        &self,
+        row: &ScopeHeadRow,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        let updated = self.conn.execute(
+            "UPDATE management_scope_heads SET
+                current_appointment_id = ?3, authority_epoch = ?4, version = ?5,
+                updated_at = ?6, recorded_at_ms = ?7
+             WHERE company_id = ?1 AND scope_key = ?2 AND version = ?8",
+            params![
+                row.company_id,
+                row.scope_key,
+                row.current_appointment_id,
+                row.authority_epoch as i64,
+                row.version as i64,
+                row.updated_at,
+                row.recorded_at_ms,
+                expected_version as i64,
+            ],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// 追加一条管理命令审计。同 `(company_id, command_id)` 已存在时不改写并返回 `false`。
+    pub fn insert_management_command(
+        &self,
+        row: &ManagementCommandRow,
+    ) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO management_commands (
+                company_id, command_id, scope_key, appointment_id, authority_epoch, command,
+                outcome, reason_code, reason, at, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT DO NOTHING",
+            params![
+                row.company_id,
+                row.command_id,
+                row.scope_key,
+                row.appointment_id,
+                row.authority_epoch.map(|value| value as i64),
+                row.command,
+                row.outcome,
+                row.reason_code,
+                row.reason,
+                row.at,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    pub fn get_management_command(
+        &self,
+        company_id: &str,
+        command_id: &str,
+    ) -> Result<Option<ManagementCommandRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{MANAGEMENT_COMMAND_SELECT} WHERE company_id = ?1 AND command_id = ?2"),
+                params![company_id, command_id],
+                map_management_command_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 某 scope 的命令审计（按时间升序），供核对「拒绝留下了原因」。
+    pub fn list_management_commands(
+        &self,
+        company_id: &str,
+        scope_key: &str,
+    ) -> Result<Vec<ManagementCommandRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{MANAGEMENT_COMMAND_SELECT} WHERE company_id = ?1 AND scope_key = ?2 ORDER BY at, command_id"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id, scope_key], map_management_command_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+}
+
+/// 委任读取列。
+const APPOINTMENT_SELECT: &str = "SELECT company_id, appointment_id, scope_key, manager_agent_id,
+        grant_ref, authority_epoch, status, appointed_by, appointed_at, expires_at, audience,
+        commands_json, version, recorded_at_ms
+     FROM management_appointments";
+
+fn map_appointment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppointmentRow> {
+    Ok(AppointmentRow {
+        company_id: row.get(0)?,
+        appointment_id: row.get(1)?,
+        scope_key: row.get(2)?,
+        manager_agent_id: row.get(3)?,
+        grant_ref: row.get(4)?,
+        authority_epoch: row.get::<_, i64>(5)? as u64,
+        status: row.get(6)?,
+        appointed_by: row.get(7)?,
+        appointed_at: row.get(8)?,
+        expires_at: row.get(9)?,
+        audience: row.get(10)?,
+        commands_json: row.get(11)?,
+        version: row.get::<_, i64>(12)? as u64,
+        recorded_at_ms: row.get(13)?,
+    })
+}
+
+/// 作用域头读取列。
+const SCOPE_HEAD_SELECT: &str = "SELECT company_id, scope_key, current_appointment_id,
+        authority_epoch, version, updated_at, recorded_at_ms
+     FROM management_scope_heads";
+
+/// 管理命令审计读取列。
+const MANAGEMENT_COMMAND_SELECT: &str = "SELECT company_id, command_id, scope_key,
+        appointment_id, authority_epoch, command, outcome, reason_code, reason, at, recorded_at_ms
+     FROM management_commands";
+
+fn map_management_command_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagementCommandRow> {
+    Ok(ManagementCommandRow {
+        company_id: row.get(0)?,
+        command_id: row.get(1)?,
+        scope_key: row.get(2)?,
+        appointment_id: row.get(3)?,
+        authority_epoch: row.get::<_, Option<i64>>(4)?.map(|value| value as u64),
+        command: row.get(5)?,
+        outcome: row.get(6)?,
+        reason_code: row.get(7)?,
+        reason: row.get(8)?,
+        at: row.get(9)?,
+        recorded_at_ms: row.get(10)?,
+    })
 }
 
 /// 接管意图读取列。
@@ -3641,8 +3922,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 41,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 4 张 P2 表"
+            count, 44,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 7 张 P2 表"
         );
     }
 

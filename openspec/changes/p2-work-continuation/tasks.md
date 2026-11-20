@@ -183,7 +183,33 @@
 
 ## 3. 负责人切换
 
-- [ ] 3.1 实现 Appointment/authority_epoch/scope/命令集/audience 绑定与当前状态复核，验证 `invariant_i_58`：旧 epoch 管理命令被拒且缓存可失效。
+- [x] 3.1 实现 Appointment/authority_epoch/scope/命令集/audience 绑定与当前状态复核，验证 `invariant_i_58`：旧 epoch 管理命令被拒且缓存可失效。
+  - 证据（2026-11-20，`cargo test -p bod-app manager_transfer` → 23 passed）：新增
+    `bod-app::manager_transfer` 与迁移 `010_management.sql`（`management_appointments`、
+    `management_scope_heads`、`management_commands`；41 → 44 张表，9 → 10 条迁移，
+    `migration_safety` 与表数断言同步）。
+    `invariant_i_58` 落在库层而不靠先查后写：`management_appointments` 上的部分唯一索引
+    `(company_id, scope_key) WHERE status = 'active'` 直接挡住第二个在任委任，
+    `UNIQUE (company_id, scope_key, authority_epoch)` 挡住 epoch 复用（用例直接插两行验证，
+    不经业务代码）；epoch 由宿主按头指针 +1 分配，`AppointRequest` 里没有 epoch 字段，Agent
+    无从自选；每代租约为 1 → 3 → 5（撤任本身也占一格，让旧票当场失效），历史严格递增。
+    「旧 epoch 命令被拒」：撤任先推头 epoch+version 再改状态行，第二步失败也 fail closed；
+    复核按 `ticket.authority_epoch` 与头 epoch 比较，低报 `stale_appointment`、高于当前报
+    `unknown_epoch`（宿主不签发未来 epoch）。拒绝写 `management_commands` 审计行（原因码 +
+    说明 + 当前 epoch），可读回。
+    「缓存可失效」：条目带 `head_version`，每次提交仍读一次权威头行（`CacheStats.head_reads`
+    可观测）；用例断言命中后 `head_reads == 2`，撤任后旧票被拒且 `hits` 不增、`reloads` 增加；
+    `invalidate(scope)` 删除条目（二次返回 false），缓存条目数上限 16，超限整体清空并计数。
+    凭据绑定：appointment/epoch/scope/命令集/受众/时效；`not_after - issued_at > 900s` 报
+    `LongLivedCredential`，过期/未生效/有效期超出委任到期分别拒绝；票证无 invocation/assignment
+    字段，`purpose()` 恒为 Management，不能当执行凭据；治理命令（任命/撤任）在构造命令集时即
+    `GovernanceCommandNotGrantable`。命令键幂等：同键同语义返回原结果且不写第二条审计，同键
+    不同参数报 `CommandKeyReuse`。
+    实测修正两处设计误判：① 撤任后头 epoch 领先委任行是正常态，首版按「必须相等」判
+    `CorruptScopeHead`；② epoch 序列因撤任也占一格，预期 1/3/4 实为 1/3/5。另记录两处保守取舍：
+    暂停不递增 epoch（每条命令重查状态），暂停期间不能直接换人——原子「结束旧委任 + 切指针 +
+    新 epoch」属 3.3，不用近似做法代替。边界：不实现切换流程、员工继续、历史成果与费用、专项
+    边界；不写 `gates.yaml`（P2 绑定仍 planned）。详见 `docs/spec-notes/p2-manager-transfer.md` §1。
 - [ ] 3.2 实现员工独立继续与执行/管理身份分离，验证切换时运行任务继续、已接受成果不重做，旧经理执行身份上传的合法成果保留（`invariant_i_59`）。
 - [ ] 3.3 实现检查点增量读取与接管确认事务，验证只读确认不产生管理权、确认后命令仍逐条校验当前委任（`invariant_i_60`、G-42）。
 - [ ] 3.4 实现历史成果/费用不可变与争议待核查标记，验证 `invariant_i_61`：新经理不能追溯修改旧接受或费用主体。
