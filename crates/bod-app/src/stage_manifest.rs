@@ -708,6 +708,14 @@ pub fn looks_like_credential(value: &str) -> bool {
         || value.contains("api_key=")
         || value.contains("password=")
         || value.contains("secret=")
+        // 常见提供方的令牌前缀：没有 `=` 也一眼是真钥匙。
+        || value.starts_with("sk-")
+        || value.starts_with("sk_live_")
+        || value.starts_with("sk_test_")
+        || value.starts_with("ghp_")
+        || value.starts_with("gho_")
+        || value.starts_with("xoxb-")
+        || value.starts_with("akia")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

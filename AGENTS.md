@@ -318,6 +318,18 @@
   （`docs/reports/p4-exit-evidence.md`，结论 `blocked`，阻塞项 5.2、5.3）；支持矩阵 §10
   为 4 Unverified + 2 Planned + **0 Supported**。**5.2 与 5.3 未勾选**：一条真实业务流程的
   最终制品/环境组合、三类产品对照基线都需要真实环境与真实样本，机器不能生成。
+- **P5 进行中（2026-11-21）**：`openspec/changes/p5-team-reuse` 任务 1.1—1.6 已勾选。
+  `bod-app::catalog_upgrade` 承接协作配置包的四段边界：安装前五道校验（确定版本 → digest →
+  来源 → 许可证 → schema，再判管理员权与内嵌密钥，本地文件默认关闭）；`InstallTxn` 五阶段，
+  联网下载不占写事务、候选在 `Applied` 前不执行、没预览不许批准、硬冲突挡在批准前；
+  `CatalogInstallRecord` 逻辑键为「Company|包|版本|digest|参数摘要」**不含展示名**，重复请求返回
+  原记录且不推进修订；同名对象改 id 落新的一份，绝不按名称覆盖；三方升级按 digest 判十一种
+  情形，两边都改与「本地删了上游又改」都落 `Pending` 提案而非静默覆盖（`invariant_i_44`），
+  新增权限/外部程序/付费连接逐条重新准入，批准不产生 Grant；卸载恒不级联删除，Issue/交付/
+  用量/证据四类保留；能力目录与 Team Catalog 数据身份分离，推荐与 `reports_to` 结构上不参与
+  授权判定。14 条命名用例 + 5 条漂移检查，说明见 `docs/spec-notes/p5-catalog.md`。
+  **2.x—5.x 未开始**：六阶段权限矩阵、反馈晋升、通道回执与出口证据需要真实多主体验收，
+  未接入前不标 Supported；P5 的 I/G 绑定（G-13/G-21/G-22/G-25、I-14/I-19/I-23/I-44）全部保持 planned。
   P4 的 I/G 绑定**全部保持 planned**。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。

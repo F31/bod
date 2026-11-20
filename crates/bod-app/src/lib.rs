@@ -15,6 +15,7 @@ pub mod cancel_reconciliation;
 pub mod canonical_json;
 pub mod capability_dispatch;
 pub mod cas;
+pub mod catalog_upgrade;
 pub mod claim_concurrency;
 pub mod clarity_dialogue;
 pub mod cleanup_recovery;
