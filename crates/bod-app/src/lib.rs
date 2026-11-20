@@ -48,6 +48,7 @@ pub mod local_process;
 pub mod manager_transfer;
 pub mod migration_safety;
 pub mod observation_redaction;
+pub mod openspec_integration;
 pub mod perf_probe;
 pub mod protocol_reliability;
 pub mod rebuild_precheck;

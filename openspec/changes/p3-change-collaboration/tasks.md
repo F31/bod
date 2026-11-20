@@ -4,12 +4,12 @@
 
 ## 1. OpenSpec 集成与任务映射
 
-- [ ] 1.1 实现 Change 目录到项目 Change 的映射与 SpecRevision/RequirementRef/ScenarioRef 记录，验证 `invariant_i_10`：工作包引用确定 spec_commit，文件后续改动不静默改变输入。
-- [ ] 1.2 实现 task-map 稳定 ID、锚点、指纹与匹配状态，验证任务重排保持 ID、语义变化进入 Unresolved 且不按行号绑定（`invariant_i_13`）。
-- [ ] 1.3 实现工作包拆分提案与覆盖/循环/共享冲突/大小检查，验证机械按 Agent 数量均分被拒绝。
-- [ ] 1.4 实现 tasks.md 勾选为进度投影与手工勾选导入为观察，验证 `invariant_i_13`：勾选不把工作包标为 Accepted。
-- [ ] 1.5 实现单一归档协调入口与同 requirement 多 Change 串行协调，验证两 Change 文本无冲突时仍串行同步规格。
-- [ ] 1.6 编写 P3 规格映射与归档说明到 `docs/spec-notes/p3-openspec.md`，验证每个映射字段可追溯到本 Change requirement。
+- [x] 1.1 实现 Change 目录到项目 Change 的映射与 SpecRevision/RequirementRef/ScenarioRef 记录，验证 `invariant_i_10`：工作包引用确定 spec_commit，文件后续改动不静默改变输入。
+- [x] 1.2 实现 task-map 稳定 ID、锚点、指纹与匹配状态，验证任务重排保持 ID、语义变化进入 Unresolved 且不按行号绑定（`invariant_i_13`）。
+- [x] 1.3 实现工作包拆分提案与覆盖/循环/共享冲突/大小检查，验证机械按 Agent 数量均分被拒绝。
+- [x] 1.4 实现 tasks.md 勾选为进度投影与手工勾选导入为观察，验证 `invariant_i_13`：勾选不把工作包标为 Accepted。
+- [x] 1.5 实现单一归档协调入口与同 requirement 多 Change 串行协调，验证两 Change 文本无冲突时仍串行同步规格。
+- [x] 1.6 编写 P3 规格映射与归档说明到 `docs/spec-notes/p3-openspec.md`，验证每个映射字段可追溯到本 Change requirement。
 
 ## 2. 影响评估与选择性重验
 
