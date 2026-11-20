@@ -101,6 +101,13 @@
   逐片段完整性记录并可持久登记（同键同内容幂等、同键不同内容拒绝覆盖、关开后读回一致）；
   版本绑定只含 input/work_package/scene revision 与 `snapshot_seq`，三者变化才 `Drifted` 并使
   工作失效，序号前进为 `Superseded` 不失效，标题/标签/评论/时间变化只提示不失效（14 项命名用例）。
+  切片 1.5 落地 `bod-app::handoff_manifest` 与 `bod-app::handoff_event`（迁移
+  `008_handoff_events.sql`）：清单八类条目区分「在包内 / 只有指针 / 按授权引用 / 已脱敏 /
+  未导出 / 清单级声明」，`content_digest()` 只从 `included` 报告，票据式指针的摘要不当内容证明；
+  凭据只留名称与可复算摘要，含值文件与锁文件整条脱敏、自由文本替换为 `<redacted:NAME>`；
+  六类事件按状态机折叠并重放校验，agent 只能 `requested/captured` 且限于自身 attempt，
+  accept 幂等由 `(company_id, handoff_id)` 主键保证——重复请求返回同一序号与事件 id，
+  不追加第二条事件、不新建第二份包或执行（14 + 17 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

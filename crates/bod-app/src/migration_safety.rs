@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn shipped_migrations_have_stable_checksums_and_no_destructive_ddl() {
         let shipped = shipped_migrations();
-        assert_eq!(shipped.len(), 7);
+        assert_eq!(shipped.len(), 8);
         for item in &shipped {
             assert_eq!(item.checksum.len(), 64, "{} 应有 sha256", item.migration_id);
         }
@@ -494,15 +494,15 @@ mod tests {
         let dir = temp_root("migr");
         let mut store = SqliteStore::open(&dir.join("bod.sqlite"), &BodConfig::default()).unwrap();
         let inserted = register_shipped_migrations(&mut store, 1).unwrap();
-        assert_eq!(inserted, 7);
+        assert_eq!(inserted, 8);
         let records = store.list_migration_records().unwrap();
-        assert_eq!(records.len(), 7);
+        assert_eq!(records.len(), 8);
         assert!(verify_registry(&records).is_empty());
 
         // 幂等：重复登记不新增。
         register_shipped_migrations(&mut store, 2).unwrap();
         let again = store.list_migration_records().unwrap();
-        assert_eq!(again.len(), 7);
+        assert_eq!(again.len(), 8);
     }
 
     #[test]

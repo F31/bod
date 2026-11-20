@@ -25,6 +25,7 @@ use crate::domain::model::{
 };
 use crate::domain::queue::{EffectStatus, OutboxDelivery, QueueState, WakeReceipt, WorkQueueEntry};
 use crate::domain::{DenialReason, DomainId, Version};
+use crate::handoff_event::{HandoffAcceptanceRow, HandoffEventRow};
 use crate::handoff_snapshot::HandoffSnapshotRow;
 use crate::recovery_models::{
     BackupRecord, BackupStatus, CaseState, CleanupAbandon, CleanupRequest, CleanupState,
@@ -37,7 +38,7 @@ use std::path::Path;
 
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
 /// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
-/// 007 为 P2 交接快照；
+/// 007 为 P2 交接快照，008 为 P2 交接事件与接受；
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
@@ -47,6 +48,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/005_artifacts.sql"),
     include_str!("../migrations/006_recovery.sql"),
     include_str!("../migrations/007_handoff.sql"),
+    include_str!("../migrations/008_handoff_events.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -58,6 +60,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "005_artifacts.sql",
     "006_recovery.sql",
     "007_handoff.sql",
+    "008_handoff_events.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -1186,7 +1189,157 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    /// 追加一条交接事件。同 `(company_id, handoff_id, event_id)` 已存在时不修改并返回 `false`：
+    /// 事件只追加，重复提交由调用方读回比对内容。
+    pub fn insert_handoff_event(&self, row: &HandoffEventRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO handoff_events (
+                company_id, handoff_id, seq, event_id, kind, reason, actor_kind, actor_ref,
+                occurred_at, evidence_ref, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(company_id, handoff_id, event_id) DO NOTHING",
+            params![
+                row.company_id,
+                row.handoff_id,
+                row.seq as i64,
+                row.event_id,
+                row.kind,
+                row.reason,
+                row.actor_kind,
+                row.actor_ref,
+                row.occurred_at,
+                row.evidence_ref,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// 按事件 id 读取单条事件（重复提交时比对内容用）。
+    pub fn get_handoff_event(
+        &self,
+        company_id: &str,
+        handoff_id: &str,
+        event_id: &str,
+    ) -> Result<Option<HandoffEventRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "{HANDOFF_EVENT_SELECT}
+                     WHERE company_id = ?1 AND handoff_id = ?2 AND event_id = ?3"
+                ),
+                params![company_id, handoff_id, event_id],
+                map_handoff_event_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 读取某交接的完整时间线（按 seq 升序）。
+    pub fn list_handoff_events(
+        &self,
+        company_id: &str,
+        handoff_id: &str,
+    ) -> Result<Vec<HandoffEventRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{HANDOFF_EVENT_SELECT} WHERE company_id = ?1 AND handoff_id = ?2 ORDER BY seq"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id, handoff_id], map_handoff_event_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 登记一次接受。主键为 `(company_id, handoff_id)`：一个交接只能被接受一次，
+    /// 并发/重复接受都无法插入第二行（返回 `false`，由调用方读回判定）。
+    pub fn insert_handoff_acceptance(
+        &self,
+        row: &HandoffAcceptanceRow,
+    ) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO handoff_acceptances (
+                company_id, handoff_id, acceptance_key, request_digest, accepted_event_id,
+                accepted_seq, snapshot_key, level, accepted_at, actor_kind, actor_ref,
+                recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(company_id, handoff_id) DO NOTHING",
+            params![
+                row.company_id,
+                row.handoff_id,
+                row.acceptance_key,
+                row.request_digest,
+                row.accepted_event_id,
+                row.accepted_seq as i64,
+                row.snapshot_key,
+                row.level,
+                row.accepted_at,
+                row.actor_kind,
+                row.actor_ref,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// 读取某交接的接受记录。
+    pub fn get_handoff_acceptance(
+        &self,
+        company_id: &str,
+        handoff_id: &str,
+    ) -> Result<Option<HandoffAcceptanceRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{HANDOFF_ACCEPTANCE_SELECT} WHERE company_id = ?1 AND handoff_id = ?2"),
+                params![company_id, handoff_id],
+                |row| {
+                    Ok(HandoffAcceptanceRow {
+                        company_id: row.get(0)?,
+                        handoff_id: row.get(1)?,
+                        acceptance_key: row.get(2)?,
+                        request_digest: row.get(3)?,
+                        accepted_event_id: row.get(4)?,
+                        accepted_seq: row.get::<_, i64>(5)? as u64,
+                        snapshot_key: row.get(6)?,
+                        level: row.get(7)?,
+                        accepted_at: row.get(8)?,
+                        actor_kind: row.get(9)?,
+                        actor_ref: row.get(10)?,
+                        recorded_at_ms: row.get(11)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
 }
+
+/// 交接事件读取列。
+const HANDOFF_EVENT_SELECT: &str = "SELECT company_id, handoff_id, seq, event_id, kind, reason,
+        actor_kind, actor_ref, occurred_at, evidence_ref, recorded_at_ms
+     FROM handoff_events";
+
+fn map_handoff_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HandoffEventRow> {
+    Ok(HandoffEventRow {
+        company_id: row.get(0)?,
+        handoff_id: row.get(1)?,
+        seq: row.get::<_, i64>(2)? as u64,
+        event_id: row.get(3)?,
+        kind: row.get(4)?,
+        reason: row.get(5)?,
+        actor_kind: row.get(6)?,
+        actor_ref: row.get(7)?,
+        occurred_at: row.get(8)?,
+        evidence_ref: row.get(9)?,
+        recorded_at_ms: row.get(10)?,
+    })
+}
+
+/// 交接接受读取列。
+const HANDOFF_ACCEPTANCE_SELECT: &str = "SELECT company_id, handoff_id, acceptance_key,
+        request_digest, accepted_event_id, accepted_seq, snapshot_key, level, accepted_at,
+        actor_kind, actor_ref, recorded_at_ms
+     FROM handoff_acceptances";
 
 /// 交接快照的读取列；`list_*` 与 `get_*` 共用，避免列序漂移。
 const HANDOFF_SNAPSHOT_SELECT: &str = "SELECT company_id, snapshot_key, project_id, issue_id,
@@ -3333,8 +3486,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 38,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 1 张 P2 表"
+            count, 40,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 3 张 P2 表"
         );
     }
 

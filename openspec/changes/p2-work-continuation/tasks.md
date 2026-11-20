@@ -50,7 +50,10 @@
     更新时间只进 `metadata_changes`，实测四条全列出仍判 `Current`。迁移计数断言同步 6→7、37→38。
     边界：不判定接续、不做凭据过滤、不接工作台、不写第二业务库；不新增 `gates.yaml` 条目
     （P2 绑定仍 planned，`invariant_i_47` 属 1.5）。详见 `docs/spec-notes/p2-snapshot.md`。
-- [ ] 1.5 实现现场清单边界（submodule/LFS/锁文件/冲突/密钥过滤）与交接事件类型，验证 `invariant_i_47`：包内无凭据值，重复 accept 返回同一结果。
+- [x] 1.5 实现现场清单边界（submodule/LFS/锁文件/冲突/密钥过滤）与交接事件类型，验证 `invariant_i_47`：包内无凭据值，重复 accept 返回同一结果。
+  - 证据（2026-11-20，`cargo test -p bod-app handoff_manifest` → 14 passed；`cargo test -p bod-app handoff_event` → 17 passed）：新增 `bod-app::handoff_manifest`，条目分 tracked_file / submodule / lfs_pointer / lock_file / toolchain_pin / required_service / unresolved_conflict / external_session_state 八类；`ContentState` 把「字节在包内」「只有指针」「按授权引用」「已脱敏」「未导出」「清单级声明」分开，`content_digest()` 只从 `included` 报告，因此「摘要存在 ≠ 内容可恢复」是类型后果（`pointer` 的 oid 不进内容摘要）；过滤顺序固定为客户资料前缀 → 凭据命中 → 大小上限 → 内联，客户资料与凭据脱敏原因分开。凭据只经 `add_credential_env` 立刻转成 `SecretRef`（名称 + 可复算摘要），清单结构里没有存放值的字段，含凭据的文件与锁文件整条脱敏、冲突说明替换为 `<redacted:NAME>`，`audit_for_secret_values` 对空候选如实报 `empty` 而不是通过。
+    新增 `bod-app::handoff_event` 与迁移 `008_handoff_events.sql`（`handoff_events` + `handoff_acceptances`，只建表建索引）：六类事件按状态机折叠，`seq` 连续且读回重放校验，`blocked` 必带原因、`captured/validated/accepted` 必带快照引用；能力表规定 agent 只能 `requested/captured` 且 attempt 必须等于来源 attempt（越权 `CapabilityRequired` 与越界 `OutOfScope` 分开报），宿主可 `captured/validated/resumed`，策略仅 `blocked`，人可全部。accept 幂等由 `(company_id, handoff_id)` 主键保证：一个交接只能被接受一次，重复同键同内容返回同一 `acceptance_key`/`accepted_seq`/`accepted_event_id`，同键不同内容报 `IdempotencyKeyReuse`，不同键报 `AlreadyAccepted`；接受前要求状态为 `validated` 且快照已登记，接受不创建 Attempt/队列/租约（实测 `invocations` 与快照行数不变），读回路径用接受行里的来源补写缺失事件而不伪造「replayed 用户」。
+    迁移条数断言 7→8、表计数断言 38→40 同步。边界：不读网络与真实工作区、不判定接续、不新增 `gates.yaml` 条目（P2 绑定仍 planned，`invariant_i_47` 的 tasks 编号与 §39.10 权威语义差异延续 1.1 的记录）。详见 `docs/spec-notes/p2-manifest.md`。
 
 ## 2. 接管事务
 
