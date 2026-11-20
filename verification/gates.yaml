@@ -226,8 +226,8 @@
   module: bod-app::migration_safety
   tests: bod-app::migration_safety::tests::backup_without_wal_is_not_recoverable
   status: implemented
-  evidence: cargo test -p bod-app migration_safety
-  note: ""
+  evidence: cargo test -p bod-app migration_safety && cargo test -p bod-app delivery_verification
+  note: P0 覆盖快照自身（WAL/密钥/摘要/完整性）；P1 4.4 的 delivery_verification::tests::delivery_backup_is_recoverable_with_report_cas 补交付报告 CAS 引用在场检查，缺一项即不可恢复。module/tests 保持 P0 目标，不替换原覆盖。
 - id: G-8
   kind: gate
   requirement: 预算与 Effect Gate 的提交边界（意图先持久、副作用在提交后）
@@ -242,8 +242,8 @@
   module: bod-app::artifact_acceptance
   tests: bod-app::artifact_acceptance::tests::invariant_i_08
   status: implemented
-  evidence: cargo test -p bod-app artifact_acceptance
-  note: ""
+  evidence: cargo test -p bod-app artifact_acceptance && cargo test -p bod-app delivery_verification
+  note: P0 覆盖五项绑定与指针 CAS；P1 4.4 的 delivery_verification::tests::self_report_without_executed_report_keeps_pending 与 evidence_verification_detects_missing_cas_body 补「真实执行 + 正文可反查」，自报或无 CAS 正文不接受。module/tests 保持 P0 目标。
 - id: G-10
   kind: gate
   requirement: 平台冒烟（指派→执行→候选登记→重启找回）

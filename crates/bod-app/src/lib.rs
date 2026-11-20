@@ -19,6 +19,7 @@ pub mod coding_integration;
 pub mod config;
 pub mod context_handoff;
 pub mod control_api;
+pub mod delivery_verification;
 pub mod descriptor_schema;
 pub mod effect_recovery;
 pub mod fake_executor;

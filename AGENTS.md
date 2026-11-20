@@ -58,7 +58,11 @@
   I-10 按 §39.2 权威语义落在「合并证据对应实际目标与候选组合」：`merge_combination` 绑定目标摘要、
   提交、规则与环境，跨目标/自报证据不得合并，接受后重启可查。tasks.md 曾把 I-10 误绑到「无 Team 配置」
   与 C/R/U 互斥，前者已纠正为宿主入口，后者仍归 I-71。
-  P1 的 4.4/4.5/4.6/4.7 与出口切片尚未开始。
+  已完成切片 4.4「本地验证报告绑定与备份核验」——`bod-app::delivery_verification` 真实执行 argv
+  命令（有界超时 + 输出摘要），报告正文落 CAS 并从 `verification_records` 反查证据，自报/跨提交/
+  缺正文均不接受；`verify_backup_for_delivery` 在 P0 `verify_backup` 之上补交付 CAS 引用覆盖，
+  缺 WAL/缺 CAS/快照被改均不标可恢复（G-6/G-9 的 P1 侧断言，module/tests 仍保持 P0 目标）。
+  P1 的 4.5/4.6/4.7 与出口切片尚未开始。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 
