@@ -33,6 +33,7 @@ use crate::recovery_models::{
     CleanupTargetKind, MigrationRecord, MigrationRisk, ReconciliationCase, RevisionPin,
 };
 use crate::takeover_intent::TakeoverIntentRow;
+use crate::takeover_review::{CheckpointRow, ConfirmationRow, InvocationFactRow};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fmt;
 use std::fs;
@@ -41,7 +42,8 @@ use std::path::Path;
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
 /// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
 /// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图，
-/// 010 为 P2 管理委任/作用域头/命令审计；新增迁移只能追加，不可原地改写（§33.7）。
+/// 010 为 P2 管理委任/作用域头/命令审计，011 为 P2 检查点与接管确认；
+/// 新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_queue.sql"),
@@ -53,6 +55,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/008_handoff_events.sql"),
     include_str!("../migrations/009_takeover.sql"),
     include_str!("../migrations/010_management.sql"),
+    include_str!("../migrations/011_handover_review.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -67,6 +70,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "008_handoff_events.sql",
     "009_takeover.sql",
     "010_management.sql",
+    "011_handover_review.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -949,6 +953,59 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
+    /// 项目内 Run 的期望状态（只读）：检查点指纹与「在跑/已终结」判定的事实来源。
+    ///
+    /// 返回 `(run_id, issue_uid, desired_state)`，按 run_id 排序；不读执行内容。
+    pub fn list_project_runs(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<(String, String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT runs.uid, runs.issue_uid, runs.desired_state
+             FROM runs
+             JOIN issues ON issues.uid = runs.issue_uid
+             WHERE runs.company_id = ?1 AND issues.project_id = ?2 ORDER BY runs.uid",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目内 invocation 的标识与状态（只读）：检查点要能区分「哪一条执行变了」。
+    ///
+    /// 返回 `InvocationFactRow`（id / run / state / 最后观察时间 / fencing token）。
+    pub fn list_project_invocations(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<InvocationFactRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT invocations.invocation_id, invocations.run_id, invocations.state,
+                    invocations.last_observed_at_ms, invocations.fencing_token
+             FROM invocations
+             JOIN runs ON runs.uid = invocations.run_id
+             JOIN issues ON issues.uid = runs.issue_uid
+             WHERE invocations.company_id = ?1 AND issues.project_id = ?2
+             ORDER BY invocations.invocation_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok(InvocationFactRow {
+                invocation_id: row.get(0)?,
+                run_id: row.get(1)?,
+                state: row.get(2)?,
+                last_observed_at_ms: row.get(3)?,
+                fencing_token: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
     /// 单个 Run 的 invocation 状态。
     pub fn list_run_invocation_states(
         &self,
@@ -1707,6 +1764,145 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    /// 登记检查点：同 `(scope, cursor)` 已存在时不改写并返回 `false`（同现场不产生第二份）。
+    pub fn insert_handover_checkpoint(&self, row: &CheckpointRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO handover_checkpoints (
+                company_id, checkpoint_id, scope_key, project_id, cursor, item_count,
+                items_json, gaps_json, captured_by, captured_at, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT DO NOTHING",
+            params![
+                row.company_id,
+                row.checkpoint_id,
+                row.scope_key,
+                row.project_id,
+                row.cursor,
+                row.item_count,
+                row.items_json,
+                row.gaps_json,
+                row.captured_by,
+                row.captured_at,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    pub fn get_handover_checkpoint(
+        &self,
+        company_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<Option<CheckpointRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{CHECKPOINT_SELECT} WHERE company_id = ?1 AND checkpoint_id = ?2"),
+                params![company_id, checkpoint_id],
+                map_checkpoint_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 按游标找检查点：同一现场（游标相同）只有一个检查点，重捕获应落回它。
+    pub fn find_handover_checkpoint_by_cursor(
+        &self,
+        company_id: &str,
+        scope_key: &str,
+        cursor: &str,
+    ) -> Result<Option<CheckpointRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "{CHECKPOINT_SELECT} WHERE company_id = ?1 AND scope_key = ?2 AND cursor = ?3"
+                ),
+                params![company_id, scope_key, cursor],
+                map_checkpoint_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 某 scope 最新的检查点（按登记时间倒序）：只用于回显「上次核对的是哪一份现场」。
+    pub fn latest_handover_checkpoint(
+        &self,
+        company_id: &str,
+        scope_key: &str,
+    ) -> Result<Option<CheckpointRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "{CHECKPOINT_SELECT} WHERE company_id = ?1 AND scope_key = ?2
+                     ORDER BY recorded_at_ms DESC, checkpoint_id DESC LIMIT 1"
+                ),
+                params![company_id, scope_key],
+                map_checkpoint_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 追加一条接管确认：同 `confirmation_id` 已存在时不改写并返回 `false`。
+    pub fn insert_takeover_confirmation(&self, row: &ConfirmationRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO takeover_confirmations (
+                company_id, confirmation_id, scope_key, checkpoint_id, checkpoint_cursor,
+                reviewed_cursor, appointment_id, authority_epoch, decision, confirmed_by, note,
+                open_items_json, delta_json, confirmed_at, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT DO NOTHING",
+            params![
+                row.company_id,
+                row.confirmation_id,
+                row.scope_key,
+                row.checkpoint_id,
+                row.checkpoint_cursor,
+                row.reviewed_cursor,
+                row.appointment_id,
+                row.authority_epoch as i64,
+                row.decision,
+                row.confirmed_by,
+                row.note,
+                row.open_items_json,
+                row.delta_json,
+                row.confirmed_at,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    pub fn get_takeover_confirmation(
+        &self,
+        company_id: &str,
+        confirmation_id: &str,
+    ) -> Result<Option<ConfirmationRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{CONFIRMATION_SELECT} WHERE company_id = ?1 AND confirmation_id = ?2"),
+                params![company_id, confirmation_id],
+                map_confirmation_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 某 scope 的确认历史（epoch 与登记时间升序）：最后一行为当前有效的确认。
+    pub fn list_takeover_confirmations(
+        &self,
+        company_id: &str,
+        scope_key: &str,
+    ) -> Result<Vec<ConfirmationRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{CONFIRMATION_SELECT} WHERE company_id = ?1 AND scope_key = ?2
+             ORDER BY authority_epoch ASC, recorded_at_ms ASC, confirmation_id ASC"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id, scope_key], map_confirmation_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 /// 委任读取列。
@@ -1767,6 +1963,53 @@ const TAKEOVER_INTENT_SELECT: &str = "SELECT company_id, takeover_key, intent_id
         summary_snapshot_key, attempt_id, fencing_token, abort_reason, history_json, updated_at,
         recorded_at_ms
      FROM takeover_intents";
+
+/// 检查点读取列。
+const CHECKPOINT_SELECT: &str = "SELECT company_id, checkpoint_id, scope_key, project_id, cursor,
+        item_count, items_json, gaps_json, captured_by, captured_at, recorded_at_ms
+     FROM handover_checkpoints";
+
+fn map_checkpoint_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckpointRow> {
+    Ok(CheckpointRow {
+        company_id: row.get(0)?,
+        checkpoint_id: row.get(1)?,
+        scope_key: row.get(2)?,
+        project_id: row.get(3)?,
+        cursor: row.get(4)?,
+        item_count: row.get(5)?,
+        items_json: row.get(6)?,
+        gaps_json: row.get(7)?,
+        captured_by: row.get(8)?,
+        captured_at: row.get(9)?,
+        recorded_at_ms: row.get(10)?,
+    })
+}
+
+/// 接管确认读取列。
+const CONFIRMATION_SELECT: &str = "SELECT company_id, confirmation_id, scope_key, checkpoint_id,
+        checkpoint_cursor, reviewed_cursor, appointment_id, authority_epoch, decision,
+        confirmed_by, note, open_items_json, delta_json, confirmed_at, recorded_at_ms
+     FROM takeover_confirmations";
+
+fn map_confirmation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConfirmationRow> {
+    Ok(ConfirmationRow {
+        company_id: row.get(0)?,
+        confirmation_id: row.get(1)?,
+        scope_key: row.get(2)?,
+        checkpoint_id: row.get(3)?,
+        checkpoint_cursor: row.get(4)?,
+        reviewed_cursor: row.get(5)?,
+        appointment_id: row.get(6)?,
+        authority_epoch: row.get::<_, i64>(7)? as u64,
+        decision: row.get(8)?,
+        confirmed_by: row.get(9)?,
+        note: row.get(10)?,
+        open_items_json: row.get(11)?,
+        delta_json: row.get(12)?,
+        confirmed_at: row.get(13)?,
+        recorded_at_ms: row.get(14)?,
+    })
+}
 
 fn map_takeover_intent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TakeoverIntentRow> {
     Ok(TakeoverIntentRow {
@@ -1887,6 +2130,91 @@ impl<'a> UnitOfWork<'a> {
         self.conn.execute_batch("ROLLBACK")?;
         self.finished = true;
         Ok(())
+    }
+
+    /// 事务内读作用域头：接管确认必须与「当前 epoch」在同一次事务里判定。
+    pub fn get_scope_head(
+        &self,
+        company_id: &str,
+        scope_key: &str,
+    ) -> Result<Option<ScopeHeadRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{SCOPE_HEAD_SELECT} WHERE company_id = ?1 AND scope_key = ?2"),
+                params![company_id, scope_key],
+                |row| {
+                    Ok(ScopeHeadRow {
+                        company_id: row.get(0)?,
+                        scope_key: row.get(1)?,
+                        current_appointment_id: row.get(2)?,
+                        authority_epoch: row.get::<_, i64>(3)? as u64,
+                        version: row.get::<_, i64>(4)? as u64,
+                        updated_at: row.get(5)?,
+                        recorded_at_ms: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    pub fn get_appointment(
+        &self,
+        company_id: &str,
+        appointment_id: &str,
+    ) -> Result<Option<AppointmentRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{APPOINTMENT_SELECT} WHERE company_id = ?1 AND appointment_id = ?2"),
+                params![company_id, appointment_id],
+                map_appointment_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    pub fn get_handover_checkpoint(
+        &self,
+        company_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<Option<CheckpointRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{CHECKPOINT_SELECT} WHERE company_id = ?1 AND checkpoint_id = ?2"),
+                params![company_id, checkpoint_id],
+                map_checkpoint_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    pub fn insert_takeover_confirmation(&self, row: &ConfirmationRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO takeover_confirmations (
+                company_id, confirmation_id, scope_key, checkpoint_id, checkpoint_cursor,
+                reviewed_cursor, appointment_id, authority_epoch, decision, confirmed_by, note,
+                open_items_json, delta_json, confirmed_at, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT DO NOTHING",
+            params![
+                row.company_id,
+                row.confirmation_id,
+                row.scope_key,
+                row.checkpoint_id,
+                row.checkpoint_cursor,
+                row.reviewed_cursor,
+                row.appointment_id,
+                row.authority_epoch as i64,
+                row.decision,
+                row.confirmed_by,
+                row.note,
+                row.open_items_json,
+                row.delta_json,
+                row.confirmed_at,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
     }
 
     /// 首次使用路径自动补齐最小工作包修订：无需预先配置 WorkPackage。
@@ -3967,8 +4295,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 44,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 7 张 P2 表"
+            count, 46,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 9 张 P2 表"
         );
     }
 

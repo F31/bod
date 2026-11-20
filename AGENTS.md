@@ -171,6 +171,13 @@
   A→B 切换后运行/接受/贡献逐字段相等、计划逐条不变、旧票 `StaleAppointment`，员工项与「谁走」
   无关。同时补齐 `xtask migration-check` 自 007 起未登记的四个 P2 迁移（该检查此前一直是红的）
   （19 项命名用例）。
+  切片 3.3 落地 `bod-app::takeover_review` 与迁移 `011_handover_review.sql`：检查点只存
+  `(kind, id, fingerprint)` 七类事实指纹，游标是对排序文本求 sha256（只覆盖事实、不覆盖缺口），
+  读回重算并核对条数，超限报错不截断；增量分新增/变化/消失三类，缺口（无旧经理总结、部分快照、
+  未知执行、待人工验收）单独可查。接管确认在 `BEGIN IMMEDIATE` 事务里读头+委任+检查点再插行，
+  绑定 epoch 与游标，`confirmation_as_ticket` 恒错——「只读确认不产生管理权」是类型事实；
+  确认状态随 epoch 走（撤任即 `Superseded`），确认后命令仍逐条复核旧票 `StaleAppointment`。
+  该切片新增两张表（迁移 11 条 / 表 46 张），`migration-check` 同步登记（14 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

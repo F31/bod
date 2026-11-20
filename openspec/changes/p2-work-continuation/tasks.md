@@ -241,7 +241,40 @@
     `MIGRATION_TABLES` 只登记到 006，P2 前几片新增的 007—010 从未登记，补齐后
     `[migration-check] PASS 10 个迁移脚本含 44 张必需表且无破坏性 DDL`。
     详见 `docs/spec-notes/p2-manager-transfer.md` §2。
-- [ ] 3.3 实现检查点增量读取与接管确认事务，验证只读确认不产生管理权、确认后命令仍逐条校验当前委任（`invariant_i_60`、G-42）。
+- [x] 3.3 实现检查点增量读取与接管确认事务，验证只读确认不产生管理权、确认后命令仍逐条校验当前委任（`invariant_i_60`、G-42）。
+  - 证据（2026-11-20，`cargo test -p bod-app takeover_review` → 14 passed）：新增
+    `bod-app::takeover_review` 与迁移 `011_handover_review.sql`（`handover_checkpoints`、
+    `takeover_confirmations`），迁移 10 → 11、表 44 → 46，`xtask migration-check` 同步登记。
+    检查点只存 `(kind, id, fingerprint)`，覆盖 issue / run / invocation / artifact / revision /
+    acceptance / snapshot 七类事实；游标 = 对排序后的 `kind\tid\tfingerprint` 文本求 sha256，
+    只覆盖事实不覆盖缺口（否则「补了一份快照」会把同一份事实算成另一个现场）。读回时重算游标并
+    核对 `item_count`（`CorruptCheckpoint`），指纹含分隔符报 `CorruptFingerprint`，超 8192 项报错
+    而不截断。同 scope 同游标重复捕获落回同一行，且不覆盖第一次的捕获人与时间。
+    增量分 `added` / `changed` / `vanished` 三类（消失项必须报出，不当作已处理），
+    `is_empty()` 只看事实，缺口单独查询：`missing_snapshot`（在跑的执行没有交接快照，即
+    「无旧经理总结」）、`partial_snapshot`（回显 missing_json）、`unreconciled_execution`
+    （Unknown/Cancelling，指向 2.2/2.3）、`open_acceptance`（RequiresHuman，指向 2.5）。
+    接管确认在同一 `BEGIN IMMEDIATE` 事务里读作用域头、委任行、检查点行再插确认行：无头
+    `NoActiveAppointment`、非当前指针或 epoch 不符 `StaleAppointment`、状态非 Active
+    `AppointmentInactive`、确认人不是 `manager_agent_id` `ConfirmerIsNotManager`、游标不符
+    `CursorMismatch`、跨作用域 `CheckpointScopeMismatch`；同 `confirmation_id` 同内容幂等返回原行，
+    不同内容 `ConfirmationKeyReuse`。
+    「只读确认不产生管理权」做成类型事实：`confirmation_as_ticket` 恒返回
+    `ConfirmationIsNotAuthority`（与 3.2 的 `management_ticket_as_execution` 同口径），实测确认后
+    委任行数仍 1、epoch 仍 1、头指针未改写；未受委任的人仍可只读核对（I-65 不依赖旧经理在线）。
+    确认状态随 epoch 走：`never_confirmed` / `current` / `blocked` / `superseded`，
+    撤任后确认自动降级为 `Superseded{1,2}`，新经理在 epoch 3 确认后回到 `current`；
+    同一 epoch 内 `blocked` 之后可再 `confirmed`（历史两条都留）；`blocked` 必须写理由。
+    确认后命令仍逐条复核：epoch 1 提交 `AssignTask` 通过，撤任 A + 任命 B（epoch 3）后同一条旧票
+    返回 `StaleAppointment`。确认行记录 `checkpoint_cursor` 与 `reviewed_cursor`，两者不同即
+    「确认时现场已前进」，并留下当时的缺口与增量计数。
+    边界：不做整次换人的原子事务（双人并发切换属 G-38 / 5.1）、不改历史成果与费用（3.4）、
+    专项子树作用域显式拒绝并指向 3.5；`blocked` 不回写成准入门禁，避免第二套授权判断；
+    不写 `gates.yaml`（P2 绑定仍 planned）。
+    编号差异如实记录：tasks 把 `invariant_i_60` 挂在本任务上，但 §39.11 的 I-60 是「未委任普通
+    执行者只能反馈，受委任负责人在 Grant 内可安排工作」，检查点增量与接管资料的权威编号是
+    **I-65** 与 **G-42**；本切片按 I-65 + G-42 落地，不宣称 I-60 已验收。
+    详见 `docs/spec-notes/p2-manager-transfer.md` §3。
 - [ ] 3.4 实现历史成果/费用不可变与争议待核查标记，验证 `invariant_i_61`：新经理不能追溯修改旧接受或费用主体。
 - [ ] 3.5 实现专项委任边界与组织元数据分离，验证项目负责人不能越过专项范围指挥，reportsTo 变更不迁移 Run/租约/权限（`invariant_i_62`—`invariant_i_64`）。
 - [ ] 3.6 编写负责人切换操作说明到 `docs/spec-notes/p2-manager-transfer.md`，验证 §41.8 的每项验收要求都有对应命令与拒绝样本。

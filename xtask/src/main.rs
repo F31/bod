@@ -361,6 +361,10 @@ const MIGRATION_TABLES: &[(&str, &[&str])] = &[
             "management_commands",
         ],
     ),
+    (
+        "011_handover_review.sql",
+        &["handover_checkpoints", "takeover_confirmations"],
+    ),
 ];
 
 fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str>, Vec<String>) {

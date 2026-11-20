@@ -49,6 +49,7 @@ pub mod resource_state;
 pub mod staff_continuation;
 pub mod store;
 pub mod takeover_intent;
+pub mod takeover_review;
 pub mod verification_registry;
 pub mod wakeup;
 pub mod workbench_projection;
