@@ -141,7 +141,28 @@
     `attempt_created`），attempt_id 或 input_revision 不符报 `PrecheckMismatch`，通过时把
     「已核验 N 项 / 未核验 M 项」写进阶段历史。边界：不读写真实工作区、不执行命令、不生成接续卡片
     （2.5）、不写 `gates.yaml`（P2 绑定仍 planned）。详见 `docs/spec-notes/p2-takeover.md` §4。
-- [ ] 2.5 实现接续可见性卡片（等级/保留成果/missing/停止状态/重建步骤），验证换人不改变验收或合并旧未验收成果。
+- [x] 2.5 实现接续可见性卡片（等级/保留成果/missing/停止状态/重建步骤），验证换人不改变验收或合并旧未验收成果。
+  - 证据（2026-11-20，`cargo test -p bod-app continuation_card` → 18 passed）：新增
+    `bod-app::continuation_card`，纯只读投影，不建表、不新增迁移（仍 9 条 / 41 张表），
+    不持 `SqliteStore`、不接受成果、不产生命令。
+    五个分区齐全：等级取自 1.1 的 `AdmissionDecision`（降级时显示获批等级与缺失维度，摘要行不出现
+    请求等级）、保留成果只来自宿主 `AcceptanceRecord`、缺失取自 1.4 快照并保留原因码、停止状态照抄
+    2.2 的四态、步骤来自 2.4 的 `REBUILD_STEPS` 与报告完成标记（无报告 0/8，就绪报告 6/8——只读与
+    测试预检未跑、继续执行未发生）。
+    「不把旧候选标为已接受」做成类型事实：`PreservedArtifact` 字段私有且唯一入口 `from_record`，
+    与 `CandidateArtifact` 无互转路径；候选自带 `accepted: true` 只作原始声明，无对应接受记录时记
+    `discrepancies` 并保持未接受。`ack_only` 不渲染成「已停止」（文案为「未证实停止——不得据此写
+    旧现场」），隔离未检查为 `not_checked` 且 `writable = None` 而非 `true`；写判定调 2.2
+    `decide_write`，驳回时列出隔离条件。
+    权限原样回显：`AuthorityView` 只拷贝观察者 scope，L1 与 L3 卡片的 authority 完全相等（用例固定），
+    卡片无 `can_accept`/`can_resume` 之类的授权位。「换人不改变验收」由 `manager_change_...` 用例
+    固定：换观察者后保留成果逐字段相等，验收人仍是原验收人。
+    实测抓到的真问题：首版用 `record.approves(work_package_revision)` 判定，`preserved` 恒为空——
+    `AcceptanceBinding::binds()` 比的是 **artifact revision** 而非工作包修订；改为按绑定的
+    `work_package_revision` 判定，历史接受单列 `stale_acceptances`（`requires_human` /
+    `superseded` / `work_package_mismatch`），既不并入保留也不静默丢弃。
+    边界：不渲染视觉样式、不判断能否接续（2.4 结论）、不做跨修订等价推断、不写 `gates.yaml`
+    （P2 绑定仍 planned）。详见 `docs/spec-notes/p2-takeover.md` §5。
 - [ ] 2.6 编写接管事务与故障样本说明到 `docs/spec-notes/p2-takeover.md`，验证每个阶段对应 scenario 与可注入故障点。
 
 ## 3. 负责人切换

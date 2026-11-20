@@ -20,6 +20,7 @@ pub mod cleanup_recovery;
 pub mod coding_integration;
 pub mod config;
 pub mod context_handoff;
+pub mod continuation_card;
 pub mod control_api;
 pub mod delivery_verification;
 pub mod descriptor_schema;

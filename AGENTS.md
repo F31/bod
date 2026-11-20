@@ -139,6 +139,13 @@
   预检命令只接受已登记引用，`NotRun` 不计通过；目标理解只有候选形态，歧义/冲突转 P1 Question 且
   责任方不由 Agent 填。`PrecheckClearance` 作为 `attempt_created → restored` 的准入凭据，缺凭据或
   attempt/修订不符即拒绝并保持原阶段（20 + 20 项命名用例）。
+  切片 2.5 落地 `bod-app::continuation_card`（只读投影，无新表）：分项显示等级、保留成果、缺失、
+  停止状态与重建步骤。「不把旧候选标为已接受」是类型事实——`PreservedArtifact` 字段私有、只能由
+  宿主接受记录构造，与 `CandidateArtifact` 无互转；候选自称已接受时记不一致并保持未接受。等级只显示
+  获批值（降级原因并列），权限原样回显（L1/L3 authority 相等、无授权位），`ack_only` 不渲染成
+  「已停止」，隔离未检查为 `not_checked` 而非 `unknown`。实测问题：`approves()` 比的是 artifact
+  revision，用它判工作包归属会让保留成果恒为空——已改为按绑定工作包字段判定并单列
+  `stale_acceptances`（18 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
