@@ -216,6 +216,11 @@ fn user_flow_steps_are_reproducible_in_workbench() {
     assert!(executed.report.passed);
     assert_eq!(executed.checks.len(), 2);
     assert!(cas.object_path(&executed.cas_object.digest).exists());
+    // 5.2：报告正文必须注明实际 commit 与环境（不是只写进内存结构体）。
+    assert_eq!(executed.report.environment, plan.environment);
+    let report_body = String::from_utf8(cas.read(&executed.cas_object.digest).unwrap()).unwrap();
+    assert!(report_body.contains(&format!("commit:{}\n", assignment.commit)));
+    assert!(report_body.contains(&format!("environment:{}\n", plan.environment.as_str())));
     let report = executed.report.clone();
     let binding = bind_first_use_evidence(&assignment, &report).unwrap();
     assert_eq!(
@@ -253,8 +258,14 @@ fn user_flow_steps_are_reproducible_in_workbench() {
         Some(assignment.merge_combination.clone())
     );
     let facts = collect_host_facts(&store, COMPANY, PROJECT).unwrap();
-    assert!(!facts.verifications.is_empty());
+    assert!(facts.verifications.iter().any(|record| record.revision_id
+        == assignment.candidate.revision_id
+        && record.environment == plan.environment));
     assert_eq!(facts.acceptances.len(), 1);
+    assert_eq!(
+        facts.acceptances[0].binding.work_package_revision, assignment.plan.work_package_revision,
+        "接受记录必须绑定交办时的工作包修订"
+    );
     let before = state_fingerprint(&store).unwrap();
     let task = task_from_store(&store, COMPANY, PROJECT, plan.issue_id.as_str())
         .unwrap()
@@ -288,6 +299,24 @@ fn user_flow_steps_are_reproducible_in_workbench() {
     assert_eq!(backup.status, BackupStatus::Verified);
     let checked = verify_backup_for_delivery(&backup, &cas, &expected_report_digests(&executed));
     assert!(checked.recoverable, "问题：{:?}", checked.problems);
+    // 5.2 的第四段证据：备份快照重开后仍查到同一修订的接受与验证，
+    // 且接受证据引用正是刚核验过的报告 CAS，而不是另一份交付的证据。
+    let restored = SqliteStore::open(Path::new(&backup.path), &BodConfig::default()).unwrap();
+    let restored_facts = collect_host_facts(&restored, COMPANY, PROJECT).unwrap();
+    assert_eq!(restored_facts.acceptances.len(), 1);
+    assert_eq!(
+        restored_facts.acceptances[0].binding.work_package_revision,
+        assignment.plan.work_package_revision
+    );
+    assert!(
+        restored_facts.acceptances[0]
+            .evidence_refs
+            .contains(&format!("cas:{}", executed.cas_object.digest.value))
+    );
+    assert!(restored_facts.verifications.iter().any(|record| {
+        record.revision_id == assignment.candidate.revision_id
+            && record.environment == plan.environment
+    }));
 
     // 手册步骤 6：关闭并重开（真实进程语义不在本切片）→ 同 SQLite 文件仍可查询。
     drop(store);

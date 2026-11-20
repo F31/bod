@@ -30,21 +30,30 @@ pub fn shipped_registry() -> &'static str {
 /// `openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/`。归档是单一来源，
 /// 不复制副本；若再次归档导致目录名变化，这里必须同步，否则编译期即失败（不会静默漏检）。
 ///
-/// P1 期间仍只覆盖 P0 来源：新增的 G-29 会出现在 `unreferenced` 提示里（不判失败）。
-/// P1 出口（任务 5.3）把来源切到 `openspec/changes/p1-single-executor-delivery/` 时，
-/// 必须同时补齐 P1 引用的 I-10/I-17/I-26/I-36/I-55 与 G-11/G-15/G-16/G-51。
+/// P0 归档来源保留，避免 P1 出口切换时丢掉历史约定的覆盖检查；P1 出口（任务 5.3）
+/// 追加当前 Change 的 proposal/tasks，使 P1 引用的 I-71 与 G-15/G-16/G-51 等也进入
+/// `coverage_gaps()`。P1 归档后必须把这四条路径同步到 archive 目录，编译期即失败，
+/// 不会静默漏检。
 pub const BINDING_SOURCES: &[(&str, &str)] = &[
     (
-        "proposal",
+        "p0-proposal",
         include_str!(
             "../../../openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/proposal.md"
         ),
     ),
     (
-        "tasks",
+        "p0-tasks",
         include_str!(
             "../../../openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/tasks.md"
         ),
+    ),
+    (
+        "p1-proposal",
+        include_str!("../../../openspec/changes/p1-single-executor-delivery/proposal.md"),
+    ),
+    (
+        "p1-tasks",
+        include_str!("../../../openspec/changes/p1-single-executor-delivery/tasks.md"),
     ),
 ];
 

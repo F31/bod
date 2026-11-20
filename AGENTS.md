@@ -79,7 +79,12 @@
   把 `project_id` 当 `company_id` 写入验证/接受的缺陷，并用只读 `issue_work_package_links` 把
   `delivery-*` 证据归属到 `issue-*` 任务页、结案案件不再冒充待决定。Unknown/取消按 ack≠停止、
   风险预留保留、独立证据才确认停止诚实表达；真实 Agent SDK/UI 点击/桌面进程重启未复现并已列明。
-  P1 出口切片（5.1—5.3）尚未开始。
+  P1 出口切片（5.1—5.3）已完成：G-15/G-16 补命名用例，G-51 按非目标保持 planned，
+  I-71 独立登记；`verification_registry.rs` 的 G-50 绑定来源保留 P0 归档并追加 P1
+  proposal/tasks（44 条、缺失引用 0）。e2e 补报告正文 commit/环境断言与备份快照重开后
+  同修订证据核对，四段证据串同一修订。`docs/reports/p1-exit-evidence.md` 汇总出口证据，
+  `p0-support-matrix.md` §7 追加 P1 行并统一保持 `Target`（归档评审前不升 Supported）。
+  归档与 4 份 delta 同步 `openspec/specs/` 仍待评审后独立执行。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

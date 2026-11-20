@@ -59,9 +59,12 @@
 
 ## 5. P1 验证与出口
 
-- [ ] 5.1 运行 `bod-app::context_handoff`、`bod-app::workspace_safety`、`bod-app::coding_integration`、`bod-app::resource_state` 的 P1 用例，验证 G-11、G-15、G-16、G-29 均有命名 case 与真实断言。
-- [ ] 5.2 在同一真实仓库与一种已接入 Agent 上完成一次完整交付演示，验证任务、验证、接受、备份四段证据绑定同一修订且报告注明 commit/环境。
-- [ ] 5.3 汇总 P1 出口证据与支持矩阵，验证「无 Team/Run 配置完成真实任务」「取消与 Unknown 如实显示」两项有可核对报告，未测项保持 Target/Unverified。
+- [x] 5.1 运行 `bod-app::context_handoff`、`bod-app::workspace_safety`、`bod-app::coding_integration`、`bod-app::resource_state` 的 P1 用例，验证 G-11、G-15、G-16、G-29 均有命名 case 与真实断言。
+  - 证据（2026-11-20）：G-11 `context_handoff::tests::g_11_profile_and_context_conformance` 与 G-29 `workspace_safety::tests::g_29_parallel_attempts_use_separate_indexes` 为既有命名用例；本切片新增 `resource_state::tests::g_15_resource_concurrency_and_write_ownership`（`cargo test -p bod-app g_15_resource_concurrency` → 1 passed：过期版本 `VersionConflict{current: Version(2)}`、执行端自报 `WrongWriter`、验证器观察不改目标代、运行中验收不可变、稳定停止不热重试）与 `lifecycle_recovery::tests::g_16_reconcile_terminal_state_survives_restart`（`cargo test -p bod-app g_16_reconcile_terminal` → 1 passed：文件型 SQLite 真实关闭重开后裁决终态/证据/风险引用保留，结案不再报 Fail）。`coding_integration` 既有 9 例为 I-18/I-20 承载。同批补 `I-71`（纠正此前误写为 I-10 的编号）与 `G-51`（planned、不填 tests）；`cargo run -p bod -- verify-index` 报 44 条（42 implemented / 1 planned / 1 unverified）、缺失引用 0、G-50 PASS。`verification_registry.rs` 的 BINDING_SOURCES 保留 P0 归档来源并追加 P1 proposal/tasks，不降低历史覆盖。
+- [x] 5.2 在同一真实仓库与一种已接入 Agent 上完成一次完整交付演示，验证任务、验证、接受、备份四段证据绑定同一修订且报告注明 commit/环境。
+  - 证据（2026-11-20，`cargo test -p bod-app --test p1_user_flow_e2e` → 1 passed）：同一 `git init` 仓库 + 文件型 SQLite + 真实 CAS，8 步手册逐段投影核对。本次补强两处：报告正文显式断言 `commit:<assignment.commit>` 与 `environment:<plan.environment>`（原先只在结构体写入、无断言）；备份段从快照文件重开 SQLite，断言接受记录绑定同一 `plan.work_package_revision`、验证记录绑定同一 `candidate.revision_id` + `environment`、接受证据引用正是刚核验的报告 CAS（原先只检查 CAS 在场，未证明同修订）。四段经 `merge_combination` / 修订 / CAS digest 串接，见 `docs/reports/p1-exit-evidence.md` §2。**边界**：已接入 Agent 仅为调用方给的 `agent-ready` ID，真实 Agent SDK 未接入。
+- [x] 5.3 汇总 P1 出口证据与支持矩阵，验证「无 Team/Run 配置完成真实任务」「取消与 Unknown 如实显示」两项有可核对报告，未测项保持 Target/Unverified。
+  - 证据（2026-11-20）：新增 `docs/reports/p1-exit-evidence.md`（5.1/5.2 逐项证据、两项可核对能力报告、诚实边界与校验命令）；`docs/spec-notes/p0-support-matrix.md` §7 追加 P1 行，统一标 `Target`（已实测、本 Change 未归档评审），未测项保留 `Unverified`/`Planned`；§6 计数同步。`docs/spec-notes/p1-user-flow.md` §5 补四段同修订追溯。G-48/G-51 仍 unverified/planned，Fake Executor 仍不计入。归档与 4 份 delta 同步到 `openspec/specs/` 留给评审通过后的独立切片；归档前不宣称 Supported。
 
 ## Workflow follow-up
 

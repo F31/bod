@@ -529,6 +529,88 @@ mod tests {
         (store, dir)
     }
 
+    /// G-16：reconcile 终态与重启（§39.14 bod-app::lifecycle_recovery）。
+    /// 用文件型 SQLite 真实关闭重开，证明 Unknown → 对账案件 → 裁决结案的终态
+    /// 跨进程仍可查，且结案后 doctor 不再把它当失败中的 Unknown。
+    #[test]
+    fn g_16_reconcile_terminal_state_survives_restart() {
+        let (mut store, dir) = store();
+        let uow = store.transaction().unwrap();
+        uow.insert_invocation(&unknown_invocation()).unwrap();
+        uow.commit().unwrap();
+
+        let opened = open_case(
+            &mut store,
+            &CaseRequest {
+                company_id: "company-default",
+                case_id: "case-g16",
+                invocation_id: Some("inv-1"),
+                logical_action_key: "deploy:prod",
+                impact_scope: "project-1",
+                risk_reservation_refs: vec!["res-g16".to_string()],
+                known_evidence: "查询三次超时",
+                assignee: "user-1",
+                next_step: "联系外部系统核对部署状态",
+            },
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(opened.state, CaseState::Open);
+        let before = run_doctor(
+            &mut store,
+            "company-default",
+            &DoctorOptions::default(),
+            NOW,
+        )
+        .unwrap();
+        assert!(!before.gate.allowed, "案件未结案前派发门保持关闭");
+
+        let resolved = resolve_case(
+            &mut store,
+            "company-default",
+            "case-g16",
+            "外部确认未执行",
+            NOW + 1,
+        )
+        .unwrap();
+        assert_eq!(resolved.state, CaseState::Resolved);
+        drop(store);
+
+        let mut reopened =
+            SqliteStore::open(&dir.join("bod.sqlite"), &BodConfig::default()).unwrap();
+        let cases = reopened
+            .list_reconciliation_cases("company-default", false)
+            .unwrap();
+        let persisted = cases
+            .iter()
+            .find(|item| item.case_id == "case-g16")
+            .expect("重启后案件仍可查");
+        assert_eq!(persisted.state, CaseState::Resolved);
+        assert!(
+            persisted.known_evidence.contains("外部确认未执行"),
+            "裁决写入案件证据并跨重启保留"
+        );
+        assert!(persisted.next_step.contains("已裁决"));
+        assert_eq!(
+            persisted.risk_reservation_refs,
+            vec!["res-g16".to_string()],
+            "结案不等于自动释放风险预留"
+        );
+
+        let after = run_doctor(
+            &mut reopened,
+            "company-default",
+            &DoctorOptions::default(),
+            NOW + 2,
+        )
+        .unwrap();
+        assert_ne!(
+            after.check("unknown_actions").unwrap().status,
+            CheckStatus::Fail,
+            "已裁决案件不再冒充未处理的 Unknown"
+        );
+    }
+
     #[test]
     fn clean_store_reports_no_failure_and_allows_dispatch() {
         let (mut store, dir) = store();

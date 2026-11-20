@@ -196,6 +196,14 @@
   status: implemented
   evidence: cargo test -p bod-app claim_concurrency
   note: 用例函数名按 D2 历史命名为 i_02，断言对象是过期 lease token 不得确认完成
+- id: I-71
+  kind: invariant
+  requirement: 同一未结算金额只计 R 或 U，结算转 C 不重复占用
+  module: bod-app::budget_admission
+  tests: bod-app::budget_admission::tests::i_71_cancel_to_risk_keeps_total_and_never_double_counts
+  status: implemented
+  evidence: cargo test -p bod-app budget_admission
+  note: "V2.9.6 §39.7 的权威语义；G-45 复用同一 case 作为 module/tests 目标。P1 tasks.md 4.1/4.6 与 p0-support-matrix.md §5 曾把它误记为 I-10 语义，现独立登记以消除编号缺口；C/R/U 互斥不属于 I-10（I-10 是合并证据对应实际目标与候选组合）"
 - id: G-1
   kind: gate
   requirement: 依赖方向与分层（bod-core 不依赖存储/网络/UI；bod-app 不反向依赖 CLI/桌面）
@@ -260,6 +268,22 @@
   status: implemented
   evidence: cargo test -p bod-app context_handoff
   note: 覆盖 Profile/规格修订固定、引用摘要完整、撤权后引用转 omitted_refs 且原因可解释；指令优先级（reconcile）与缓存撤权（FragmentCache）断言在同模块其余用例中补充，未单列 G-11 子用例
+- id: G-15
+  kind: gate
+  requirement: 资源并发/状态所有权
+  module: bod-app::resource_state
+  tests: bod-app::resource_state::tests::g_15_resource_concurrency_and_write_ownership
+  status: implemented
+  evidence: cargo test -p bod-app resource_state
+  note: "V2.9.6 §39.14 指定 bod-app::resource_state。命名用例把既有四组分片断言串成一次真实执行：过期版本冲突、目标代只在控制变更时递增、执行端自报不得成为权威状态、验证器可写观察且稳定停止不热重试；不改变 P0 状态规则的覆盖范围"
+- id: G-16
+  kind: gate
+  requirement: reconcile 终态与重启
+  module: bod-app::lifecycle_recovery
+  tests: bod-app::lifecycle_recovery::tests::g_16_reconcile_terminal_state_survives_restart
+  status: implemented
+  evidence: cargo test -p bod-app lifecycle_recovery && cargo test -p bod-app cancel_reconciliation
+  note: "V2.9.6 §39.14 指定 bod-app::lifecycle_recovery。命名用例以文件型 SQLite 真实关闭重开，断言 Unknown→案件→裁决结案跨重启保留、结案后不再冒充失败中的 Unknown、风险预留不因结案自动释放；P1 4.3 的 cancel_reconciliation::tests::restart_keeps_pending_cancellation_and_handler 为并列 P1 侧断言，module/tests 保持 P0 目标"
 - id: G-17
   kind: gate
   requirement: 执行端 conformance（重复 start、回包丢失、乱序、取消与确认分离等）
@@ -323,6 +347,13 @@
   status: implemented
   evidence: cargo test -p bod-app migration_safety && cargo run -p xtask -- migration-check
   note: ""
+- id: G-51
+  kind: gate
+  requirement: Tauri 连接/sidecar/退出/平台组合/单宿主
+  module: bod-app::desktop_lifecycle（P1 未实现，P0 已有 apps/desktop/shell 最小路径）
+  status: planned
+  evidence: cargo test -p bod-desktop
+  note: "P1 proposal 引用但 P1 非目标：P0 8.1 只验证窗口能起/能关/关得对（detach + finish）；sidecar 分发、平台组合矩阵、单宿主冲突与桌面业务页面渲染均未有 conformance 报告。按 V2.9.6 §39.15 保持 planned，不填 tests、不宣称 Supported；§39.14 预期的 bod-app::desktop_lifecycle 模块尚不存在，不得用 shell 测试冒充该门禁通过"
 - id: G-50
   kind: gate
   requirement: 验证索引全量/真实目标与断言/支持声明门禁

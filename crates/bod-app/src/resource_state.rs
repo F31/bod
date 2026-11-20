@@ -156,6 +156,82 @@ mod tests {
         }
     }
 
+    /// G-15：资源并发与状态写入所有权的命名用例（§39.14 bod-app::resource_state）。
+    /// 把同模块既有的四个关注点串成一次真实断言：版本冲突、目标代只在控制变更时递增、
+    /// 执行端自报不得成为权威状态、稳定停止不热重试。
+    #[test]
+    fn g_15_resource_concurrency_and_write_ownership() {
+        let original = issue();
+        let first = update_control(
+            &original,
+            original.meta.resource_version,
+            &ControlChange {
+                title: Some("改名".to_string()),
+                acceptance: None,
+            },
+            WriterKind::DomainCommand,
+        )
+        .expect("合法控制更新应成功");
+        assert_eq!(first.meta.resource_version, Version(2));
+        assert_eq!(first.meta.generation, 2, "规格变化才提升目标代");
+
+        let stale = update_control(
+            &first,
+            original.meta.resource_version,
+            &ControlChange {
+                title: Some("并发覆盖".to_string()),
+                acceptance: None,
+            },
+            WriterKind::DomainCommand,
+        )
+        .expect_err("拿已被第一笔推进前的版本更新当前资源必须被拒");
+        assert_eq!(
+            stale,
+            crate::domain::DomainError::VersionConflict {
+                current: Version(2)
+            }
+        );
+        assert_eq!(first.spec.title, "改名", "被拒的并发写不得污染已提交结果");
+
+        let self_reported = apply_observation(
+            &issue(),
+            &observation(ConditionReason::Recovered, Phase::Succeeded),
+            WriterKind::Executor,
+        )
+        .expect_err("执行端自报终态不是权威状态");
+        assert_eq!(self_reported, crate::domain::DomainError::WrongWriter);
+
+        let verified = apply_observation(
+            &issue(),
+            &observation(ConditionReason::Progressing, Phase::Running),
+            WriterKind::Verifier,
+        )
+        .expect("验证器可写观察");
+        assert_eq!(verified.status.phase, Phase::Running);
+        assert_eq!(verified.meta.generation, 1, "观察只改状态，不改目标代");
+
+        let immutable = update_control(
+            &verified,
+            verified.meta.resource_version,
+            &ControlChange {
+                title: None,
+                acceptance: Some(AcceptanceCriteria { criteria: vec![] }),
+            },
+            WriterKind::DomainCommand,
+        )
+        .expect_err("运行中不得改验收标准");
+        assert_eq!(immutable, crate::domain::DomainError::ImmutableDuringRun);
+
+        let blocked = apply_observation(
+            &issue(),
+            &observation(ConditionReason::InsufficientBudget, Phase::Blocked),
+            WriterKind::RunController,
+        )
+        .expect("稳定阻塞是合法状态");
+        assert!(!should_retry(&blocked), "稳定停止不得热重试");
+        assert!(should_retry(&verified), "Progressing 仍需继续协调");
+    }
+
     mod stable_stop_states {
         use super::*;
 
