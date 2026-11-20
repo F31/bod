@@ -34,6 +34,7 @@ pub mod handoff_package;
 pub mod handoff_snapshot;
 pub mod host_handshake;
 pub mod invocation;
+pub mod isolation_check;
 pub mod lifecycle_recovery;
 pub mod local_process;
 pub mod migration_safety;

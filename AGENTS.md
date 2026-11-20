@@ -115,6 +115,14 @@
   所有写入走 `WHERE version = expected` 条件提交，迟到写入报 `VersionConflict` 并保留
   先写者结果；进入 `attempt_created` 要求新 fencing token 严格大于旧值，但意图层只登记
   不创建 Attempt（14 项命名用例）。
+  切片 2.2 落地 `bod-app::isolation_check`（无新表）：停止状态只由 P1 4.3 的取消事件派生，
+  `ack` 永远不是停止确认（`evidence_ref()` 对未确认取值返回 `None`）；写入面按路径**组件**
+  比较（`/ws/src` 与 `/ws/src2` 不相交），空枚举与未知面一律按「可能重叠」处理；隔离只接受
+  环境销毁 / 写权限撤销 / 所有权移交三类机制证据且必须带引用，「这是独立工作区」不接受。
+  写同一现场要求停止确认**且**已隔离，独立路径只要求已隔离——`Disjoint` 行里停止状态不参与
+  判定，否则「允许独立无冲突工作」落不了地；相关外部副作用在停止未确认时一律拒绝重发。
+  `clearance()` 作为 2.1 `isolation_checked`/`admitted` 的准入凭据，未通过报
+  `IsolationBlocked` 且不推进版本（22 + 3 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

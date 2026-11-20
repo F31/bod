@@ -73,7 +73,27 @@
     （实测 `invocations`/`acceptances` 均为 0）。迁移条数断言 8→9、表计数 40→41。
     边界：不判断旧执行是否真停（2.2）、不对账（2.3）、不预检（2.4）、不写 `gates.yaml`
     （P2 绑定仍 planned）。详见 `docs/spec-notes/p2-takeover.md` §1。
-- [ ] 2.2 实现旧执行停止确认与隔离检查，验证 `invariant_i_48`：旧写入未停时新执行者写同一现场被拒绝，允许独立无冲突工作。
+- [x] 2.2 实现旧执行停止确认与隔离检查，验证 `invariant_i_48`：旧写入未停时新执行者写同一现场被拒绝，允许独立无冲突工作。
+  - 证据（2026-11-20，`cargo test -p bod-app isolation_check` → 22 passed；`cargo test -p bod-app
+    takeover_intent` → 17 passed）：新增 `bod-app::isolation_check`，不建新表——判定输入全部来自
+    已持久化事实（取消事件、执行终态、权限/租约记录），避免与取消账本形成两个事实源。
+    `StopStatus` 四态只有 `Confirmed` 携带证据，且只能经 `from_cancel_event` 从 P1 4.3 的
+    `CancelEvent` 派生：实测 `request_cancel → record_cancel_ack` 后 `stop_confirmed=false`、
+    `stop_evidence=None`、`clearable=false`，补 `confirm_stop(ExecutionState::Cancelled)` 后才为真。
+    `SurfaceKnowledge` 三态（枚举/仅根/未知）按路径**组件**比较，`/ws/src` 与 `/ws/src2/a.rs` 判为
+    不相交；统一分隔符与大小写、词法消解 `..`；空枚举在 `validate` 拒绝且关系兜底为 `Indeterminate`，
+    防止「枚举了但没东西」变成放行一切；未知面一律阻断。`IsolationBasis` 只有环境销毁 / 写权限
+    撤销 / 所有权移交三类且必须带引用，空引用 `UnevidencedBasis`、同类重复 `DuplicateBasis`，
+    刻意不提供「这是独立工作区」这类自述依据。判定表：写同一现场要求停止确认**且**已隔离；独立
+    路径只要求已隔离（停止状态不参与，否则「允许独立无冲突工作」不成立）；未知面任何证据都不放行。
+    `EffectSurface` 与写入面分开建模，相关动作在停止未确认时两入口（`decide_effect` 与
+    `decide_write` 的 `effect_key`）都拒绝重发，`required_evidence` 指向停止确认或 2.3 对账结论。
+    `clearance()` 作为 2.1 的准入凭据：`Transition` 新增 `isolation`，缺判定
+    `MissingIsolationCheck`，未通过 `IsolationBlocked{[stop_unconfirmed, isolation_unproven]}`
+    且不推进版本，判定摘要写进阶段历史以满足「阶段变化可查询」。
+    边界：不对账（2.3）、不预检（2.4）、不生成接续卡片（2.5）；迁移仍 9 条、表仍 41 张；
+    不写 `gates.yaml`（P2 绑定仍 planned，`invariant_i_48` 在 §39.10 归属 `lifecycle_recovery`
+    与本模块的差异延续 1.1/1.5 记录）。详见 `docs/spec-notes/p2-takeover.md` §2。
 - [ ] 2.3 实现 effect_id/逻辑动作键对账与不可信 reconcile_hint 过滤，验证恶意 hint 中的脚本或 URL 不被执行且不明结果只阻塞相关依赖。
 - [ ] 2.4 实现重建预检（摘要/授权/输入差异/文件/工具依赖）与 Question 生成，验证摘要不匹配时阻止自动继续。
 - [ ] 2.5 实现接续可见性卡片（等级/保留成果/missing/停止状态/重建步骤），验证换人不改变验收或合并旧未验收成果。

@@ -16,6 +16,7 @@
 
 use crate::canonical_json::{self, CanonicalError};
 use crate::domain::DomainId;
+use crate::isolation_check::IsolationClearance;
 use crate::store::{SqliteStore, StoreError};
 use std::fmt;
 
@@ -217,6 +218,8 @@ pub struct Transition {
     pub attempt: Option<AttemptCreation>,
     /// 进入 `SummaryReceived` 时必须提供。
     pub summary_snapshot_key: Option<String>,
+    /// 进入 `IsolationChecked`/`Admitted` 时必须提供：来自 2.2 的隔离判定。
+    pub isolation: Option<IsolationClearance>,
 }
 
 impl Transition {
@@ -227,6 +230,7 @@ impl Transition {
             note: None,
             attempt: None,
             summary_snapshot_key: None,
+            isolation: None,
         }
     }
 
@@ -242,6 +246,11 @@ impl Transition {
 
     pub fn with_summary(mut self, snapshot_key: impl Into<String>) -> Self {
         self.summary_snapshot_key = Some(snapshot_key.into());
+        self
+    }
+
+    pub fn with_isolation(mut self, clearance: IsolationClearance) -> Self {
+        self.isolation = Some(clearance);
         self
     }
 }
@@ -452,10 +461,16 @@ impl TakeoverIntent {
         let mut next = self.clone();
         next.phase = transition.to;
         next.updated_at = transition.at.clone();
+        let note = match (&transition.note, &transition.isolation) {
+            (Some(text), Some(clearance)) => Some(format!("{text}；{}", clearance.describe())),
+            (None, Some(clearance)) => Some(clearance.describe()),
+            (Some(text), None) => Some(text.clone()),
+            (None, None) => None,
+        };
         next.history.push(PhaseRecord {
             phase: transition.to,
             at: transition.at.clone(),
-            note: transition.note.clone(),
+            note,
         });
         match transition.to {
             TakeoverPhase::SummaryReceived => {
@@ -536,6 +551,22 @@ impl TakeoverIntent {
                     return Err(TakeoverError::MissingSummarySnapshot);
                 }
             }
+            TakeoverPhase::IsolationChecked | TakeoverPhase::Admitted => {
+                let clearance = transition
+                    .isolation
+                    .as_ref()
+                    .ok_or(TakeoverError::MissingIsolationCheck)?;
+                // 检查阶段允许「未通过」这个结论存在；准入阶段只接受已证实隔离。
+                if transition.to == TakeoverPhase::Admitted && !clearance.cleared() {
+                    return Err(TakeoverError::IsolationBlocked {
+                        codes: clearance
+                            .conditions()
+                            .iter()
+                            .map(|item| item.code.to_string())
+                            .collect(),
+                    });
+                }
+            }
             TakeoverPhase::AttemptCreated => {
                 let attempt = transition
                     .attempt
@@ -605,6 +636,10 @@ pub enum TakeoverError {
     MissingAbortReason,
     MissingAttempt,
     MissingSummarySnapshot,
+    MissingIsolationCheck,
+    IsolationBlocked {
+        codes: Vec<String>,
+    },
     SummaryNotRequested,
     FencingNotIncreased {
         baseline: u64,
@@ -641,6 +676,12 @@ impl fmt::Display for TakeoverError {
             Self::MissingAttempt => write!(f, "进入 attempt_created 必须登记新 Attempt"),
             Self::MissingSummarySnapshot => {
                 write!(f, "进入 summary_received 必须带总结快照引用")
+            }
+            Self::MissingIsolationCheck => {
+                write!(f, "进入 isolation_checked/admitted 必须带隔离判定")
+            }
+            Self::IsolationBlocked { codes } => {
+                write!(f, "隔离未通过，不能准入：{}", codes.join(","))
             }
             Self::SummaryNotRequested => write!(f, "尚未请求总结，不能标记为已收到"),
             Self::FencingNotIncreased { baseline, proposed } => write!(
@@ -918,7 +959,52 @@ mod tests {
         if to == TakeoverPhase::SummaryReceived {
             transition = transition.with_summary("company-1#1");
         }
+        // 隔离检查与准入必须带 2.2 的判定；正常路径用「已证实隔离」。
+        if matches!(
+            to,
+            TakeoverPhase::IsolationChecked | TakeoverPhase::Admitted
+        ) {
+            transition = transition.with_isolation(cleared_clearance());
+        }
         intent.commit(store, expected, transition, NOW_MS).unwrap()
+    }
+
+    /// 一份「停止已确认 + 环境已销毁」的隔离判定 → `Cleared`。
+    fn cleared_clearance() -> IsolationClearance {
+        crate::isolation_check::IsolationCheck::new(
+            "attempt-old",
+            crate::isolation_check::StopStatus::Confirmed {
+                invocation_id: "inv-1".to_string(),
+                evidence_ref: "inv-1:result-1:succeeded".to_string(),
+            },
+            crate::isolation_check::SurfaceKnowledge::RootOnly {
+                root: "/ws/old".to_string(),
+            },
+        )
+        .with_basis(
+            crate::isolation_check::IsolationBasis::EnvironmentDestroyed {
+                reference: "destroy-1".to_string(),
+            },
+        )
+        .observed_at("2026-11-20T11:05:00Z")
+        .clearance()
+        .unwrap()
+    }
+
+    /// 同一份事实，但旧执行只回了 ack 且没有隔离证据 → `NotCleared`。
+    fn uncleared_clearance() -> IsolationClearance {
+        crate::isolation_check::IsolationCheck::new(
+            "attempt-old",
+            crate::isolation_check::StopStatus::AckOnly {
+                ack_ref: "ack-1".to_string(),
+            },
+            crate::isolation_check::SurfaceKnowledge::RootOnly {
+                root: "/ws/old".to_string(),
+            },
+        )
+        .observed_at("2026-11-20T11:05:00Z")
+        .clearance()
+        .unwrap()
     }
 
     #[test]
@@ -1358,6 +1444,135 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, CommitOutcome::Committed { .. }));
+    }
+
+    #[test]
+    fn isolation_checked_requires_a_check_result() {
+        let root = temp_root("iso-missing");
+        let store = open_store(&root);
+        let mut intent = opened(&store);
+        intent
+            .request_summary(&store, intent.version, "2026-11-20T11:01:00Z", NOW_MS)
+            .unwrap();
+        advance(
+            &mut intent,
+            &store,
+            TakeoverPhase::SummaryReceived,
+            "2026-11-20T11:02:00Z",
+        );
+        advance(
+            &mut intent,
+            &store,
+            TakeoverPhase::Draining,
+            "2026-11-20T11:03:00Z",
+        );
+        advance(
+            &mut intent,
+            &store,
+            TakeoverPhase::Captured,
+            "2026-11-20T11:04:00Z",
+        );
+
+        let version = intent.version;
+        let err = intent
+            .commit(
+                &store,
+                version,
+                Transition::new(TakeoverPhase::IsolationChecked, "2026-11-20T11:05:00Z"),
+                NOW_MS,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TakeoverError::MissingIsolationCheck));
+        assert_eq!(intent.version, version, "缺判定不得推进版本");
+        assert_eq!(intent.phase, TakeoverPhase::Captured);
+    }
+
+    #[test]
+    fn admitted_rejects_uncleared_isolation() {
+        let root = temp_root("iso-blocked");
+        let store = open_store(&root);
+        let mut intent = opened(&store);
+        intent
+            .request_summary(&store, intent.version, "2026-11-20T11:01:00Z", NOW_MS)
+            .unwrap();
+        advance(
+            &mut intent,
+            &store,
+            TakeoverPhase::SummaryReceived,
+            "2026-11-20T11:02:00Z",
+        );
+        advance(
+            &mut intent,
+            &store,
+            TakeoverPhase::Draining,
+            "2026-11-20T11:03:00Z",
+        );
+        advance(
+            &mut intent,
+            &store,
+            TakeoverPhase::Captured,
+            "2026-11-20T11:04:00Z",
+        );
+        // 「检查过了」这个结论可以落库，哪怕结论是未通过。
+        let outcome = intent
+            .commit(
+                &store,
+                intent.version,
+                Transition::new(TakeoverPhase::IsolationChecked, "2026-11-20T11:05:00Z")
+                    .with_isolation(uncleared_clearance()),
+                NOW_MS,
+            )
+            .unwrap();
+        assert!(matches!(outcome, CommitOutcome::Committed { .. }));
+        assert_eq!(intent.phase, TakeoverPhase::IsolationChecked);
+        // 阶段历史里如实写着未通过，不是空白。
+        assert!(
+            intent
+                .history
+                .last()
+                .unwrap()
+                .describe()
+                .contains("隔离未通过")
+        );
+
+        let version = intent.version;
+        let err = intent
+            .commit(
+                &store,
+                version,
+                Transition::new(TakeoverPhase::Admitted, "2026-11-20T11:06:00Z")
+                    .with_isolation(uncleared_clearance()),
+                NOW_MS,
+            )
+            .unwrap_err();
+        match err {
+            TakeoverError::IsolationBlocked { codes } => {
+                assert!(codes.contains(&"stop_unconfirmed".to_string()), "{codes:?}");
+                assert!(
+                    codes.contains(&"isolation_unproven".to_string()),
+                    "{codes:?}"
+                );
+            }
+            other => panic!("应因隔离未通过而拒绝准入，实际 {other:?}"),
+        }
+        assert_eq!(intent.version, version, "拒绝准入不得推进版本");
+        assert_eq!(intent.phase, TakeoverPhase::IsolationChecked);
+    }
+
+    #[test]
+    fn admitted_records_isolation_basis_in_history() {
+        let root = temp_root("iso-history");
+        let store = open_store(&root);
+        let intent = walk_to_admitted(&store);
+        assert_eq!(intent.phase, TakeoverPhase::Admitted);
+        let admitted = intent
+            .history
+            .iter()
+            .find(|record| record.phase == TakeoverPhase::Admitted)
+            .unwrap();
+        let text = admitted.describe();
+        assert!(text.contains("隔离已证实"), "{text}");
+        assert!(text.contains("environment_destroyed"), "{text}");
     }
 
     /// 走到 admitted（含请求总结）。
