@@ -73,7 +73,13 @@
   不创建 Reservation/Outbox/Attempt/Binding、不触碰派发探针；工作台可见 `approve_budget` 入口与具体解除条件，
   提额后显式重派解除阻塞，已接受成果与已结算费用全程只读保留（G-45 的 P1 并列断言）。
   入口只判 CNY 金额维度的 1 微元下界，真实请求量仍由 P0 `budget_admission::admit_in` 五层复核；
-  未新增提额命令，UI 动作仍只展示。P1 的 4.7 与出口切片（5.1—5.3）尚未开始。
+  未新增提额命令，UI 动作仍只展示。
+  已完成切片 4.7「首次使用与交付操作手册」——`docs/spec-notes/p1-user-flow.md` 的 8 个步骤由
+  `tests/p1_user_flow_e2e.rs` 在真实 git/SQLite/CAS 上逐步投影到首页与任务页核对；修复首次使用
+  把 `project_id` 当 `company_id` 写入验证/接受的缺陷，并用只读 `issue_work_package_links` 把
+  `delivery-*` 证据归属到 `issue-*` 任务页、结案案件不再冒充待决定。Unknown/取消按 ack≠停止、
+  风险预留保留、独立证据才确认停止诚实表达；真实 Agent SDK/UI 点击/桌面进程重启未复现并已列明。
+  P1 出口切片（5.1—5.3）尚未开始。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

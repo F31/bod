@@ -83,7 +83,7 @@
   tests: bod-app::first_use::tests::invariant_i_10_first_use_needs_no_team_work_package_or_run_config
   status: implemented
   evidence: cargo test -p bod-app first_use
-  note: §39.2 权威语义是合并证据；4.1 把首次派发的目标/提交/规则/环境合成 merge_combination，并在 bind_first_use_evidence 逐项校验。tasks.md 曾把 I-10 误绑到「无 Team 配置」与 C/R/U 互斥；前者现作为 I-10 的宿主入口，后者按 §39.12 属 I-71，不在本条目重复登记
+  note: §39.2 权威语义是合并证据；4.1 把首次派发的目标/提交/规则/环境合成 merge_combination，并在 bind_first_use_evidence 逐项校验。tasks.md 曾把 I-10 误绑到「无 Team 配置」与 C/R/U 互斥；前者现作为 I-10 的宿主入口，后者按 §39.12 属 I-71，不在本条目重复登记。P1 4.7 端到端手册用例 tests/p1_user_flow_e2e.rs::user_flow_steps_are_reproducible_in_workbench 并列覆盖真实 git → 合并证据 → 接受 → 工作台复现
 - id: I-11
   kind: invariant
   requirement: 未确认远程停止不显示全部已停止，也不清空风险预留
@@ -91,7 +91,7 @@
   tests: bod-app::cancel_reconciliation::tests::invariant_i_11_cancel_ack_keeps_risk_and_attempt
   status: implemented
   evidence: cargo test -p bod-app cancel_reconciliation && cargo test -p bod-app effect_recovery && cargo test -p bod-app cleanup_recovery
-  note: cancel_ack 只记送达、不确认停止、不新建 Attempt、不释放风险预留（4.3 新增用例）；outbox 证据不足外报 Confirmed 仍由 effect_recovery::tests::i_11_dispatched_without_evidence_inspects_first_then_marks_confirmed 覆盖；清理侧 stop/budget 条件由 cleanup_recovery 补强
+  note: cancel_ack 只记送达、不确认停止、不新建 Attempt、不释放风险预留（4.3 新增用例）；outbox 证据不足外报 Confirmed 仍由 effect_recovery::tests::i_11_dispatched_without_evidence_inspects_first_then_marks_confirmed 覆盖；清理侧 stop/budget 条件由 cleanup_recovery 补强。P1 4.7 端到端手册用例 tests/p1_user_flow_e2e.rs::user_flow_steps_are_reproducible_in_workbench 并列覆盖 ack→Unknown→独立确认停止与「结案后不再冒充待决定」
 - id: I-12
   kind: invariant
   requirement: 一次性同意不能授权不同逻辑动作
@@ -171,7 +171,7 @@
   tests: bod-app::control_api::tests::read_only_returns_view_without_mutating_state_or_dispatching
   status: implemented
   evidence: cargo test -p bod-app control_api && cargo test -p bod-app workbench_projection
-  note: "tasks.md 7.3 用 I-55 指代清理语义，属编号引用错误；清理实际绑定 I-32（见 docs/spec-notes/p0-recovery.md 第 8 节）。P0 覆盖 control_api 只读入口零派发；P1 4.5 的 workbench_projection::tests::state_fingerprint_helper_reads_core_counts 与 projection_is_pure_and_deterministic 补「首页四问/任务页证据视图为纯只读投影、不改核心行数、相同宿主事实必得相同视图」。module/tests 保持 P0 目标，不替换原覆盖。"
+  note: "tasks.md 7.3 用 I-55 指代清理语义，属编号引用错误；清理实际绑定 I-32（见 docs/spec-notes/p0-recovery.md 第 8 节）。P0 覆盖 control_api 只读入口零派发；P1 4.5 的 workbench_projection::tests::state_fingerprint_helper_reads_core_counts 与 projection_is_pure_and_deterministic 补「首页四问/任务页证据视图为纯只读投影、不改核心行数、相同宿主事实必得相同视图」。P1 4.7 的 tests/p1_user_flow_e2e.rs::user_flow_steps_are_reproducible_in_workbench 进一步证明手册每一步可由工作台只读复现。module/tests 保持 P0 目标，不替换原覆盖。"
 - id: I-68
   kind: invariant
   requirement: 已接受唤醒有持久幂等回执，重发不重复增加待办代数

@@ -198,6 +198,21 @@ impl SqliteStore {
             .map_err(StoreError::Sql)
     }
 
+    /// 只读列出 (Issue uid, 工作包修订) 关联，供工作台把首次使用的交付证据归属到任务页。
+    pub fn list_work_package_issue_links(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT issue_uid, revision_id FROM work_package_revisions WHERE company_id = ?1
+             ORDER BY issue_uid ASC, revision_id ASC",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
     /// 统计工作包修订行数（首次使用断言「从零自动补齐」）。
     pub fn count_work_package_revisions(&self, company_id: &str) -> Result<i64, StoreError> {
         self.conn

@@ -258,6 +258,8 @@ fn default_write_scope(repo: &Path) -> Result<WriteScope, FirstUseError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstUseAssignment {
     pub plan: FirstUsePlan,
+    /// 验证/接受记录必须写回真实 Company；不能拿 project_id 顶替（工作台按 Company 投影）。
+    pub company_id: DomainId,
     pub project_id: DomainId,
     pub agent_id: DomainId,
     pub commit: String,
@@ -379,6 +381,7 @@ pub fn dispatch_first_use(
     let merge_combination = plan.merge_combination(&commit);
     Ok(FirstUseAssignment {
         plan,
+        company_id: input.project.company_id.clone(),
         project_id: input.project.id.clone(),
         agent_id: input.agent_id.clone(),
         commit,
@@ -448,7 +451,7 @@ pub fn accept_first_use(
     let binding = bind_first_use_evidence(assignment, report)?;
     let outcome = record_local_verification(
         store,
-        assignment.project_id.as_str(),
+        assignment.company_id.as_str(),
         &assignment.candidate,
         Some(report),
         verifier,
@@ -473,7 +476,7 @@ pub fn accept_first_use(
     Ok(
         match accept(
             store,
-            assignment.project_id.as_str(),
+            assignment.company_id.as_str(),
             assignment.artifact_id(),
             &request,
             actor,
@@ -821,6 +824,28 @@ mod tests {
             assert_eq!(
                 record.binding.work_package_revision,
                 assignment.plan.work_package_revision
+            );
+
+            // 回归：验证/接受必须写在真实 Company 下，工作台才能按 Company 投影到；
+            // 首次使用的 delivery-* 证据也要经工作包关联出现在 issue-* 任务页。
+            let facts =
+                crate::workbench_projection::collect_host_facts(&store, COMPANY, "project-real")
+                    .unwrap();
+            assert!(!facts.verifications.is_empty(), "工作台应看到验证记录");
+            assert_eq!(facts.acceptances.len(), 1, "工作台应看到接受记录");
+            let task = crate::workbench_projection::task_from_store(
+                &store,
+                COMPANY,
+                "project-real",
+                assignment.plan.issue_id.as_str(),
+            )
+            .unwrap()
+            .expect("任务页应能打开首次使用 Issue");
+            assert!(
+                task.evidence
+                    .iter()
+                    .any(|card| card.reference.starts_with("sha256:")),
+                "任务页应显示经工作包关联的方案证据"
             );
         }
 

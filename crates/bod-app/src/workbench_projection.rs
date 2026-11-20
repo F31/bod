@@ -14,7 +14,7 @@ use crate::domain::DomainId;
 use crate::domain::artifact::{AcceptanceRecord, VerificationRecord, VerificationState};
 use crate::domain::model::{Issue, Phase};
 use crate::domain::queue::{QueueState, WorkQueueEntry};
-use crate::recovery_models::ReconciliationCase;
+use crate::recovery_models::{CaseState, ReconciliationCase};
 
 // ---------------------------------------------------------------------------
 // 只读事实快照：调用方从宿主读取后传入，投影函数不接触任何写入句柄
@@ -37,6 +37,9 @@ pub struct HostFacts {
     pub cases: Vec<ReconciliationCase>,
     /// 修订 → 成果 id 的只读关联，用于把验证证据归属到具体任务。
     pub revision_artifact_links: Vec<(String, String)>,
+    /// Issue uid → 工作包修订的只读关联：首次使用的成果 id 是 `delivery-*`，
+    /// 必须通过工作包修订才能把接受/验证证据归属到 `issue-*` 任务页。
+    pub issue_work_package_links: Vec<(String, String)>,
     /// 澄清待决定（由 3.x 的 NeedsInputView 投影而来，只含展示所需字段）。
     pub questions: Vec<QuestionFact>,
 }
@@ -193,30 +196,52 @@ pub fn project_task(facts: &HostFacts, issue_uid: &str) -> Option<TaskView> {
     let mut evidence = Vec::new();
     let mut rejections = Vec::new();
 
-    for record in &facts.acceptances {
-        if record.artifact_id.as_str() == issue_uid
-            || record.binding.work_package_revision.as_str() == issue_uid
-        {
-            for reference in &record.evidence_refs {
-                evidence.push(EvidenceCard {
-                    reference: reference.clone(),
-                    source: format!("acceptance:{}", record.decision.as_str()),
-                });
-            }
-            if !record.decision.is_accepted() && !record.reason.is_empty() {
-                rejections.push(RejectionCard {
-                    reason: record.reason.clone(),
-                    stable_code: "RequiresHuman".to_string(),
-                    evidence: record.evidence_refs.clone(),
-                });
-            }
+    // 首次使用自动补齐的工作包修订把 issue-* 与 delivery-* 成果连起来；
+    // 没有这条只读关联时不猜测归属，保持证据为空（不串用其他任务）。
+    let linked_packages: Vec<&str> = facts
+        .issue_work_package_links
+        .iter()
+        .filter(|(issue, _)| issue == &uid)
+        .map(|(_, revision)| revision.as_str())
+        .collect();
+    let linked_acceptances: Vec<&crate::domain::artifact::AcceptanceRecord> = facts
+        .acceptances
+        .iter()
+        .filter(|record| {
+            record.artifact_id.as_str() == issue_uid
+                || record.binding.work_package_revision.as_str() == issue_uid
+                || linked_packages.contains(&record.binding.work_package_revision.as_str())
+        })
+        .collect();
+
+    for record in &linked_acceptances {
+        for reference in &record.evidence_refs {
+            evidence.push(EvidenceCard {
+                reference: reference.clone(),
+                source: format!("acceptance:{}", record.decision.as_str()),
+            });
+        }
+        if !record.decision.is_accepted() && !record.reason.is_empty() {
+            rejections.push(RejectionCard {
+                reason: record.reason.clone(),
+                stable_code: "RequiresHuman".to_string(),
+                evidence: record.evidence_refs.clone(),
+            });
         }
     }
 
+    // 验证证据先按成果 id 直接关联，再按已归属接受的成果 id 间接关联（首次使用路径）。
+    let linked_artifacts: Vec<&str> = std::iter::once(uid.as_str())
+        .chain(
+            linked_acceptances
+                .iter()
+                .map(|record| record.artifact_id.as_str()),
+        )
+        .collect();
     let linked_revisions: Vec<&str> = facts
         .revision_artifact_links
         .iter()
-        .filter(|(_, artifact_id)| artifact_id == &uid)
+        .filter(|(_, artifact_id)| linked_artifacts.contains(&artifact_id.as_str()))
         .map(|(revision, _)| revision.as_str())
         .collect();
     for record in &facts.verifications {
@@ -397,7 +422,8 @@ fn project_blockers(facts: &HostFacts) -> Vec<BlockerCard> {
         }
     }
     for case in &facts.cases {
-        if !case.next_step.is_empty() {
+        // 已结案/放弃的案件不再是当前阻塞；快照可能包含历史案件，投影必须自行过滤。
+        if case.state == CaseState::Open && !case.next_step.is_empty() {
             out.push(BlockerCard {
                 subject: case.case_id.clone(),
                 reason: "ReconciliationOpen".to_string(),
@@ -462,6 +488,9 @@ fn project_decisions(facts: &HostFacts) -> Vec<DecisionCard> {
     let mut out = Vec::new();
 
     for case in &facts.cases {
+        if case.state != CaseState::Open {
+            continue;
+        }
         let actor = if case.assignee.trim().is_empty() {
             "unassigned".to_string()
         } else {
@@ -580,6 +609,7 @@ pub fn collect_host_facts(
     let cases = store.list_reconciliation_cases(company_id, false)?;
     let verifications = store.list_verifications_for_company(company_id)?;
     let revision_artifact_links = store.list_revision_artifact_links(company_id)?;
+    let issue_work_package_links = store.list_work_package_issue_links(company_id)?;
 
     let acceptances = store.list_acceptances_for_company(company_id)?;
 
@@ -592,6 +622,7 @@ pub fn collect_host_facts(
         verifications,
         cases,
         revision_artifact_links,
+        issue_work_package_links,
         questions: Vec::new(),
     })
 }
@@ -817,6 +848,7 @@ mod tests {
                 ("rev-1".to_string(), "issue-a".to_string()),
                 ("rev-fail".to_string(), "issue-a".to_string()),
             ],
+            issue_work_package_links: Vec::new(),
             questions: Vec::new(),
         };
         facts.queue[1].blocked_reason = Some(crate::domain::DenialReason::InsufficientBudget);
@@ -944,6 +976,45 @@ mod tests {
         assert_eq!(rejection.stable_code, "NeedsRevision");
         assert_eq!(rejection.evidence, vec!["cas:verify-rev-fail"]);
         assert!(project_task(&facts, "issue-missing").is_none());
+    }
+
+    #[test]
+    fn work_package_link_brings_first_use_evidence_to_task_page() {
+        // 首次使用：成果 id 是 delivery-*，只有工作包修订把 issue-* 与成果关联起来。
+        let mut facts = rich_facts();
+        facts.revision_artifact_links = vec![("rev-1".to_string(), "artifact-1".to_string())];
+        facts.issue_work_package_links = vec![("issue-a".to_string(), "wp-1".to_string())];
+        let view = project_task(&facts, "issue-a").unwrap();
+        let references: Vec<&str> = view
+            .evidence
+            .iter()
+            .map(|card| card.reference.as_str())
+            .collect();
+        assert!(references.contains(&"cas:abc123"), "接受证据应经工作包关联");
+        assert!(
+            references.contains(&"cas:verify-rev-1"),
+            "验证证据应经成果 id 关联"
+        );
+
+        facts.issue_work_package_links.clear();
+        let view = project_task(&facts, "issue-a").unwrap();
+        assert!(
+            view.evidence.is_empty(),
+            "没有工作包关联时不猜测证据归属，也不串用其他任务"
+        );
+    }
+
+    #[test]
+    fn resolved_case_leaves_pending_decisions_and_blockers() {
+        let mut resolved = case("case-resolved", "cancel:attempt-9", "owner-9", "已确认停止");
+        resolved.state = crate::recovery_models::CaseState::Resolved;
+        let facts = HostFacts {
+            cases: vec![resolved],
+            ..HostFacts::default()
+        };
+        let view = project_home(&facts);
+        assert!(view.decisions.is_empty(), "结案后不再冒充待用户决定");
+        assert!(view.blockers.is_empty(), "结案后不再冒充当前阻塞");
     }
 
     #[test]
