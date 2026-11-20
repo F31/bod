@@ -23,7 +23,7 @@ P1 证明了一个执行者可以完成真实交付，但用户仍会遇到执�
 
 ### Modified Capabilities
 
-无。截至 P0 归档（2026-11-19），现行 `openspec/specs/` 仅有 P0 的 9 个 capability；本 Change 的 4 个能力与之均不同名，全部以 ADDED 新增，不改写既有规格与历史约定。
+无。截至 P1 归档（2026-11-20），现行 `openspec/specs/` 含 13 个 capability（P0 9 + P1 4）；本 Change 的 4 个能力与之均不同名，全部以 ADDED 新增，不改写既有规格与历史约定。
 
 ## Impact
 

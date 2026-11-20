@@ -1,12 +1,14 @@
 # AGENTS.md — bod 仓库协作边界
 
-> 本文件是给 Coding Agent 的硬边界声明。P0 已归档（2026-11-19），现行能力规格在
-> `openspec/specs/`，P0 历史约定见 `openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/tasks.md`；
+> 本文件是给 Coding Agent 的硬边界声明。P0 已归档（2026-11-19），P1 已归档（2026-11-20），
+> 现行能力规格在 `openspec/specs/`（13 个 capability）；历史约定分别见
+> `openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/tasks.md` 与
+> `openspec/changes/archive/2026-11-20-p1-single-executor-delivery/tasks.md`；
 > 后续切片由 `openspec/changes/` 下对应 Change 驱动。修改本声明需同步现行规格。
 
 ## 当前切片
 
-- **阶段**：P0 最小可信核心，D0—D7 全部完成并**已归档**（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.1—8.4；44/44 勾选，`openspec archive` 于 2026-11-19 将 9 份 spec delta 的 57 条需求、66 个场景同步进 `openspec/specs/`）。
+- **阶段**：P0 最小可信核心，D0—D7 全部完成并**已归档**（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.1—8.4；44/44 勾选，`openspec archive` 于 2026-11-19 将 9 份 spec delta 的 57 条需求、66 个场景同步进 `openspec/specs/`）。P1 单执行者交付全部完成并**已归档**（1.x—5.x 全部勾选，`openspec archive` 于 2026-11-20 将 4 份 delta 的 21 条需求、21 个场景同步进 `openspec/specs/`；现行合计 13 个 capability / 78 条需求 / 87 个场景）。
 - **已落地**：五 crate workspace（`bod-core` / `bod-app` / `bod` / `bod-desktop` / `xtask`）、
   最小 headless 启动、依赖方向守卫（`xtask verify --stage P0`）、工具链兼容记录、
   §37.14 配置 schema 与 `config explain` / `config validate`（保留来源与语义）、
@@ -84,7 +86,8 @@
   proposal/tasks（44 条、缺失引用 0）。e2e 补报告正文 commit/环境断言与备份快照重开后
   同修订证据核对，四段证据串同一修订。`docs/reports/p1-exit-evidence.md` 汇总出口证据，
   `p0-support-matrix.md` §7 追加 P1 行并统一保持 `Target`（归档评审前不升 Supported）。
-  归档与 4 份 delta 同步 `openspec/specs/` 仍待评审后独立执行。
+  本 Change 已于 2026-11-20 归档，4 份 delta 已同步 `openspec/specs/`；支持矩阵 P1 行保持
+  `Target`，升格 `Supported` 仍需独立评审确认。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

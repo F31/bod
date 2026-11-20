@@ -26,14 +26,14 @@ pub fn shipped_registry() -> &'static str {
 /// （实测 9 份现行规格里 `I-`/`G-` 命中数均为 0，唯一命中在 proposal），
 /// 把 spec 正文当来源会得到"零引用"的假覆盖。
 ///
-/// 路径指向归档目录：P0 于 2026-11-19 归档（`openspec archive`），Change 正文移到
-/// `openspec/changes/archive/2026-11-19-p0-minimal-trusted-core/`。归档是单一来源，
-/// 不复制副本；若再次归档导致目录名变化，这里必须同步，否则编译期即失败（不会静默漏检）。
+/// 路径指向归档目录：P0 于 2026-11-19 归档，P1 于 2026-11-20 归档
+/// （`openspec archive`），Change 正文移到 `openspec/changes/archive/<date>-<change>/`。
+/// 归档是单一来源，不复制副本；再归档导致目录名变化时这里必须同步，编译期即失败。
 ///
-/// P0 归档来源保留，避免 P1 出口切换时丢掉历史约定的覆盖检查；P1 出口（任务 5.3）
-/// 追加当前 Change 的 proposal/tasks，使 P1 引用的 I-71 与 G-15/G-16/G-51 等也进入
-/// `coverage_gaps()`。P1 归档后必须把这四条路径同步到 archive 目录，编译期即失败，
-/// 不会静默漏检。
+/// 两阶段来源都保留：P0 归档来源保持历史约定的覆盖检查，P1 归档来源使 P1 引用的
+/// I-71 与 G-15/G-16/G-51 等也进入 `coverage_gaps()`。现行 `openspec/specs/` 已有
+/// 13 个 capability（78 需求 / 87 场景），但 spec 正文不含 I/G 编号，
+/// 因此仍只取 proposal/tasks 作来源。
 pub const BINDING_SOURCES: &[(&str, &str)] = &[
     (
         "p0-proposal",
@@ -49,11 +49,15 @@ pub const BINDING_SOURCES: &[(&str, &str)] = &[
     ),
     (
         "p1-proposal",
-        include_str!("../../../openspec/changes/p1-single-executor-delivery/proposal.md"),
+        include_str!(
+            "../../../openspec/changes/archive/2026-11-20-p1-single-executor-delivery/proposal.md"
+        ),
     ),
     (
         "p1-tasks",
-        include_str!("../../../openspec/changes/p1-single-executor-delivery/tasks.md"),
+        include_str!(
+            "../../../openspec/changes/archive/2026-11-20-p1-single-executor-delivery/tasks.md"
+        ),
     ),
 ];
 
