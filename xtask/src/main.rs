@@ -370,6 +370,8 @@ const MIGRATION_TABLES: &[(&str, &[&str])] = &[
         "013_scope_org.sql",
         &["issue_hierarchy", "agent_org_metadata"],
     ),
+    // 014 只加 trigger，不改表结构，因此必需表清单为空；登记它只为让「未登记脚本」检查放行。
+    ("014_history_triggers.sql", &[]),
 ];
 
 fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str>, Vec<String>) {

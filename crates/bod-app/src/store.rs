@@ -43,7 +43,8 @@ use std::path::Path;
 /// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
 /// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图，
 /// 010 为 P2 管理委任/作用域头/命令审计，011 为 P2 检查点与接管确认，
-/// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据；
+/// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据，
+/// 014 为 decisions 不可变 trigger（P2 3.4 加固）；
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
@@ -59,6 +60,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/011_handover_review.sql"),
     include_str!("../migrations/012_history_disputes.sql"),
     include_str!("../migrations/013_scope_org.sql"),
+    include_str!("../migrations/014_history_triggers.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -76,6 +78,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "011_handover_review.sql",
     "012_history_disputes.sql",
     "013_scope_org.sql",
+    "014_history_triggers.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。

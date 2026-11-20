@@ -1,0 +1,89 @@
+name: ci
+
+# 门禁口径与 docs/reports/p2-exit-evidence.md §9 一致：本地手工跑的命令，这里原样跑一遍。
+# 两个平台都要跑：P2 曾出现「Windows 绿、Linux 红」（僵尸进程被 kill -0 判为存活），
+# 单平台绿不能当证据。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 与本地一致的关闭增量，避免 CI 缓存与增量产物互相干扰。
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  rust:
+    name: rust (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 工具链由 rust-toolchain.toml 钉住；rustup show 会按该文件安装。
+      - name: 安装钉住的工具链
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: 格式
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # --no-fail-fast：任一测试二进制失败时仍跑完其余，避免总数骤降掩盖第二条红灯。
+      - name: 全量测试
+        run: cargo test --workspace --no-fail-fast
+      - name: 门禁 G-1/G-50
+        run: cargo run -q -p xtask -- verify --stage P0
+      - name: 迁移检查
+        run: cargo run -q -p xtask -- migration-check
+      - name: 规格索引
+        run: cargo run -q -p bod -- verify-index
+
+  rust-windows:
+    name: rust (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装钉住的工具链
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: 全量测试
+        run: cargo test --workspace --no-fail-fast
+
+  openspec:
+    name: openspec (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # 版本与本地一致，避免「本地 19/19、CI 报新错误」的漂移。
+      - name: 安装 openspec
+        run: npm i -g @fission-ai/openspec@1.15.0
+      - name: 校验全部规格
+        run: openspec validate --all --strict
+
+  workbench:
+    name: workbench (linux)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/workbench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/workbench/package-lock.json
+      - run: npm ci
+      - name: 类型检查
+        run: npm run typecheck
+      - name: 测试
+        run: npm test
+      - name: 构建
+        run: npm run build

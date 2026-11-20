@@ -1350,12 +1350,32 @@ mod tests {
         }
     }
 
+    /// 两层防线，顺序要测清楚：库层先拦，比对层再兜住「库层被绕过」的情况。
+    ///
+    /// 014 之前 decisions 只有比对层，测试直接 DELETE 来证明「能发现」；
+    /// 现在加了 trigger，直接 DELETE 会被拒，所以这里先证明拒绝、再手动 DROP TRIGGER
+    /// 模拟「绕过库层」（从备份恢复、外部 sqlite3 改写、trigger 被人删掉）后比对仍能发现。
     #[test]
-    fn deleted_decision_shows_up_as_vanished_not_cleaned() {
+    fn decision_records_are_immutable_and_deletion_still_surfaces_in_comparison() {
         let (store, _root) = seeded("vanish");
+        for sql in [
+            "UPDATE decisions SET reason = '事后改口' WHERE decision_id = 'dec-1'",
+            "DELETE FROM decisions WHERE decision_id = 'dec-1'",
+        ] {
+            let error = store.execute_batch_for_test(sql).unwrap_err().to_string();
+            assert!(
+                error.contains("decision records are immutable"),
+                "决定记录应不可改写，实际 {error}"
+            );
+        }
+
+        // 绕过库层：删掉 trigger 后删除真的会成功，此时只能靠比对发现。
         let before = capture(&store);
         store
-            .execute_batch_for_test("DELETE FROM decisions WHERE decision_id = 'dec-1'")
+            .execute_batch_for_test(
+                "DROP TRIGGER decisions_no_delete;
+                 DELETE FROM decisions WHERE decision_id = 'dec-1'",
+            )
             .unwrap();
         let after = capture(&store);
         match after.require_preserved(&before) {
@@ -1753,10 +1773,23 @@ mod tests {
         let record = DisputeRecord::raise(&mut store, &request).unwrap();
         record.check_drift(&capture(&store)).unwrap();
 
-        // 决定表没有不可变 trigger：这里正好用它证明「比对能看到偏移」。
-        store
+        // 先确认库层会拒绝（014 起 decisions 也有不可变 trigger）。
+        let error = store
             .execute_batch_for_test(
                 "UPDATE decisions SET reason = '事后改口' WHERE decision_id = 'dec-1'",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("decision records are immutable"),
+            "决定改写应先被库层拒绝，实际 {error}"
+        );
+
+        // 再绕过库层（模拟恢复/外部改写），用比对层证明偏移仍被看到。
+        store
+            .execute_batch_for_test(
+                "DROP TRIGGER decisions_no_update;
+                 UPDATE decisions SET reason = '事后改口' WHERE decision_id = 'dec-1'",
             )
             .unwrap();
         match record.check_drift(&capture(&store)) {
