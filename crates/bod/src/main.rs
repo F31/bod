@@ -3,6 +3,9 @@
 
 use bod_app::adapter_conformance::{run_fake_suite, run_live_suite};
 use bod_app::config::{BodConfig, FIELD_DOCS};
+use bod_app::conformance_report::SectionedReport;
+use bod_app::fake_executor::{FakeExecutor, FakeScenario};
+use bod_app::invocation::StartTransport;
 use bod_app::local_process::{default_adapter, descriptor_json};
 use bod_app::{explain, load_from_str, schema_text};
 use std::collections::BTreeSet;
@@ -22,6 +25,9 @@ const USAGE: &str = "\
   bod adapter describe             输出本机真实适配器的描述符 JSON
   bod adapter probe                分项探测本机执行端（不调用模型、不付费）
   bod adapter conformance          运行 Fake + 本机真实适配器的 conformance 报告
+  bod conformance                  分项报告：按版本/协议/平台/能力/日期逐项列出，不出整体通过标记
+  bod conformance --fake-only      只跑 Fake Executor 的分项报告
+  bod conformance --json           同上，输出机器可读结果（多适配器时为 reports 数组）
   bod smoke                        跑通指派→执行→候选登记→重启找回的最小冒烟
   bod smoke --json                 同上，输出机器可读结果
   bod fault-matrix                 执行 P0 五个核心故障场景并输出实测报告
@@ -311,8 +317,69 @@ fn run(args: &[String]) -> Result<String, String> {
             out.push_str(&live.to_markdown());
             Ok(out)
         }
+        [cmd, rest @ ..] if cmd == "conformance" => conformance(rest),
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }
+}
+
+/// `bod conformance`：分项报告入口（P2 任务 4.1）。
+///
+/// 与 P0 的 `bod adapter conformance` 并存：后者是既有证据链（`verification/gates.yaml`）
+/// 引用的原始输出，这里给出结构化分项的权威版本。两者都不产生整体通过标记。
+fn conformance(flags: &[String]) -> Result<String, String> {
+    let mut json = false;
+    let mut fake_only = false;
+    for flag in flags {
+        match flag.as_str() {
+            "--json" => json = true,
+            "--fake-only" => fake_only = true,
+            other => return Err(format!("conformance 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+
+    let now = now_ms();
+    let mut sections = Vec::new();
+
+    let fake_descriptor = FakeExecutor::new(FakeScenario::HappyPath)
+        .descriptor()
+        .clone();
+    let mut fake = SectionedReport::build(&run_fake_suite(now), Some(&fake_descriptor), now);
+    let exclusion = FakeExecutor::production_exclusion_reason().to_string();
+    if !fake.limitations.iter().any(|note| note == &exclusion) {
+        fake.limitations.insert(0, exclusion);
+    }
+    sections.push(fake);
+
+    if !fake_only {
+        let mut adapter = adapter_or_err()?;
+        let descriptor = adapter.descriptor().clone();
+        let live = run_live_suite(&mut adapter, now);
+        sections.push(SectionedReport::build(&live, Some(&descriptor), now));
+    }
+
+    if json {
+        let body: Vec<String> = sections.iter().map(SectionedReport::to_json).collect();
+        return Ok(format!(
+            "{{\n  \"reports\": [\n{}\n  ]\n}}\n",
+            body.join(",\n")
+        ));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# bod conformance（{} 个适配器，各自独立分项）\n",
+        sections.len()
+    );
+    let _ = writeln!(
+        out,
+        "整体结论: 不提供（每个适配器按能力与用例逐项判定；未测项标 unknown / not_applicable）\n"
+    );
+    for section in &sections {
+        out.push_str(&section.to_markdown_at(2));
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。
@@ -455,6 +522,56 @@ mod tests {
         let err = run(&args).expect_err("未知字段必须被拒绝");
         assert!(err.contains("server.auth_require"), "实际错误: {err}");
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn conformance_command_lists_every_section_without_overall_badge() {
+        let args = vec!["conformance".to_string(), "--fake-only".to_string()];
+        let out = run(&args).expect("conformance --fake-only 应成功");
+        for needle in [
+            "适配器版本",
+            "协议",
+            "平台",
+            "生成日期",
+            "能力分项",
+            "用例分项",
+            "结论口径",
+            "不可归约为单一通过标记",
+        ] {
+            assert!(out.contains(needle), "报告缺少 {needle}:\n{out}");
+        }
+        assert!(!out.contains("PASS"), "CLI 不得输出整体通过标记:\n{out}");
+        // 未测能力如实出现，不被隐藏。
+        assert!(out.contains("not_declared") || out.contains("declared_unsupported"));
+        assert!(
+            out.contains("不提供生产能力"),
+            "Fake 的生产能力排除说明必须出现"
+        );
+    }
+
+    #[test]
+    fn conformance_json_is_a_valid_document_without_passing_flag() {
+        let args = vec![
+            "conformance".to_string(),
+            "--fake-only".to_string(),
+            "--json".to_string(),
+        ];
+        let out = run(&args).expect("conformance --json 应成功");
+        let value: serde_json::Value =
+            serde_json::from_str(&out).expect("输出必须是合法 JSON 文档");
+        let reports = value["reports"].as_array().expect("reports 必须是数组");
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0]["capabilities"].as_array().unwrap().len() >= 13);
+        assert!(reports[0]["cases"].as_array().unwrap().len() >= 10);
+        assert_eq!(reports[0]["verdict"]["reducible"], false);
+        assert!(value.get("passed").is_none(), "不得有单一通过标记");
+    }
+
+    #[test]
+    fn conformance_rejects_unknown_flag() {
+        let args = vec!["conformance".to_string(), "--bogus".to_string()];
+        let err = run(&args).expect_err("未知参数必须失败");
+        assert!(err.contains("不支持参数 --bogus"));
     }
 
     #[test]

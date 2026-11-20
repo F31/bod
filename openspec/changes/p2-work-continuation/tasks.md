@@ -340,7 +340,23 @@
 
 ## 4. 公开符合性与双运行时
 
-- [ ] 4.1 实现 `bod conformance` CLI 子命令与分项报告输出，验证报告按适配器版本/协议/平台/能力与日期列出结果，不产生单一通过徽章。
+- [x] 4.1 实现 `bod conformance` CLI 子命令与分项报告输出，验证报告按适配器版本/协议/平台/能力与日期列出结果，不产生单一通过徽章。
+  - 证据（2026-11-20，`cargo test -p bod-app --lib conformance_report` → 11 passed；
+    `cargo test -p bod conformance` → 3 passed）：
+    新模块 `conformance_report`（schema `bod.conformance.sectioned/v1`）按五个维度（适配器 id /
+    版本 / 协议 / 平台 / 生成日期 UTC）+ 13 个已知能力槽 + 自定义槽 + 10 个命名用例输出分项报告，
+    能力判定为七态 `verified` / `declared_only` / `cases_not_passing` / `declared_unsupported` /
+    `unknown` / `not_declared` / `stale`。
+    **不产生单一徽章**由三条同时保证并可证伪：`overall_badge()` 类型是
+    `Result<(), BadgeError>` 且恒返回 `Err(NotReducible)`；markdown 不含 `PASS`（测试断言）；
+    JSON 无 `"passed"` 字段，只有 `"verdict": {"reducible": false, ...}`。
+    关键取舍：能力→用例映射**只登记 `cancellation → cancel-request-vs-confirm`**，
+    拒绝把 `duplicate-start`/`params-conflict`（宿主持久去重）、乱序/断档（宿主 ACK 推进）、
+    `late-final-cost`（宿主接收迟到费用）当成适配器能力证据；实际运行因此把 Fake 的
+    `external_idempotency`（声明 supported）如实判为 `declared_only` 而不是 `verified`。
+    CLI 新增 `bod conformance` / `--fake-only` / `--json`，与 P0 的 `bod adapter conformance`
+    并存（后者仍是 `verification/gates.yaml` 引用的证据命令，未改动）。
+    本切片只做报告，不做禁用（4.2）与调度过滤（4.3）。详见 `docs/spec-notes/p2-conformance.md` §1。
 - [ ] 4.2 实现必需用例集合（范围身份、重复 start、参数冲突、丢回包、迟到观察、取消未确认、版本不匹配、敏感字段过滤、completed 与接受分离），验证身份/授权/完整性失败时适配器被禁用（`invariant_i_57`、G-17）。
 - [ ] 4.3 实现可选能力声明驱动的验证与调度过滤，验证不支持 recovery 的适配器不能承接需恢复保证的任务且界面显示一致限制。
 - [ ] 4.4 在两个真实运行配置上完成 L1/L2（适用时 L3）接续与负责人切换样本，验证 G-28、G-38—G-42 有实际报告、样本数与人工分钟，失败路径如实保留。

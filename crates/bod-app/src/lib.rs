@@ -19,6 +19,7 @@ pub mod clarity_dialogue;
 pub mod cleanup_recovery;
 pub mod coding_integration;
 pub mod config;
+pub mod conformance_report;
 pub mod context_handoff;
 pub mod continuation_card;
 pub mod control_api;

@@ -195,6 +195,13 @@
   M1—M12 每行给出接口、可执行 `cargo test` 与稳定拒绝码，§6.2 列出四个反例与阻断码，§6.3 给十步
   顺序，§6.4 明确 N2/N4 没有样本并归属 5.1/4.4；新增 `tests/p2_manager_transfer_manual.rs`
   逐条核对 ID、命令与错误码，文档与代码脱节即失败（3 项自检）。
+  切片 4.1 落地 `bod-app::conformance_report` 与 `bod conformance` 子命令：报告按适配器版本/协议/
+  平台/能力/日期分项，能力判定七态（`verified` 只在「声明 supported 且映射用例全 pass」时出现），
+  且**没有**单一通过标记——`overall_badge()` 恒返回 `NotReducible`、markdown 无 `PASS`、JSON 无
+  `passed`。能力→用例映射只保留 `cancellation → cancel-request-vs-confirm`，拒绝把宿主持久去重、
+  ACK 推进、迟到费用接收当适配器能力证据，因此 Fake 的 `external_idempotency` 如实判为
+  `declared_only` 而非 `verified`（11 项命名用例 + 3 项 CLI 用例，详见
+  `docs/spec-notes/p2-conformance.md`）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
