@@ -146,6 +146,12 @@
   「已停止」，隔离未检查为 `not_checked` 而非 `unknown`。实测问题：`approves()` 比的是 artifact
   revision，用它判工作包归属会让保留成果恒为空——已改为按绑定工作包字段判定并单列
   `stale_acceptances`（18 项命名用例）。
+  切片 2.6 在 `docs/spec-notes/p2-takeover.md` §6 补阶段×场景×故障注入说明：十一阶段门禁逐条对应
+  `check_transition` 分支，22 行注入矩阵只写测试里真做过的步骤，未覆盖项（真实进程停止、真实丢回包、
+  旧经理并发切换、B 不可用、预算耗尽交接）标出归属切片而不假装覆盖。核对中发现两处不一致并记录：
+  `captured` 阶段无快照引用门禁（补门禁会改 2.1 接口，留 5.1 前待定）；2.2 的「22 passed」是子串
+  过滤把 `takeover_intent` 的一条用例计入，模块实为 21 条（已更正）。61 个被引用用例名逐一与
+  `--list` 比对存在。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

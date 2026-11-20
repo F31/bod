@@ -74,7 +74,7 @@
     边界：不判断旧执行是否真停（2.2）、不对账（2.3）、不预检（2.4）、不写 `gates.yaml`
     （P2 绑定仍 planned）。详见 `docs/spec-notes/p2-takeover.md` §1。
 - [x] 2.2 实现旧执行停止确认与隔离检查，验证 `invariant_i_48`：旧写入未停时新执行者写同一现场被拒绝，允许独立无冲突工作。
-  - 证据（2026-11-20，`cargo test -p bod-app isolation_check` → 22 passed；`cargo test -p bod-app
+  - 证据（2026-11-20，`cargo test -p bod-app isolation_check` → 21 passed（原记 22 为子串过滤误计，见 `docs/spec-notes/p2-takeover.md` §6.1）；`cargo test -p bod-app
     takeover_intent` → 17 passed）：新增 `bod-app::isolation_check`，不建新表——判定输入全部来自
     已持久化事实（取消事件、执行终态、权限/租约记录），避免与取消账本形成两个事实源。
     `StopStatus` 四态只有 `Confirmed` 携带证据，且只能经 `from_cancel_event` 从 P1 4.3 的
@@ -163,7 +163,23 @@
     `superseded` / `work_package_mismatch`），既不并入保留也不静默丢弃。
     边界：不渲染视觉样式、不判断能否接续（2.4 结论）、不做跨修订等价推断、不写 `gates.yaml`
     （P2 绑定仍 planned）。详见 `docs/spec-notes/p2-takeover.md` §5。
-- [ ] 2.6 编写接管事务与故障样本说明到 `docs/spec-notes/p2-takeover.md`，验证每个阶段对应 scenario 与可注入故障点。
+- [x] 2.6 编写接管事务与故障样本说明到 `docs/spec-notes/p2-takeover.md`，验证每个阶段对应 scenario 与可注入故障点。
+  - 证据（2026-11-20，文档 + 机械核对，无代码改动）：`docs/spec-notes/p2-takeover.md` 新增 §6，
+    含四张表——（1）十一个阶段（含 `aborted`）的进入门禁、拒绝样本、覆盖用例与可注入故障点，门禁
+    逐条取自 `check_transition` 的真实分支（`SummaryNotRequested`/`MissingSummarySnapshot`/
+    `MissingIsolationCheck`/`IsolationBlocked`/`MissingAttempt`/`FencingNotIncreased`/
+    `MissingPrecheck`/`PrecheckMismatch`/`MissingAbortReason`/`TerminalPhase`/`VersionConflict`）；
+    （2）P2 十二项需求 → 场景 → 模块 → 用例；（3）22 行故障注入矩阵，每行的「注入方式」都是测试里
+    真做过的那一步（如「同一 expected_version 连续提交」「删中间 seq 行后重载」「hint 写 `curl … | sh`」）；
+    （4）未覆盖项清单（真实进程停止、真实丢回包、旧经理并发切换、B 不可用、预算耗尽交接、
+    `captured` 无快照门禁、桌面 conformance），逐项标出归属切片，不假装覆盖。
+    核对方式：§6 引用的 61 个用例名逐一与 `cargo test -p bod-app --lib -- --list`（422 项）比对，
+    全部存在；其余标识符（错误码、字段名、阶段名）逐个 grep 命中源码。核对中发现两处不一致并如实
+    记录：① `captured` 阶段只有顺序门禁、没有 `summary_snapshot_key` 那样的快照引用要求，补门禁会改
+    2.1 的 `Transition` 接口，留作 5.1 前待定项；② 2.2 记录的「22 passed」实为
+    `cargo test isolation_check` 子串过滤把 `takeover_intent::isolation_checked_requires_a_check_result`
+    一起计入，模块实为 21 条，已在 tasks 与 §2.7 更正并写入 §6.1。
+    边界：不新增代码、不改门禁、不写 `gates.yaml`（P2 绑定仍 planned）。
 
 ## 3. 负责人切换
 
