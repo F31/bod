@@ -16,6 +16,7 @@ const SAMPLES_REPORT: &str = include_str!("../../../docs/reports/p2-handoff-samp
 const EXIT_EVIDENCE: &str = include_str!("../../../docs/reports/p2-exit-evidence.md");
 const TASKS: &str = include_str!("../../../openspec/changes/p2-work-continuation/tasks.md");
 const DRILL_MODULE: &str = include_str!("../src/handoff_drill.rs");
+const DRILL_CARD: &str = include_str!("../../../docs/reports/p2-drill-card.md");
 
 fn task_line<'a>(text: &'a str, id: &str) -> Option<&'a str> {
     let needle = format!("{id} ");
@@ -139,5 +140,47 @@ fn tasks_stay_unchecked_while_the_readings_are_absent() {
     assert!(
         EXIT_EVIDENCE.contains("出口结论: blocked"),
         "出口结论在读数到位前必须是 blocked"
+    );
+}
+
+/// 执行卡要照着敲，所以里面的档位名必须真被 `DrillStep::parse` 接受；
+/// 同时读数位必须是占位符——卡里出现具体秒数，早晚会被人当读数抄进报告。
+#[test]
+fn drill_card_only_uses_real_steps_and_placeholders() {
+    let known = [
+        "task_ready",
+        "last_action",
+        "handoff_done",
+        "verify_begin",
+        "verify_end",
+    ];
+    for line in DRILL_CARD.lines() {
+        if let Some(position) = line.find("--step ") {
+            let rest = &line[position + "--step ".len()..];
+            let token = rest.split_whitespace().next().unwrap_or_default();
+            assert!(
+                known.contains(&token),
+                "执行卡里的档位 {token} 不是 DrillStep 支持的取值"
+            );
+        }
+        // `--arm` 的两臂同理。
+        if line.contains("--arm manual") || line.contains("--arm bod") {
+            assert!(
+                line.contains("<") || line.contains("|"),
+                "执行卡的 --arm 示例必须是占位或说明行，不能带具体读数：{line}"
+            );
+        }
+    }
+    assert!(
+        DRILL_CARD.contains("数不清就不记这一臂"),
+        "执行卡必须写明「数不清就不记」，否则 0 会冒充「没发生」"
+    );
+    assert!(
+        DRILL_CARD.contains("学习效应"),
+        "执行卡必须登记两臂顺序带来的学习效应"
+    );
+    assert!(
+        DRILL_CARD.contains("不要手改") || DRILL_CARD.contains("不要手改 `drill.timeline`"),
+        "执行卡必须禁止手改时间线：手改会让时间戳与系统时钟脱钩"
     );
 }
