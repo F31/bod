@@ -123,6 +123,13 @@
   判定，否则「允许独立无冲突工作」落不了地；相关外部副作用在停止未确认时一律拒绝重发。
   `clearance()` 作为 2.1 `isolation_checked`/`admitted` 的准入凭据，未通过报
   `IsolationBlocked` 且不推进版本（22 + 3 项命名用例）。
+  切片 2.3 落地 `bod-app::effect_reconciliation`（无新表，案件复用 P0 `reconciliation_cases`）：
+  hint 的不信任做成签名事实——`plan_queries` 没有 hint 参数、`EffectQuery` 无自由文本字段、
+  `UntrustedHint` 只能 `screen()` 成「发现项 + 脱敏展示」；查询范围全由 `ConnectorRegistry`
+  决定（连接器/操作/授权目标/参数名白名单，目标精确匹配，参数受长度与控制字符约束），
+  缺路由记为 `unreconcilable` 而非 `skipped`；`Applied→Confirmed`、`NotApplied→Failed`、
+  `StillUnknown→Unknown`，不明不能结案；`resend_guard` 只放行 `Prepared`/`Failed`；
+  `block_scope` 取依赖闭包并同时给出 `free`，不冻结整个项目（18 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

