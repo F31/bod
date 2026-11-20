@@ -211,6 +211,13 @@
   `E_SCOPE_MISMATCH`）；审计 outcome 枚举缺 scope 取值，复用 `params_rejected` 并如实记录分类不精确。
   另把 `local_process` 真实进程用例的观察窗口从 2s 提到 10s（断言未放宽），因新增测试后全量并行
   时解释器启动超过 2s（详见 `p2-conformance.md` §2）。
+  切片 4.3 落地 `bod-app::capability_dispatch`：交接等级换算成保证需求（L1 无 / L2 可靠观察 /
+  L3 会话恢复+可靠观察），`select()` 按五种稳定原因过滤候选（`adapter_blocked` 优先，
+  `capability_stale` 不算支持），`admit_handoff` 把能力门与已测组合绑成唯一承接入口（已测组合
+  不能弥补能力缺失）。「界面与调度同一限制」靠单一文案来源 `CapabilityNotice` 保证，
+  CLI `bod adapter capabilities --need l3` 与调度共用同一渲染函数；实跑本机适配器得到三条
+  真实原因。如实记录：派发路径仍是单适配器写队列，`admit_handoff` 尚未被 `request_dispatch`
+  调用，故不宣称「已在调度器禁用」；准入按声明+有效期而非 4.1 的 verified，风险由 4.4 承担。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

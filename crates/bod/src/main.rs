@@ -1,10 +1,13 @@
 //! bod 宿主 CLI：P0 D0 阶段提供最小 headless 启动与配置 schema/explain 入口。
 //! HTTP 控制面与真实宿主启动在后续切片接入；当前不启动服务、不写运行时数据。
 
-use bod_app::adapter_conformance::{run_fake_suite, run_live_suite};
+use bod_app::adapter_conformance::{enablement, run_fake_suite, run_live_suite};
+use bod_app::capability_dispatch::{Candidate, RequiredGuarantees, select};
 use bod_app::config::{BodConfig, FIELD_DOCS};
 use bod_app::conformance_report::SectionedReport;
+use bod_app::domain::execution::CapabilitySlot;
 use bod_app::fake_executor::{FakeExecutor, FakeScenario};
+use bod_app::handoff_package::HandoffLevel;
 use bod_app::invocation::StartTransport;
 use bod_app::local_process::{default_adapter, descriptor_json};
 use bod_app::{explain, load_from_str, schema_text};
@@ -24,6 +27,8 @@ const USAGE: &str = "\
   bod config validate --file <p>   仅校验配置文件是否符合 schema
   bod adapter describe             输出本机真实适配器的描述符 JSON
   bod adapter probe                分项探测本机执行端（不调用模型、不付费）
+  bod adapter capabilities         列出本机适配器逐项能力声明与有效期
+  bod adapter capabilities --need l3  按 L1/L2/L3 的保证需求过滤候选并显示限制
   bod adapter conformance          运行 Fake + 本机真实适配器的 conformance 报告
   bod conformance                  分项报告：按版本/协议/平台/能力/日期逐项列出，不出整体通过标记
   bod conformance --fake-only      只跑 Fake Executor 的分项报告
@@ -299,6 +304,12 @@ fn run(args: &[String]) -> Result<String, String> {
             }
             Ok(out)
         }
+        [cmd, sub] if cmd == "adapter" && sub == "capabilities" => adapter_capabilities(None),
+        [cmd, sub, flag, value]
+            if cmd == "adapter" && sub == "capabilities" && flag == "--need" =>
+        {
+            adapter_capabilities(Some(value))
+        }
         [cmd, sub] if cmd == "adapter" && sub == "conformance" => {
             let now = now_ms();
             let fake = run_fake_suite(now);
@@ -320,6 +331,105 @@ fn run(args: &[String]) -> Result<String, String> {
         [cmd, rest @ ..] if cmd == "conformance" => conformance(rest),
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }
+}
+
+/// `bod adapter capabilities`：逐个能力显示声明与有效期；给定 `--need` 时按保证需求过滤，
+/// 并用与调度准入同一个 [`CapabilityNotice`] 渲染限制（4.3）。
+fn adapter_capabilities(need: Option<&str>) -> Result<String, String> {
+    // 先解析等级：参数错了不该去启适配器。
+    let level = match need {
+        None => None,
+        Some(value) => Some(match value.to_ascii_lowercase().as_str() {
+            "l1" => HandoffLevel::L1,
+            "l2" => HandoffLevel::L2,
+            "l3" => HandoffLevel::L3,
+            other => {
+                return Err(format!(
+                    "--need 只接受 l1 / l2 / l3，收到 {other}\n\n{USAGE}"
+                ));
+            }
+        }),
+    };
+
+    let mut adapter = adapter_or_err()?;
+    let descriptor = adapter.descriptor().clone();
+    let now = now_ms();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "适配器 {} v{}（协议 {}，平台 {}）",
+        descriptor.adapter_id, descriptor.adapter_version, descriptor.protocol, descriptor.platform
+    );
+    let _ = writeln!(out, "\n| 能力 | 声明 | 证据 | 有效期 |");
+    let _ = writeln!(out, "|---|---|---|---|");
+    for slot in CapabilitySlot::KNOWN {
+        let claim = descriptor
+            .capabilities
+            .iter()
+            .find(|claim| claim.slot.as_str() == slot);
+        let (level_text, evidence, validity) = match claim {
+            None => ("not_declared", "—".to_string(), "—".to_string()),
+            Some(claim) => {
+                let validity = match claim.expires_at_ms {
+                    None => "未设过期".to_string(),
+                    Some(expires) if expires <= now => format!("已过期（{expires}）"),
+                    Some(expires) => format!("有效至 {expires}"),
+                };
+                (
+                    claim.level.as_str(),
+                    format!(
+                        "{} / {}",
+                        claim.source.as_str(),
+                        claim.evidence_level.as_str()
+                    ),
+                    validity,
+                )
+            }
+        };
+        let _ = writeln!(out, "| {slot} | {level_text} | {evidence} | {validity} |");
+    }
+
+    if let Some(level_value) = level {
+        let report = run_live_suite(&mut adapter, now);
+        let verdict = enablement(&report);
+        let required = RequiredGuarantees::for_handoff(level_value);
+        let selection = select(
+            &required,
+            &[Candidate {
+                descriptor: &descriptor,
+                enablement: &verdict,
+            }],
+            now,
+        );
+        let _ = writeln!(out, "\n## {} 需求", level_value);
+        let _ = writeln!(
+            out,
+            "所需保证: {}",
+            if required.is_empty() {
+                "无".to_string()
+            } else {
+                required
+                    .iter()
+                    .map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+        // 与调度准入共用同一渲染函数：界面不可能与调度说不一样的话。
+        let _ = writeln!(out, "{}", selection.notice.render());
+        for filtered in &selection.filtered {
+            for reason in &filtered.reasons {
+                let _ = writeln!(
+                    out,
+                    "  - {} [{}] {}",
+                    filtered.adapter_id,
+                    reason.code(),
+                    reason.describe()
+                );
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `bod conformance`：分项报告入口（P2 任务 4.1）。
@@ -566,6 +676,18 @@ mod tests {
         assert!(reports[0]["cases"].as_array().unwrap().len() >= 10);
         assert_eq!(reports[0]["verdict"]["reducible"], false);
         assert!(value.get("passed").is_none(), "不得有单一通过标记");
+    }
+
+    #[test]
+    fn adapter_capabilities_rejects_unknown_level_before_touching_the_adapter() {
+        let args = vec![
+            "adapter".to_string(),
+            "capabilities".to_string(),
+            "--need".to_string(),
+            "l9".to_string(),
+        ];
+        let err = run(&args).expect_err("未知等级必须失败");
+        assert!(err.contains("--need 只接受 l1 / l2 / l3"), "{err}");
     }
 
     #[test]

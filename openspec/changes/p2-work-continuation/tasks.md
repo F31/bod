@@ -373,7 +373,22 @@
     detail 写明作用域，如实记录分类不精确）。
     新增 `bod-app::observation_redaction`（四类形态、中文键与全角冒号、证书不误伤）。
     详见 `docs/spec-notes/p2-conformance.md` §2。本切片只交付判定，未接入派发拦截（属 4.3/5.x）。
-- [ ] 4.3 实现可选能力声明驱动的验证与调度过滤，验证不支持 recovery 的适配器不能承接需恢复保证的任务且界面显示一致限制。
+- [x] 4.3 实现可选能力声明驱动的验证与调度过滤，验证不支持 recovery 的适配器不能承接需恢复保证的任务且界面显示一致限制。
+  - 证据（2026-11-20，`cargo test -p bod-app --lib capability_dispatch` → 11 passed）：
+    新模块 `capability_dispatch`：`Guarantee`（六种）→ `CapabilitySlot` 映射，
+    `RequiredGuarantees::for_handoff`（L1 无 / L2 只要求可靠观察 / L3 要求会话恢复+可靠观察），
+    `select()` 五种过滤原因 `adapter_blocked` / `adapter_unverified` / `capability_not_supported` /
+    `capability_unknown` / `capability_stale`（`Blocked` 直接出局，`Unverified` 作为附加原因不掩盖
+    能力缺失，过期声明不算支持）。
+    `admit_handoff(level, key, tested, candidate, now)` 把能力门与 1.1 的已测组合绑成唯一入口，
+    测试固定「有 RuntimeObserved 已测组合也不能弥补 recovery 缺失」。
+    「界面与调度同一限制」是结构保证：`CapabilityNotice` 是唯一文案来源，CLI
+    `bod adapter capabilities --need l1|l2|l3` 与调度共用 `notice.render()`。
+    实跑本机适配器：L3 输出三条真实原因（未取得闸门证据、声明不支持 recovery、
+    声明不支持 reliable_observation），即「不支持 recovery 的适配器不能承接需恢复保证的任务」。
+    **如实记录**：`admit_handoff` 尚未被 `request_dispatch` 调用（派发路径是单适配器写队列，
+    没有多候选选择位置），故不宣称「已在调度器禁用」；准入按声明+有效期而非 4.1 的 verified，
+    该风险由 4.4 承担。详见 `docs/spec-notes/p2-conformance.md` §3。
 - [ ] 4.4 在两个真实运行配置上完成 L1/L2（适用时 L3）接续与负责人切换样本，验证 G-28、G-38—G-42 有实际报告、样本数与人工分钟，失败路径如实保留。
 - [ ] 4.5 实现发布验收检查（停止/重放/副作用/账号预算/证据）与日志脱敏，验证日志中无凭据值且能力缺失在探测/准入/UI 三处一致（G-4、G-46）。
 
