@@ -45,8 +45,15 @@ const USAGE: &str = "\
   bod handoff sample               在真实运行配置上跑 L2 接续样本，给出双运行时证据结论
   bod handoff sample --level l1    只要求 L1（不验重启后重放）
   bod handoff sample --root <dir>  指定样本工作目录（默认系统临时目录下带时间戳的子目录）
-  bod handoff sample --human-minutes 2.5  真实演练的秒表读数（缺省 0 = 脚本化、无人工介入）
+  bod handoff sample --drill <dir> 引用真实演练记录里的人工耗时（唯一算 4.4 证据的来源）
+  bod handoff sample --human-minutes 2.5  口述值：写进报告但标注未附演练记录，不算 4.4 证据
   bod handoff sample --json        同上，输出机器可读结果
+  bod handoff drill start --root <d> --operator <名> --task <类别>   开始一次真实演练计时
+  bod handoff drill mark --root <d> --step <档位> [--note <文本>]   打一个档位（时间戳由系统写）
+  bod handoff drill finish --root <d>   封存：由 last_action→handoff_done 算出接管就绪耗时
+  bod handoff drill show --root <d>     查看时间线与读数（--json 输出机器可读）
+  bod handoff drill arm --root <d> --arm manual|bod --ready-seconds <s> --interruptions <n> \
+      --duplicate-runs <n> --manual-minutes <m>   记录 5.2 对照实验的一侧读数
   bod smoke                        跑通指派→执行→候选登记→重启找回的最小冒烟
   bod smoke --json                 同上，输出机器可读结果
   bod fault-matrix                 执行 P0 五个核心故障场景并输出实测报告
@@ -344,6 +351,7 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         [cmd, rest @ ..] if cmd == "conformance" => conformance(rest),
         [cmd, sub, rest @ ..] if cmd == "handoff" && sub == "sample" => handoff_sample(rest),
+        [cmd, sub, rest @ ..] if cmd == "handoff" && sub == "drill" => handoff_drill(rest),
         [cmd, sub, rest @ ..] if cmd == "adapter" && sub == "release-check" => release_check(rest),
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }
@@ -451,6 +459,153 @@ fn adapter_capabilities(need: Option<&str>) -> Result<String, String> {
     Ok(out)
 }
 
+/// 从 flag 列表取单值参数（`--name value`）。
+fn flag_value<'a>(flags: &'a [String], name: &str) -> Option<&'a str> {
+    flags
+        .iter()
+        .position(|item| item == name)
+        .and_then(|position| flags.get(position + 1))
+        .map(std::string::String::as_str)
+}
+
+fn required_flag<'a>(flags: &'a [String], name: &str, action: &str) -> Result<&'a str, String> {
+    flag_value(flags, name)
+        .ok_or_else(|| format!("`handoff drill {action}` 需要 {name}\n\n{USAGE}"))
+}
+
+fn number_flag(flags: &[String], name: &str, action: &str) -> Result<f64, String> {
+    let raw = required_flag(flags, name, action)?;
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| format!("{name} 需要数字，收到 {raw}\n\n{USAGE}"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("{name} 必须是非负有限值，收到 {raw}"));
+    }
+    Ok(value)
+}
+
+fn count_flag(flags: &[String], name: &str, action: &str) -> Result<u32, String> {
+    let raw = required_flag(flags, name, action)?;
+    raw.parse()
+        .map_err(|_| format!("{name} 需要非负整数，收到 {raw}\n\n{USAGE}"))
+}
+
+/// `bod handoff drill`：真实演练的秒表与对照记录（4.4 人工耗时 / 5.2 对照）。
+///
+/// 计时不留给人手填：演练者在动作发生时打一档，时间戳由系统时钟写入，读数由两端算出。
+fn handoff_drill(flags: &[String]) -> Result<String, String> {
+    use bod_app::handoff_drill::{self as drill, Arm, ArmMetrics, DrillStep};
+
+    let action = flags.first().ok_or_else(|| {
+        format!("`handoff drill` 需要动作 start / mark / finish / show / arm\n\n{USAGE}")
+    })?;
+    let rest = &flags[1..];
+    // 先抓拼错的参数：演练靠人手敲命令，静默忽略一个错字等于丢掉一档读数。
+    const KNOWN: [&str; 11] = [
+        "--root",
+        "--operator",
+        "--task",
+        "--step",
+        "--note",
+        "--json",
+        "--arm",
+        "--ready-seconds",
+        "--interruptions",
+        "--duplicate-runs",
+        "--manual-minutes",
+    ];
+    for item in rest.iter().filter(|item| item.starts_with("--")) {
+        let name = item.split('=').next().unwrap_or(item);
+        if !KNOWN.contains(&name) {
+            return Err(format!("未知参数 {name}\n\n{USAGE}"));
+        }
+    }
+    let root_text = required_flag(rest, "--root", action)?;
+    let root = PathBuf::from(root_text);
+
+    match action.as_str() {
+        "start" => {
+            let operator = required_flag(rest, "--operator", action)?;
+            let task = required_flag(rest, "--task", action)?;
+            let session = drill::start(&root, operator, task, now_ms())?;
+            Ok(format!(
+                "已开始计时\n- 演练者: {}\n- 任务类别: {}\n- 目录: {}\n- 时间线: {}\n\n下一步：任务就绪后打 `--step task_ready`；原执行者做最后一次有效动作时打 `--step last_action`（秒表起点）\n",
+                session.meta.operator,
+                session.meta.task,
+                root.display(),
+                session.timeline_line()
+            ))
+        }
+        "mark" => {
+            let step_raw = required_flag(rest, "--step", action)?;
+            let step = DrillStep::parse(step_raw)?;
+            let note = flag_value(rest, "--note").unwrap_or_default();
+            let session = drill::mark(&root, step, note, now_ms())?;
+            let next = match step {
+                DrillStep::TaskReady => {
+                    "下一步：原执行者最后一次有效动作时打 `--step last_action`（秒表起点）"
+                }
+                DrillStep::LastAction => {
+                    "下一步：接手者第一次有效动作时打 `--step handoff_done`（秒表终点）"
+                }
+                DrillStep::HandoffDone => {
+                    "下一步：`bod handoff drill finish --root <目录>` 封存读数"
+                }
+                DrillStep::VerifyBegin | DrillStep::VerifyEnd => {
+                    "复核段是选填；齐了就 `finish` 封存"
+                }
+            };
+            Ok(format!(
+                "已打点 `{}`\n- 时间线: {}\n\n{next}\n",
+                step.as_str(),
+                session.timeline_line()
+            ))
+        }
+        "finish" => {
+            let session = drill::finish(&root, now_ms())?;
+            let minutes = session.handoff_minutes()?;
+            Ok(format!(
+                "{}\n\n已封存：人工耗时 {minutes:.1} 分钟（由 last_action → handoff_done 的时间戳算出）\n\
+                 下一步：`bod handoff sample --drill {}` 让接续样本报告引用这份读数\n",
+                drill::to_markdown(&session),
+                root.display()
+            ))
+        }
+        "show" => {
+            let session = drill::load(&root)?;
+            if rest.iter().any(|item| item == "--json") {
+                Ok(drill::to_json(&session))
+            } else {
+                Ok(drill::to_markdown(&session))
+            }
+        }
+        "arm" => {
+            let arm_label = required_flag(rest, "--arm", action)?;
+            let arm = Arm::parse(arm_label)?;
+            let metrics = ArmMetrics {
+                ready_seconds: number_flag(rest, "--ready-seconds", action)?,
+                interruptions: count_flag(rest, "--interruptions", action)?,
+                duplicate_runs: count_flag(rest, "--duplicate-runs", action)?,
+                manual_minutes: number_flag(rest, "--manual-minutes", action)?,
+            };
+            let note = flag_value(rest, "--note").unwrap_or_default();
+            let session = drill::record_arm(&root, arm, &metrics, note, now_ms())?;
+            Ok(format!(
+                "已记录 {} 臂读数（接管就绪 {} s / 中断 {} / 重复 {} / 人工补充 {} min）\n\n{}",
+                arm.label(),
+                metrics.ready_seconds,
+                metrics.interruptions,
+                metrics.duplicate_runs,
+                metrics.manual_minutes,
+                drill::to_markdown(&session)
+            ))
+        }
+        other => Err(format!(
+            "未知动作 {other}；只接受 start / mark / finish / show / arm\n\n{USAGE}"
+        )),
+    }
+}
+
 /// `bod handoff sample`：P2 任务 4.4 的采样入口。
 ///
 /// 对每个**不同运行时**各跑一遍 `durable-process` 与 `local-process` 的接续样本。结论只按
@@ -460,8 +615,10 @@ fn handoff_sample(flags: &[String]) -> Result<String, String> {
     let mut level = HandoffLevel::L2;
     let mut json = false;
     let mut root: Option<PathBuf> = None;
-    // 缺省是「脚本化，实测无人工介入」；只有真实演练才用 --human-minutes 填秒表读数。
-    let mut human_time = HumanTime::Scripted;
+    let mut drill_root: Option<PathBuf> = None;
+    // 缺省是「脚本化，实测无人工介入」。真实读数只认演练记录（--drill）；
+    // --human-minutes 是徒手给的数字，报告会标成口述值、不算 4.4 证据。
+    let mut claimed_minutes: Option<f64> = None;
     let mut index = 0;
     while index < flags.len() {
         match flags[index].as_str() {
@@ -488,6 +645,13 @@ fn handoff_sample(flags: &[String]) -> Result<String, String> {
                 root = Some(PathBuf::from(value));
                 index += 2;
             }
+            "--drill" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| format!("--drill 需要演练目录\n\n{USAGE}"))?;
+                drill_root = Some(PathBuf::from(value));
+                index += 2;
+            }
             "--human-minutes" => {
                 let value = flags
                     .get(index + 1)
@@ -498,7 +662,7 @@ fn handoff_sample(flags: &[String]) -> Result<String, String> {
                 if !minutes.is_finite() || minutes < 0.0 {
                     return Err(format!("--human-minutes 必须是非负有限值，收到 {value}"));
                 }
-                human_time = HumanTime::Measured(minutes);
+                claimed_minutes = Some(minutes);
                 index += 2;
             }
             "--json" => {
@@ -508,6 +672,27 @@ fn handoff_sample(flags: &[String]) -> Result<String, String> {
             other => return Err(format!("未知参数 {other}\n\n{USAGE}")),
         }
     }
+    if drill_root.is_some() && claimed_minutes.is_some() {
+        return Err(
+            "--drill 与 --human-minutes 不能同时给：一个是演练记录算出的读数，一个是口述值，混在一起就分不清哪个进了报告"
+                .to_string(),
+        );
+    }
+
+    // 演练记录优先：未封存或缺档位直接报错，不退回默认值、不拿口述值顶替。
+    let mut drill_session = None;
+    let human_time = match &drill_root {
+        Some(path) => {
+            let session = bod_app::handoff_drill::load(path)?;
+            let time = handoff_sample::human_time_from_drill(path)?;
+            drill_session = Some(session);
+            time
+        }
+        None => match claimed_minutes {
+            Some(minutes) => HumanTime::Claimed(minutes),
+            None => HumanTime::Scripted,
+        },
+    };
 
     let now = now_ms();
     let runtimes = handoff_sample::detect_runtimes(&["python3", "python", "node"]);
@@ -552,6 +737,9 @@ fn handoff_sample(flags: &[String]) -> Result<String, String> {
     }
     // 样本目录只放会话与快照；子进程都已被 cancel 确认停止，清掉不留垃圾。
     let _ = fs::remove_dir_all(&base);
+    if let Some(session) = drill_session {
+        report.attach_drill(session);
+    }
     if json {
         Ok(report.to_json())
     } else {

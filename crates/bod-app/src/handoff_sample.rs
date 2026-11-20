@@ -95,12 +95,18 @@ pub trait SampleConfig {
 }
 
 /// 人工介入的实测值。
+///
+/// **实测与口述必须分开**：`Drilled` 来自 `drill.summary`（时间戳由系统时钟写入、由两端档位
+/// 算出），`Claimed` 是命令行徒手给的数字。两者都能写进报告，但只有前者能算 4.4 的
+/// 「人工耗时」证据——否则敲一个数字就能让报告显示实测值。
 #[derive(Debug, Clone, PartialEq)]
 pub enum HumanTime {
     /// 脚本驱动：实测**没有**人工介入。是测到的 0，不是没测。
     Scripted,
-    /// 实测分钟数（秒表：原执行者最后一次有效动作 → 接手者第一次有效动作）。
-    Measured(f64),
+    /// 真实演练记录算出分钟数（秒表：原执行者最后一次有效动作 → 接手者第一次有效动作）。
+    Drilled { minutes: f64, source: String },
+    /// 命令行徒手给的值：口述值，未附演练记录，不计入 4.4。
+    Claimed(f64),
     /// 没有记录。报告必须显式点出，不能默认成 0。
     Unrecorded,
 }
@@ -109,7 +115,10 @@ impl HumanTime {
     pub fn label(&self) -> String {
         match self {
             Self::Scripted => "0（脚本化，无人工介入）".to_string(),
-            Self::Measured(minutes) => format!("{minutes:.1} 分钟"),
+            Self::Drilled { minutes, source } => {
+                format!("{minutes:.1} 分钟（演练记录 {source}）")
+            }
+            Self::Claimed(minutes) => format!("{minutes:.1} 分钟（口述值，未附演练记录）"),
             Self::Unrecorded => "未记录".to_string(),
         }
     }
@@ -117,6 +126,30 @@ impl HumanTime {
     pub const fn is_recorded(&self) -> bool {
         !matches!(self, Self::Unrecorded)
     }
+
+    /// 是否**可追溯**：只有脚本化零介入与演练记录算。口述值有数字但没有出处。
+    pub const fn is_evidenced(&self) -> bool {
+        matches!(self, Self::Scripted | Self::Drilled { .. })
+    }
+
+    /// 报告里给「为什么不算」的一句话。
+    pub fn caveat(&self) -> Option<&'static str> {
+        match self {
+            Self::Claimed(_) => Some("口述值：没有演练记录，不能算 4.4 的人工耗时证据"),
+            Self::Unrecorded => Some("未测：不能按 0 处理"),
+            _ => None,
+        }
+    }
+}
+
+/// 从真实演练记录取人工耗时。**未封存或缺档位就报错**，不退回默认值。
+pub fn human_time_from_drill(root: &Path) -> Result<HumanTime, String> {
+    let session = crate::handoff_drill::load(root)?;
+    let minutes = session.handoff_minutes()?;
+    Ok(HumanTime::Drilled {
+        minutes,
+        source: session.source_label(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -775,6 +808,8 @@ pub struct SampleReport {
     pub level: HandoffLevel,
     pub generated_at_ms: i64,
     pub records: Vec<SampleRecord>,
+    /// 真实演练记录：给了就附在报告里，让「人工耗时」与「5.2 对照」有出处可查。
+    pub drill: Option<crate::handoff_drill::DrillSession>,
 }
 
 impl SampleReport {
@@ -784,7 +819,12 @@ impl SampleReport {
             level,
             generated_at_ms,
             records: Vec::new(),
+            drill: None,
         }
+    }
+
+    pub fn attach_drill(&mut self, drill: crate::handoff_drill::DrillSession) {
+        self.drill = Some(drill);
     }
 
     pub fn push(&mut self, record: SampleRecord) {
@@ -886,13 +926,57 @@ impl SampleReport {
             .iter()
             .filter(|item| !item.human_time.is_recorded())
             .collect();
+        let claimed: Vec<&SampleRecord> = self
+            .records
+            .iter()
+            .filter(|item| matches!(item.human_time, HumanTime::Claimed(_)))
+            .collect();
+        let evidenced = self
+            .records
+            .iter()
+            .filter(|item| item.human_time.is_evidenced())
+            .count();
+        out.push_str(&format!(
+            "\n人工耗时证据: {evidenced}/{}（脚本化零介入与演练记录算，口述值不算）\n",
+            self.records.len()
+        ));
         if unrecorded.is_empty() {
-            out.push_str("\n人工耗时: 每条都有实测值（脚本化样本记 0，不记“没测”）。\n");
+            out.push_str("\n人工耗时: 每条都有记录（脚本化样本记 0，不记“没测”）。\n");
         } else {
             out.push_str("\n人工耗时: 下列配置未记录，不能按 0 处理。\n");
             for record in unrecorded {
                 out.push_str(&format!("- {}\n", record.profile.label()));
             }
+        }
+        if !claimed.is_empty() {
+            out.push_str("\n口述值（不计入 4.4，需 `bod handoff drill` 记录的演练读数替代）:\n");
+            for record in claimed {
+                out.push_str(&format!(
+                    "- {}：{}\n",
+                    record.profile.label(),
+                    record.human_time.label()
+                ));
+            }
+        }
+
+        if let Some(drill) = &self.drill {
+            out.push_str("\n## 附：真实演练记录（4.4 人工耗时 / 5.2 对照）\n\n");
+            out.push_str(&format!(
+                "- 演练者: {} / 任务类别: {}\n",
+                drill.meta.operator, drill.meta.task
+            ));
+            match &drill.summary {
+                Some(summary) => out.push_str(&format!(
+                    "- 接管就绪耗时: **{:.1} 分钟**（`last_action` → `handoff_done`，{} ms，来源 `{}`）\n\n",
+                    summary.handoff_minutes(),
+                    summary.handoff_ms,
+                    drill.source_label()
+                )),
+                None => out.push_str(
+                    "- 演练未封存：不能提供人工耗时（先 `bod handoff drill finish`）\n\n",
+                ),
+            }
+            out.push_str(&crate::handoff_drill::arms_markdown(drill));
         }
         out
     }
@@ -916,6 +1000,7 @@ impl SampleReport {
                     "elapsed_ms": record.elapsed_ms,
                     "human_time": record.human_time.label(),
                     "human_time_recorded": record.human_time.is_recorded(),
+                    "human_time_evidenced": record.human_time.is_evidenced(),
                 })
             })
             .collect();
@@ -930,7 +1015,25 @@ impl SampleReport {
                 "passed": claim.passed(),
                 "line": claim.line(),
             },
+            "human_time_evidenced": self
+                .records
+                .iter()
+                .filter(|item| item.human_time.is_evidenced())
+                .count(),
             "records": records,
+            "drill": self.drill.as_ref().map(|drill| serde_json::json!({
+                "operator": drill.meta.operator,
+                "task": drill.meta.task,
+                "finished": drill.finished(),
+                "handoff_minutes": drill.summary.as_ref().map(|item| item.handoff_minutes()),
+                "arms": drill.arms.iter().map(|item| serde_json::json!({
+                    "arm": item.arm.as_str(),
+                    "ready_seconds": item.metrics.ready_seconds,
+                    "interruptions": item.metrics.interruptions,
+                    "duplicate_runs": item.metrics.duplicate_runs,
+                    "manual_minutes": item.metrics.manual_minutes,
+                })).collect::<Vec<_>>(),
+            })),
         });
         value.to_string()
     }
@@ -1350,8 +1453,30 @@ mod tests {
         assert!(HumanTime::Scripted.label().starts_with('0'));
         assert!(!HumanTime::Scripted.label().contains("未记录"));
         assert_eq!(HumanTime::Unrecorded.label(), "未记录");
-        assert!(HumanTime::Measured(2.5).label().contains("2.5"));
         assert!(HumanTime::Scripted.is_recorded());
         assert!(!HumanTime::Unrecorded.is_recorded());
+    }
+
+    /// 口述值与演练记录必须能一眼分开：都带数字，但只有后者有出处。
+    #[test]
+    fn claimed_minutes_never_pass_as_evidence() {
+        let drilled = HumanTime::Drilled {
+            minutes: 3.4,
+            source: "drill-1/drill.summary".to_string(),
+        };
+        let claimed = HumanTime::Claimed(3.4);
+        assert!(drilled.label().contains("3.4"));
+        assert!(drilled.label().contains("演练记录"));
+        assert!(claimed.label().contains("口述值"));
+        assert!(drilled.is_evidenced());
+        assert!(!claimed.is_evidenced());
+        assert!(claimed.is_recorded(), "口述值也是记录过的，只是不可追溯");
+        assert!(
+            claimed
+                .caveat()
+                .is_some_and(|text| text.contains("不能算 4.4"))
+        );
+        assert!(drilled.caveat().is_none());
+        assert!(HumanTime::Unrecorded.caveat().is_some());
     }
 }

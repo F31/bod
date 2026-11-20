@@ -415,8 +415,19 @@
     `unsupported` 不计入（L1 对照下它通过，说明差距来自能力而非缺陷）。L3 报
     `unsupported(verified_continuation)`：样本没有核验步骤，不拿 L1/L2 冒充。
   - **仍未完成**：① 负责人切换只有库内状态机（5.1 三条 case），没有真实项目演练；
-    ② 人工分钟只有脚本化的 0（`--human-minutes` 留给真实演练填秒表读数）。
+    ② 人工分钟只有脚本化的 0。
     两项都要人跑一遍，机器代替不了，故 4.4 保持未勾选。
+  - 进展（2026-11-20，`cargo test -p bod-app --lib handoff_drill` → 11 passed；
+    `--test p2_handoff_drill` → 6 passed）：把「人工耗时」从**可随意填的数字**改成**可追溯的读数**。
+    起因：裸 `--human-minutes 12` 会直接写成实测值，报告里「测到的」与「填进去的」长得一样，
+    一个数字就能把证据变成摆设。
+    新增 `bod handoff drill start/mark/finish/show/arm`：演练者只在动作发生时打档，时间戳由
+    系统时钟写入 `drill.timeline`，人工耗时 = `handoff_done` − `last_action`，**算出而非输入**。
+    四条拒绝规则（每档最多一次、时间戳不得回退、封存后拒绝追加、缺档位拒绝给读数）都在
+    11 条命名用例里；`HumanTime` 拆成 `Scripted`/`Drilled`/`Claimed`/`Unrecorded` 四态，
+    口述值仍能进报告但被标「未附演练记录」并排除出 `人工耗时证据: n/4` 计数。
+    通路用一次冒烟（演练者记为「冒烟验证（非真实演练）」）验证过，且**不写入任何结论**。
+    协议见 `docs/reports/p2-handoff-samples.md` §6，设计取舍见 `docs/spec-notes/p2-handoff-drill.md`。
 - [x] 4.5 实现发布验收检查（停止/重放/副作用/账号预算/证据）与日志脱敏，验证日志中无凭据值且能力缺失在探测/准入/UI 三处一致（G-4、G-46）。
   - 证据（2026-11-20，`cargo test -p bod-app --lib release_acceptance` → 15 passed；
     `cargo test -p bod` → 14 passed）：
@@ -471,6 +482,12 @@
     「崩溃」是状态机层面（真杀进程由 P0 `fault-matrix` 覆盖）。详见
     `docs/spec-notes/p2-fault-acceptance.md`。
 - [ ] 5.2 与手工交接做同类任务对照，记录接管就绪耗时、员工中断数、重复执行数与人工补充时间，验证报告含样本数与未完成项且不预设提升比例。
+  - 读数入口已就位（2026-11-20）：`bod handoff drill arm --arm manual|bod --ready-seconds --interruptions
+    --duplicate-runs --manual-minutes`，四项缺一即报错（不默认成 0）；报告由
+    `bod handoff drill show` 生成，含**样本数**、**未完成项**（某臂零样本时点名）与
+    「只列原始读数、不写提升 X%」的口径声明。口径见 `docs/reports/p2-exit-evidence.md` §5。
+  - **仍未完成**：两臂的真实读数一条都没有。冒烟只验工具通路，不是对照实验数据，
+    故 5.2 保持未勾选。
 - [ ] 5.3 汇总 P2 出口证据与支持矩阵，验证「与手工交接对比」「停旧写入/脏文件/丢回包用例通过」有可核对报告，其他运行组合保持 Planned。
   - 已就位（2026-11-20，`cargo test -p bod-app --test p2_exit_evidence` → 6 passed）：
     `docs/reports/p2-exit-evidence.md` 汇总机内证据（4.1—4.3、4.5、5.1）与两类缺口；

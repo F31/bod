@@ -265,6 +265,13 @@
   `reliable_observation: unsupported` 记 `unsupported` 不计入；L3 报 `unsupported`（样本无核验步）。
   **4.4 仍未勾选**：负责人切换只有库内 case、人工分钟只有脚本化的 0——两项都要人真实跑一遍。
   实测见 `docs/reports/p2-handoff-samples.md`，设计见 `p2-handoff-sample.md`。
+  把「人工耗时」从可随意填的数字改成可追溯读数：`bod handoff drill start/mark/finish/show/arm`。
+  时间戳由系统时钟写入 `drill.timeline`，耗时 = `handoff_done` − `last_action`（算出而非输入）；
+  四条拒绝规则（每档一次、时间戳不回退、封存后拒绝追加、缺档位拒给读数）有 11 条命名用例；
+  `HumanTime` 拆 `Scripted`/`Drilled`/`Claimed`/`Unrecorded`，口述值进报告但排除出
+  `人工耗时证据: n/4`。5.2 的四项指标走 `--arm manual|bod` 收口，报告含样本数与未完成项、
+  不写提升比例。通路已冒烟（记为「非真实演练」），**真实读数未取得**，故 4.4/5.2 仍不勾选。
+  协议见 `p2-handoff-samples.md` §6，设计见 `p2-handoff-drill.md`。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
