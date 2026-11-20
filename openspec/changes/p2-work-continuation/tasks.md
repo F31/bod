@@ -423,7 +423,26 @@
 
 ## 5. P2 验证与出口
 
-- [ ] 5.1 执行 P2 故障验收：停旧写入、脏文件、丢回包、崩溃中交接、旧经理并发切换、B 不可用，验证 G-28—G-30、G-39—G-41 有命名 case 与真实断言。
+- [x] 5.1 执行 P2 故障验收：停旧写入、脏文件、丢回包、崩溃中交接、旧经理并发切换、B 不可用，验证 G-28—G-30、G-39—G-41 有命名 case 与真实断言。
+  - 证据（2026-11-20，`cargo test -p bod-app --test p2_fault_acceptance` → 6 passed，约 2 秒）：
+    新增 `crates/bod-app/tests/p2_fault_acceptance.rs`，六个命名 case 从外部按场景驱动真实代码：
+    `case_stop_old_writer_…`（越界进 `NeedsRevision` 且只拒那一条、`KeepDirty` 回收得 `Retained`
+    且目录与改动仍在）、`case_dirty_files_…`（空白确认 `DirtyNotDisposed`、显式确认 `Removed`）、
+    `case_lost_reply_…`（进 `Unknown`、对账后仍只有 1 条 invocation、案件按逻辑动作键幂等、
+    二次结案 `CaseNotOpen`）、`case_crash_mid_handoff_…`（旧票证 `stale_appointment`、
+    新 epoch 严格递增且换行、新票证可用）、`case_concurrent_manager_switch_…`
+    （第二次任命 `ScopeAlreadyManaged` 并回指当前主委任、旧经理票证仍可用、同 `command_id` 为重放）、
+    `case_target_runtime_unavailable_…`（被禁用的运行时连 L1 都承接不了、候选为空、
+    `BOD_CAPABILITY_UNSATISFIED`；反证同适配器可用时 L1 放行而 L3 仍被能力门拒绝）。
+    前两个 case 用真 git（仓库 + 两个 worktree + 真实 diff 与 `worktree remove`），其余用内存库。
+    **跑出两个细节**：① 撤任后旧票证的原因码是 `stale_appointment` 而不是 `appointment_inactive`
+    ——`revoke` 递增 epoch，凭据在 epoch 比对就被拦下（更强）；② `KeepDirty` 的 `dirty_paths`
+    与 `changed_paths` 一致，登记表记的是真实 diff。
+    **如实记录**：本切片**不是**门禁结论——未改 `verification/gates.yaml`，G-28—G-30、
+    G-39—G-41 绑定仍 `planned`，转不转 implemented 由 5.3 按 §39.10 裁定；「B 不可用」用
+    `Enablement::Blocked` 表达而非真下线；「停旧写入」验的是写完之后的结果而非并发竞争窗口；
+    「崩溃」是状态机层面（真杀进程由 P0 `fault-matrix` 覆盖）。详见
+    `docs/spec-notes/p2-fault-acceptance.md`。
 - [ ] 5.2 与手工交接做同类任务对照，记录接管就绪耗时、员工中断数、重复执行数与人工补充时间，验证报告含样本数与未完成项且不预设提升比例。
 - [ ] 5.3 汇总 P2 出口证据与支持矩阵，验证「与手工交接对比」「停旧写入/脏文件/丢回包用例通过」有可核对报告，其他运行组合保持 Planned。
 

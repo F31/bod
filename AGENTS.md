@@ -227,6 +227,13 @@
   [recovery, reliable_observation]。如实记录：CLI 不打开业务库，故「重启意图仍在」与
   「账号预算可评估」在本机恒为 `not_evidenced`，不补默认值；`acceptance_evidence` 的 pass
   只表示有证据且未过期，本机 `enablement` 仍是 `unverified`。详见 `p2-conformance.md` §4。
+  切片 5.1 落地 P2 故障验收 `crates/bod-app/tests/p2_fault_acceptance.rs`：六个命名 case 从外部
+  按场景驱动真实代码（停旧写入 / 脏文件 / 丢回包 / 崩溃中交接 / 旧经理并发切换 / B 不可用），
+  前两个用真 git（仓库 + 两个 worktree + 真实 diff），验证的是**跨模块接缝**而不是各模块自证。
+  跑出两个细节：撤任后旧票证命中 `stale_appointment`（`revoke` 递增 epoch，比 `appointment_inactive`
+  更强）；`KeepDirty` 的 `dirty_paths` 与 `changed_paths` 一致。**这不是门禁结论**：
+  `gates.yaml` 未改，G-28—G-30/G-39—G-41 仍 planned，转 implemented 由 5.3 裁定；
+  「B 不可用」用 `Enablement::Blocked` 表达而非真下线。详见 `p2-fault-acceptance.md`。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
