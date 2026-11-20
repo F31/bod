@@ -47,6 +47,7 @@ pub mod isolation_check;
 pub mod lifecycle_recovery;
 pub mod local_process;
 pub mod manager_transfer;
+pub mod merge_queue;
 pub mod migration_safety;
 pub mod observation_redaction;
 pub mod openspec_integration;
