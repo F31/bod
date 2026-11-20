@@ -274,6 +274,14 @@
   协议见 `p2-handoff-samples.md` §6，设计见 `p2-handoff-drill.md`。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
+- **P3 进行中（2026-11-21）**：`openspec/changes/p3-change-collaboration` 24/26 任务已勾选。
+  四个能力各有模块与 spec note：`openspec_integration`（规格修订/任务稳定身份/拆分检查/进度投影/
+  归档串行）、`impact_revalidation`（显式与推测边分离/影响评估/有界重验/维护提案）、
+  `merge_queue`（三道门：队首/基线/证据，契约冲突先到先得，worktree 只能算协作隔离）、
+  `collaboration_plan`（答疑零副作用/顾问命令被拒/执行图准入/在途 Run 保护/会话键六分量）。
+  **2.6 与 5.2 未勾选**：G-31 与「共享接口变化从发现到再次接受」需要真实项目样本，
+  机器造不出来。出口结论 `blocked`（`docs/reports/p3-exit-evidence.md`），支持矩阵 §9 无 Supported 行，
+  P3 的 I/G 绑定同样全部保持 planned。CI 见 `.github/workflows/ci.yml`（Linux + Windows + workbench + openspec）。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

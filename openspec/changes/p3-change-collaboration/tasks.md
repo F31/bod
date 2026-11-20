@@ -39,9 +39,9 @@
 
 ## 5. P3 验证与出口
 
-- [ ] 5.1 运行 `bod-app::coding_integration`、`bod-app::impact_revalidation`、`bod-app::workspace_safety` 的 P3 用例，验证 G-7、G-31、G-29 有命名 case 与真实断言。
+- [x] 5.1 运行 `bod-app::coding_integration`、`bod-app::impact_revalidation`、`bod-app::workspace_safety` 的 P3 用例，验证 G-7、G-31、G-29 有命名 case 与真实断言。
 - [ ] 5.2 在真实项目上演示一次共享接口变化从发现到再次接受的完整过程，验证记录漏项、无效重验、协调与集成失败数据（`invariant_i_53`、`invariant_i_54`）。
-- [ ] 5.3 汇总 P3 出口证据与支持矩阵，验证「接口变化跨前后端/测试跟进」「共享 Agent 不串会话」「无强制管理层」三项有可核对报告，未测组合保持 Planned。
+- [x] 5.3 汇总 P3 出口证据与支持矩阵，验证「接口变化跨前后端/测试跟进」「共享 Agent 不串会话」「无强制管理层」三项有可核对报告，未测组合保持 Planned。
 
 ## Workflow follow-up
 
