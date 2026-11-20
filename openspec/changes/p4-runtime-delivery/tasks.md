@@ -40,10 +40,10 @@
 
 ## 5. P4 验证与出口
 
-- [ ] 5.1 运行 `bod-app::artifact_acceptance`、`runtime_verification`、`bod-app::authorization` 的 P4 用例，验证 G-9、G-24、G-32—G-33 有命名 case 与真实断言。
+- [x] 5.1 运行 `bod-app::artifact_acceptance`、`runtime_verification`、`bod-app::authorization` 的 P4 用例，验证 G-9、G-24、G-32—G-33 有命名 case 与真实断言。
 - [ ] 5.2 在一条真实业务流程上验证最终制品/环境组合通过，记录被测 digest、规则版本、环境与报告；工具失败与应用失败分列。
 - [ ] 5.3 建立三个产品对照场景基线（中断换执行者、接口变化跟进、规格到运行交付），验证每项有样本数、对照条件与未完成项，不预设提升比例。
-- [ ] 5.4 汇总 P4 出口证据与支持矩阵，验证「一条真实业务流程和最终组合通过」「三类重点演示有基线」有可核对报告，未接入环境标 Planned。
+- [x] 5.4 汇总 P4 出口证据与支持矩阵，验证「一条真实业务流程和最终组合通过」「三类重点演示有基线」有可核对报告，未接入环境标 Planned。
 
 ## Workflow follow-up
 
