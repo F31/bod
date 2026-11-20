@@ -15,7 +15,17 @@
     决策类型无主体/命令/凭据/epoch，准入不授予管理权。详见 `docs/spec-notes/p2-handoff.md`。
   - 编号差异如实记录：tasks 把 I-46/I-47 分别写在 1.2/1.5，而 §39.10 权威语义不同，
     本切片不写 `gates.yaml`；P2 全部引用留到出口 5.3 统一补齐后再切 `BINDING_SOURCES`。
-- [ ] 1.2 实现规范编码与 payload_digest（摘要不递归计入自身）及原始字节摘要，验证跨语言测试向量得到一致结果（`invariant_i_46`）。
+- [x] 1.2 实现规范编码与 payload_digest（摘要不递归计入自身）及原始字节摘要，验证跨语言测试向量得到一致结果（`invariant_i_46`）。
+  - 证据（2026-11-20，`cargo test -p bod-app canonical_json` → 7 passed；`python
+    verification/vectors/check_bod_canonical_json_v1.py` → PASS 14/14）：新增
+    `bod-app::canonical_json`，固定 `bod-canonical-json-v1` 的 UTF-8/键序/整数字面量/
+    数组保序/重复键/秒级 UTC 规则；`payload_digest` 只覆盖 `payload` 子对象且不纳入
+    `integrity` 自身，`verify_envelope` 重算并区分 `DigestMismatch`、`MissingDigest`、
+    `MalformedDigest`、`UnsupportedCanonicalization`；`material_integrity` 并列给出规范摘要
+    与原始字节摘要，缩进与紧凑写法规范摘要相同、字节摘要不同。跨语言向量 14 条由 Rust 与
+    独立 Python 校验器双方复算一致（含 `-0`/`1e3`/`1.5`/重复键/顶层非对象/孤立代理项的拒绝分类）。
+    边界：不做 schema 必填与日历精确校验，不接受小数（金额须转整数最小单位）；
+    I-46 仍不写 `gates.yaml`（P2 绑定保持 planned）。详见 `docs/spec-notes/p2-canonical.md`。
 - [ ] 1.3 实现宿主事实骨架与 Agent 叙述分栏、done 无证据保持 unverified，验证叙述不能覆盖账本或外部终态。
 - [ ] 1.4 实现部分快照（missing/来源/完整性状态）与版本/snapshot_seq 绑定，验证崩溃样本可登记且无关元数据变化不触发失效。
 - [ ] 1.5 实现现场清单边界（submodule/LFS/锁文件/冲突/密钥过滤）与交接事件类型，验证 `invariant_i_47`：包内无凭据值，重复 accept 返回同一结果。

@@ -1,0 +1,90 @@
+{
+  "canonicalization": "bod-canonical-json-v1",
+  "note": "由 verification/vectors/check_bod_canonical_json_v1.py 与 Rust bod-app::canonical_json 双方独立复算；不得手改摘要。整数只接受 0 或 -?[1-9][0-9]* 字面量，-0/小数/指数一律拒绝。",
+  "vectors": [
+    {
+      "name": "keys_sorted_nested",
+      "input": "{\n  \"b\": 2,\n  \"a\": {\"z\": 1, \"y\": [3, 2]}\n}\n",
+      "canonical": "{\"a\":{\"y\":[3,2],\"z\":1},\"b\":2}",
+      "sha256": "d95782de811ce716c93273e7a8f4df278bac8d2b0a66816b9edef2a4713dfd5e",
+      "raw_sha256": "e13360935f8bf8c4535a98b6381bada05ed93b522cf9ba3647f62f45b5eaf912"
+    },
+    {
+      "name": "utf8_kept_raw",
+      "input": "{\"name\":\"\\u4e2d\\u6587\",\"emoji\":\"\\ud83d\\ude00\",\"quote\":\"\\\"\"}",
+      "canonical": "{\"emoji\":\"😀\",\"name\":\"中文\",\"quote\":\"\\\"\"}",
+      "sha256": "c5d5544200ea8cc54f66e6b49e8ae83831b995127a2eeddbdddba576487cb220",
+      "raw_sha256": "da4c94cfed790dd74b45094d3a41970dd664d8065a30499f841b6fff27537a1d"
+    },
+    {
+      "name": "control_characters",
+      "input": "{\"s\":\"a\\u0001b\\n\\t\\\"\\\\/\"}",
+      "canonical": "{\"s\":\"a\\u0001b\\n\\t\\\"\\\\/\"}",
+      "sha256": "1dfa38812f114434e4d1fee11bc64020822e49e62b47d92de8ce2c9580d4a04a",
+      "raw_sha256": "1dfa38812f114434e4d1fee11bc64020822e49e62b47d92de8ce2c9580d4a04a"
+    },
+    {
+      "name": "integers_null_bool",
+      "input": "{\"max\":9223372036854775807,\"zero\":0,\"neg\":-17,\"t\":true,\"f\":false,\"nil\":null}",
+      "canonical": "{\"f\":false,\"max\":9223372036854775807,\"neg\":-17,\"nil\":null,\"t\":true,\"zero\":0}",
+      "sha256": "97c9e8aa74c1c80486482f336765e95a09ad361e4b5fea7f83b39b7b80f1c7e3",
+      "raw_sha256": "0242a1e8504250913d0058cc08b072e2720714450de6c046bb35c5f41776de23"
+    },
+    {
+      "name": "array_order_preserved",
+      "input": "{\"arr\":[\"b\",\"a\",1],\"nested\":[[2,1],[1,2]]}",
+      "canonical": "{\"arr\":[\"b\",\"a\",1],\"nested\":[[2,1],[1,2]]}",
+      "sha256": "40b081ce84272305d5aa109bd2434b334aa4e5e741ecebfba265c70a38a7dea7",
+      "raw_sha256": "40b081ce84272305d5aa109bd2434b334aa4e5e741ecebfba265c70a38a7dea7"
+    },
+    {
+      "name": "empty_containers",
+      "input": "{\"b\":[],\"a\":{}}",
+      "canonical": "{\"a\":{},\"b\":[]}",
+      "sha256": "aeeba1e56a144077f89e26c930dad7cf933e9383cfb8e33ddff618233b29be76",
+      "raw_sha256": "e0e03f08d91dfbf0323756388f525a45d3c03543f944ad1634f851ee1d18597e"
+    },
+    {
+      "name": "handoff_envelope_payload",
+      "input": "{\"payload\":{\"company_id\":\"company-local\",\"snapshot_seq\":1482,\"workspace\":{\"base_commit\":\"c0ffee\",\"untracked_files_manifest_ref\":null},\"missing\":[\"external-session-state\"]},\"integrity\":{\"canonicalization\":\"bod-canonical-json-v1\",\"payload_digest\":\"sha256:placeholder\"}}",
+      "canonical": "{\"integrity\":{\"canonicalization\":\"bod-canonical-json-v1\",\"payload_digest\":\"sha256:placeholder\"},\"payload\":{\"company_id\":\"company-local\",\"missing\":[\"external-session-state\"],\"snapshot_seq\":1482,\"workspace\":{\"base_commit\":\"c0ffee\",\"untracked_files_manifest_ref\":null}}}",
+      "sha256": "a7d9746f3e5c3d5d6f9f37d118569c5e30f85a0a6bc048a7bf5d633e058a4cab",
+      "raw_sha256": "bbab945d4295042fe379aeacbd9301f9b2ef2e80db3a18643dd77a5362602090"
+    },
+    {
+      "name": "duplicate_key",
+      "input": "{\"a\":1,\"a\":2}",
+      "expected_error": "duplicate_key"
+    },
+    {
+      "name": "duplicate_key_nested",
+      "input": "{\"o\":{\"x\":1,\"x\":2}}",
+      "expected_error": "duplicate_key"
+    },
+    {
+      "name": "fractional_number",
+      "input": "{\"n\":1.5}",
+      "expected_error": "fractional_number"
+    },
+    {
+      "name": "exponent_number",
+      "input": "{\"n\":1e3}",
+      "expected_error": "non_canonical_number"
+    },
+    {
+      "name": "negative_zero",
+      "input": "{\"n\":-0}",
+      "expected_error": "non_canonical_number"
+    },
+    {
+      "name": "not_an_object",
+      "input": "[1,2]",
+      "expected_error": "not_an_object"
+    },
+    {
+      "name": "lone_surrogate",
+      "input": "{\"a\":\"\\ud800\"}",
+      "expected_error": "invalid_json"
+    }
+  ]
+}

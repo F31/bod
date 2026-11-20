@@ -12,6 +12,7 @@ pub mod backoff;
 pub mod budget_admission;
 pub mod budget_dispatch_gate;
 pub mod cancel_reconciliation;
+pub mod canonical_json;
 pub mod cas;
 pub mod claim_concurrency;
 pub mod clarity_dialogue;

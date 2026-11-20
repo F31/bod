@@ -90,7 +90,10 @@
   `Target`，升格 `Supported` 仍需独立评审确认。
   P2 工作接续 Change 已开工：切片 1.1 落地 `bod-app::handoff_package` 的 L1/L2/L3 等级骨架与
   纯准入判定（13 项命名用例）；未测组合的 L3 被拒并说明缺失证据，允许显式降级 L1/L2，
-  自报/探测/过期证据不得冒充已测组合，准入不授予管理权。P2 的 I/G 绑定仍全部 planned，
+  自报/探测/过期证据不得冒充已测组合，准入不授予管理权。切片 1.2 落地
+  `bod-app::canonical_json`（`bod-canonical-json-v1`）：键序/整数字面量/秒级 UTC 固定，
+  `payload_digest` 只覆盖 payload 不递归自身，原始字节摘要并列且与规范摘要不同；
+  14 条跨语言向量由 Rust 与独立 Python 校验器复算一致。P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
