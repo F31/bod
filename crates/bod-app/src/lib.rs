@@ -27,6 +27,7 @@ pub mod effect_recovery;
 pub mod fake_executor;
 pub mod fault_matrix;
 pub mod first_use;
+pub mod handoff_facts;
 pub mod handoff_package;
 pub mod host_handshake;
 pub mod invocation;

@@ -26,7 +26,17 @@
     独立 Python 校验器双方复算一致（含 `-0`/`1e3`/`1.5`/重复键/顶层非对象/孤立代理项的拒绝分类）。
     边界：不做 schema 必填与日历精确校验，不接受小数（金额须转整数最小单位）；
     I-46 仍不写 `gates.yaml`（P2 绑定保持 planned）。详见 `docs/spec-notes/p2-canonical.md`。
-- [ ] 1.3 实现宿主事实骨架与 Agent 叙述分栏、done 无证据保持 unverified，验证叙述不能覆盖账本或外部终态。
+- [x] 1.3 实现宿主事实骨架与 Agent 叙述分栏、done 无证据保持 unverified，验证叙述不能覆盖账本或外部终态。
+  - 证据（2026-11-20，`cargo test -p bod-app handoff_facts` → 10 passed）：新增
+    `bod-app::handoff_facts`，输入分成 `HostFactsInput`（工作区/成果/验证/Effect/预算）与
+    `NarrativeInput`（摘要/失败原因/建议/自称 done/自称证据/自称 Effect 状态）两组，
+    叙述结构上没有宿主字段的写入路径；`assemble` 原样复制宿主字段，完成度只按目标修订的
+    宿主验证记录推导（无成果/无验证/被拒/全自报/无证据引用分别对应固定原因），
+    `claimed_done` 不参与判定；自称 done 无证据 → `Unverified` 且宿主仍 `Incomplete`，
+    自称 Effect 状态与宿主不同 → 宿主状态不变并记 `EffectStateOverride`；payload 复用 1.2
+    规范编码求摘要，冲突列表为派生视图不写入 payload。边界：不持久化、不判定接续、不校验授权；
+    §39.10 把 I-46 映射到 `manager_transfer`（3.x 才有），本切片用例仅作支撑证据，
+    不写 `gates.yaml`。详见 `docs/spec-notes/p2-facts.md`。
 - [ ] 1.4 实现部分快照（missing/来源/完整性状态）与版本/snapshot_seq 绑定，验证崩溃样本可登记且无关元数据变化不触发失效。
 - [ ] 1.5 实现现场清单边界（submodule/LFS/锁文件/冲突/密钥过滤）与交接事件类型，验证 `invariant_i_47`：包内无凭据值，重复 accept 返回同一结果。
 

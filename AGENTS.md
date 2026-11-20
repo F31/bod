@@ -93,7 +93,10 @@
   自报/探测/过期证据不得冒充已测组合，准入不授予管理权。切片 1.2 落地
   `bod-app::canonical_json`（`bod-canonical-json-v1`）：键序/整数字面量/秒级 UTC 固定，
   `payload_digest` 只覆盖 payload 不递归自身，原始字节摘要并列且与规范摘要不同；
-  14 条跨语言向量由 Rust 与独立 Python 校验器复算一致。P2 的 I/G 绑定仍全部 planned，
+  14 条跨语言向量由 Rust 与独立 Python 校验器复算一致。切片 1.3 落地
+  `bod-app::handoff_facts`：宿主事实与 Agent 叙述为两组不可互换输入，叙述无宿主字段写入路径；
+  完成度只按宿主验证记录推导（自报/无证据不算），自称 done 无证据保持 `Unverified`，
+  叙述改写 Effect 状态只记冲突、宿主状态不变（10 项命名用例）。P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
