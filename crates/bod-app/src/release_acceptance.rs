@@ -242,9 +242,7 @@ impl Divergence {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::ProbeSaysMissingAdmissionAdmits { .. } => "probe_missing_admission_admits",
-            Self::AdmissionRejectsSlotProbeAccepts { .. } => {
-                "admission_rejects_slot_probe_accepts"
-            }
+            Self::AdmissionRejectsSlotProbeAccepts { .. } => "admission_rejects_slot_probe_accepts",
             Self::InterfaceOmitsMissing { .. } => "interface_omits_missing",
             Self::AdapterAbsentFromSelection => "adapter_absent_from_selection",
         }
@@ -349,16 +347,14 @@ impl ReleaseAcceptance {
             );
         }
         if selection.is_none() {
-            limitations.push(
-                "未提供调度准入结论：探测结果与界面提示无法比对，只核验了探测侧".to_string(),
-            );
+            limitations
+                .push("未提供调度准入结论：探测结果与界面提示无法比对，只核验了探测侧".to_string());
         }
         if !alignment.compared {
             limitations.push("没有可比对的对象，三处一致结论不成立（不视为通过）".to_string());
         }
         limitations.push(
-            "验收证据由调用方提供；本模块不采集事实，缺失一律记 not_evidenced 而非补齐"
-                .to_string(),
+            "验收证据由调用方提供；本模块不采集事实，缺失一律记 not_evidenced 而非补齐".to_string(),
         );
 
         Self {
@@ -438,12 +434,11 @@ impl ReleaseAcceptance {
             }
         );
         let _ = writeln!(out, "- 判定: {}", self.verdict_statement());
+        let _ = writeln!(out, "- 生成时间: {}", utc_stamp(self.generated_at_ms));
         let _ = writeln!(
             out,
-            "- 生成时间: {}",
-            utc_stamp(self.generated_at_ms)
+            "\n| 验收项 | 要求 | 结论 | 原因码 | 证据 |\n|---|---|---|---|---|"
         );
-        let _ = writeln!(out, "\n| 验收项 | 要求 | 结论 | 原因码 | 证据 |\n|---|---|---|---|---|");
         for check in &self.checks {
             let detail = match &check.state {
                 ItemState::Passed => "—".to_string(),
@@ -472,13 +467,17 @@ impl ReleaseAcceptance {
             );
         }
 
-        let _ = writeln!(out, "\n**能力缺失三处一致**（比较范围: {}）", {
-            if self.alignment.required_slots.is_empty() {
-                "无额外保证".to_string()
-            } else {
-                self.alignment.required_slots.join(", ")
+        let _ = writeln!(
+            out,
+            "\n**能力缺失三处一致**（比较范围: {}）",
+            {
+                if self.alignment.required_slots.is_empty() {
+                    "无额外保证".to_string()
+                } else {
+                    self.alignment.required_slots.join(", ")
+                }
             }
-        });
+        );
         if !self.alignment.compared {
             let _ = writeln!(out, "- 未比对（缺少探测报告或准入结论）");
         } else if self.alignment.is_clean() {
@@ -533,7 +532,11 @@ impl ReleaseAcceptance {
 
         let _ = writeln!(out, "  \"checks\": [");
         for (index, check) in self.checks.iter().enumerate() {
-            let comma = if index + 1 == self.checks.len() { "" } else { "," };
+            let comma = if index + 1 == self.checks.len() {
+                ""
+            } else {
+                ","
+            };
             let (detail, code) = match &check.state {
                 ItemState::Passed => (String::new(), "null".to_string()),
                 ItemState::Failed { code, detail } | ItemState::NotEvidenced { code, detail } => {
@@ -577,11 +580,7 @@ impl ReleaseAcceptance {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let _ = writeln!(
-            out,
-            "  \"limitations\": [{}]",
-            join_json(&self.limitations)
-        );
+        let _ = writeln!(out, "  \"limitations\": [{}]", join_json(&self.limitations));
         out.push_str("}\n");
         out
     }
@@ -712,10 +711,8 @@ fn check_account_budget(evidence: &ReleaseEvidence) -> CheckItem {
         );
     }
     match &probe.gate {
-        BudgetGate::Allowed => CheckItem::new(item, ItemState::Passed).with(format!(
-            "账号 {}；预算闸门允许新派发",
-            probe.account_scope
-        )),
+        BudgetGate::Allowed => CheckItem::new(item, ItemState::Passed)
+            .with(format!("账号 {}；预算闸门允许新派发", probe.account_scope)),
         BudgetGate::Blocked { available_micros } => {
             CheckItem::new(item, ItemState::Passed).with(format!(
                 "账号 {}；闸门拒绝新派发（可用额 {available_micros} 微元，环境事实不计适配器缺陷）",
@@ -758,9 +755,36 @@ fn check_acceptance_evidence(evidence: &ReleaseEvidence, now_ms: i64) -> CheckIt
         );
     }
     let (pass, fail, na) = (
-        report.cases.iter().filter(|c| matches!(c.status, crate::adapter_conformance::CaseStatus::Pass { .. })).count(),
-        report.cases.iter().filter(|c| matches!(c.status, crate::adapter_conformance::CaseStatus::Fail { .. })).count(),
-        report.cases.iter().filter(|c| matches!(c.status, crate::adapter_conformance::CaseStatus::NotApplicable { .. })).count(),
+        report
+            .cases
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    crate::adapter_conformance::CaseStatus::Pass { .. }
+                )
+            })
+            .count(),
+        report
+            .cases
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    crate::adapter_conformance::CaseStatus::Fail { .. }
+                )
+            })
+            .count(),
+        report
+            .cases
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    crate::adapter_conformance::CaseStatus::NotApplicable { .. }
+                )
+            })
+            .count(),
     );
     CheckItem::new(item, ItemState::Passed)
         .with(format!("报告生成于 {}", utc_stamp(report.generated_at_ms)))
@@ -771,10 +795,7 @@ fn check_acceptance_evidence(evidence: &ReleaseEvidence, now_ms: i64) -> CheckIt
 fn check_log_redaction(evidence: &ReleaseEvidence) -> CheckItem {
     let item = ReleaseItem::LogRedaction;
     if evidence.log_lines.is_empty() {
-        return CheckItem::new(
-            item,
-            ItemState::unevidenced("no_logs", "没有提供日志样本"),
-        );
+        return CheckItem::new(item, ItemState::unevidenced("no_logs", "没有提供日志样本"));
     }
     let mut hits = 0usize;
     let mut kinds: Vec<&'static str> = Vec::new();
@@ -794,8 +815,10 @@ fn check_log_redaction(evidence: &ReleaseEvidence) -> CheckItem {
         redacted_lines.push(format!("第 {} 行: {clean}", index + 1));
     }
     if hits == 0 {
-        return CheckItem::new(item, ItemState::Passed)
-            .with(format!("扫描 {} 行，未发现凭据形态", evidence.log_lines.len()));
+        return CheckItem::new(item, ItemState::Passed).with(format!(
+            "扫描 {} 行，未发现凭据形态",
+            evidence.log_lines.len()
+        ));
     }
     let mut check = CheckItem::new(
         item,
@@ -930,7 +953,7 @@ mod tests {
     use crate::adapter_conformance::CaseOutcome;
     use crate::capability_dispatch::{CapabilityNotice, Filtered};
     use crate::conformance_report::{CapabilityRow, REPORT_SCHEMA};
-    use crate::domain::execution::{SupportLevel, PROTOCOL_ID};
+    use crate::domain::execution::{PROTOCOL_ID, SupportLevel};
 
     const NOW: i64 = 1_763_000_000_000;
 
@@ -952,7 +975,11 @@ mod tests {
         }
     }
 
-    fn report(rows: Vec<CapabilityRow>, enablement: Enablement, generated_at_ms: i64) -> SectionedReport {
+    fn report(
+        rows: Vec<CapabilityRow>,
+        enablement: Enablement,
+        generated_at_ms: i64,
+    ) -> SectionedReport {
         SectionedReport {
             schema: REPORT_SCHEMA.to_string(),
             adapter_id: "adapter-x".to_string(),
@@ -1040,8 +1067,12 @@ mod tests {
         let mut evidence = passing_evidence();
         evidence.stop_confirmed = Some(true);
         evidence.durable_intents = None;
-        let acceptance =
-            ReleaseAcceptance::evaluate(&evidence, &required_l3(), Some(&selection_admitting()), NOW);
+        let acceptance = ReleaseAcceptance::evaluate(
+            &evidence,
+            &required_l3(),
+            Some(&selection_admitting()),
+            NOW,
+        );
         let item = acceptance.item(ReleaseItem::StopRestart).unwrap();
         assert_eq!(item.state.as_str(), "not_evidenced");
         assert_eq!(item.state.code(), Some("restart_intent_unchecked"));
@@ -1058,9 +1089,7 @@ mod tests {
             ),
             (
                 ReleaseItem::StopRestart,
-                Box::new(|e: &mut ReleaseEvidence| {
-                    e.operations.retain(|op| op != "cancel")
-                }),
+                Box::new(|e: &mut ReleaseEvidence| e.operations.retain(|op| op != "cancel")),
                 "no_cancel_operation",
             ),
             (
@@ -1108,7 +1137,11 @@ mod tests {
                 Some(&selection_admitting()),
                 NOW,
             );
-            assert_eq!(acceptance.verdict(), ReleaseVerdict::Blocked, "{code} 应阻断");
+            assert_eq!(
+                acceptance.verdict(),
+                ReleaseVerdict::Blocked,
+                "{code} 应阻断"
+            );
             let check = acceptance.item(item).unwrap();
             assert_eq!(check.state.code(), Some(code), "{code} 原因码不符");
             assert!(!acceptance.can_mark_supported());
@@ -1123,8 +1156,12 @@ mod tests {
             "Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz012345".to_string(),
             "\"api_key\": \"AKIAIOSFODNN7EXAMPLE\"".to_string(),
         ];
-        let acceptance =
-            ReleaseAcceptance::evaluate(&evidence, &required_l3(), Some(&selection_admitting()), NOW);
+        let acceptance = ReleaseAcceptance::evaluate(
+            &evidence,
+            &required_l3(),
+            Some(&selection_admitting()),
+            NOW,
+        );
         let check = acceptance.item(ReleaseItem::LogRedaction).unwrap();
         assert_eq!(check.state.as_str(), "fail");
         assert_eq!(check.state.code(), Some("credentials_in_logs"));
@@ -1161,8 +1198,12 @@ mod tests {
     fn empty_logs_are_unevidenced_not_passing() {
         let mut evidence = passing_evidence();
         evidence.log_lines.clear();
-        let acceptance =
-            ReleaseAcceptance::evaluate(&evidence, &required_l3(), Some(&selection_admitting()), NOW);
+        let acceptance = ReleaseAcceptance::evaluate(
+            &evidence,
+            &required_l3(),
+            Some(&selection_admitting()),
+            NOW,
+        );
         let check = acceptance.item(ReleaseItem::LogRedaction).unwrap();
         assert_eq!(check.state.as_str(), "not_evidenced");
         assert_eq!(check.state.code(), Some("no_logs"));
@@ -1179,7 +1220,11 @@ mod tests {
         let acceptance =
             ReleaseAcceptance::evaluate(&stale, &required_l3(), Some(&selection_admitting()), NOW);
         assert_eq!(
-            acceptance.item(ReleaseItem::AcceptanceEvidence).unwrap().state.code(),
+            acceptance
+                .item(ReleaseItem::AcceptanceEvidence)
+                .unwrap()
+                .state
+                .code(),
             Some("stale_report")
         );
 
@@ -1191,8 +1236,12 @@ mod tests {
             },
             NOW,
         ));
-        let acceptance =
-            ReleaseAcceptance::evaluate(&blocked, &required_l3(), Some(&selection_admitting()), NOW);
+        let acceptance = ReleaseAcceptance::evaluate(
+            &blocked,
+            &required_l3(),
+            Some(&selection_admitting()),
+            NOW,
+        );
         let check = acceptance.item(ReleaseItem::AcceptanceEvidence).unwrap();
         assert_eq!(check.state.code(), Some("adapter_blocked"));
         assert_eq!(acceptance.verdict(), ReleaseVerdict::Blocked);
@@ -1207,8 +1256,12 @@ mod tests {
                 available_micros: 0,
             },
         });
-        let acceptance =
-            ReleaseAcceptance::evaluate(&evidence, &required_l3(), Some(&selection_admitting()), NOW);
+        let acceptance = ReleaseAcceptance::evaluate(
+            &evidence,
+            &required_l3(),
+            Some(&selection_admitting()),
+            NOW,
+        );
         let check = acceptance.item(ReleaseItem::AccountBudget).unwrap();
         assert!(check.state.is_passed());
         assert!(check.evidence[0].contains("环境事实不计适配器缺陷"));
@@ -1259,10 +1312,13 @@ mod tests {
     fn probe_saying_missing_while_admission_admits_is_a_divergence() {
         let required = required_l3();
         let report = report(
-            vec![row("recovery", CapabilityVerdict::CasesNotPassing {
-                cases: vec!["cancel-request-vs-confirm".to_string()],
-                worst: "fail".to_string(),
-            })],
+            vec![row(
+                "recovery",
+                CapabilityVerdict::CasesNotPassing {
+                    cases: vec!["cancel-request-vs-confirm".to_string()],
+                    worst: "fail".to_string(),
+                },
+            )],
             Enablement::Enabled,
             NOW,
         );
@@ -1279,8 +1335,7 @@ mod tests {
         );
         let mut evidence = passing_evidence();
         evidence.report = Some(report);
-        let acceptance =
-            ReleaseAcceptance::evaluate(&evidence, &required, Some(&selection), NOW);
+        let acceptance = ReleaseAcceptance::evaluate(&evidence, &required, Some(&selection), NOW);
         assert_eq!(acceptance.verdict(), ReleaseVerdict::Blocked);
         assert!(acceptance.verdict_statement().contains("alignment="));
     }
@@ -1290,9 +1345,12 @@ mod tests {
         let required = required_l3();
         let report = report(
             vec![
-                row("recovery", CapabilityVerdict::Verified {
-                    cases: vec!["cancel-request-vs-confirm".to_string()],
-                }),
+                row(
+                    "recovery",
+                    CapabilityVerdict::Verified {
+                        cases: vec!["cancel-request-vs-confirm".to_string()],
+                    },
+                ),
                 row(
                     "reliable_observation",
                     CapabilityVerdict::DeclaredUnsupported,
@@ -1409,8 +1467,12 @@ mod tests {
         let mut evidence = passing_evidence();
         evidence.dedup_retention_ms = None;
         evidence.authorization_refused = None;
-        let acceptance =
-            ReleaseAcceptance::evaluate(&evidence, &required_l3(), Some(&selection_admitting()), NOW);
+        let acceptance = ReleaseAcceptance::evaluate(
+            &evidence,
+            &required_l3(),
+            Some(&selection_admitting()),
+            NOW,
+        );
         let markdown = acceptance.to_markdown();
         let json = acceptance.to_json();
         for code in ["no_dedup_retention", "authorization_unchecked"] {

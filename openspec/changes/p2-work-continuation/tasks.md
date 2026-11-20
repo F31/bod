@@ -445,6 +445,16 @@
     `docs/spec-notes/p2-fault-acceptance.md`。
 - [ ] 5.2 与手工交接做同类任务对照，记录接管就绪耗时、员工中断数、重复执行数与人工补充时间，验证报告含样本数与未完成项且不预设提升比例。
 - [ ] 5.3 汇总 P2 出口证据与支持矩阵，验证「与手工交接对比」「停旧写入/脏文件/丢回包用例通过」有可核对报告，其他运行组合保持 Planned。
+  - 已就位（2026-11-20，`cargo test -p bod-app --test p2_exit_evidence` → 6 passed）：
+    `docs/reports/p2-exit-evidence.md` 汇总机内证据（4.1—4.3、4.5、5.1）与两类缺口；
+    支持矩阵追加 §8（接续/双运行时/对照指标 `Planned`，三项机内已实测记 `Unverified`，
+    无一行 `Supported`）。`tests/p2_exit_evidence.rs` 做漂移检查：报告点名的 case 必须在
+    `p2_fault_acceptance.rs` 里、`--test` 目标必须存在、§8 的 `Planned` 行不得带证据、
+    结论为 `blocked` 时 P2 门禁不得是 `implemented`。已反向验证：把结论改成 `ready`
+    该检查立即失败。
+  - **未勾选**：报告结论 `blocked`，`阻塞项: 4.4, 5.2`。5.3 的验收要求「与手工交接对比」
+    有可核对报告，而 5.2 的四项指标需人工数据；4.4 缺第二个运行配置与人工耗时。
+    两项数据到位后按报告 §8 改结论并勾选，不提前宣布出口达成。
 
 ## Workflow follow-up
 

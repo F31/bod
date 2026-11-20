@@ -234,6 +234,11 @@
   更强）；`KeepDirty` 的 `dirty_paths` 与 `changed_paths` 一致。**这不是门禁结论**：
   `gates.yaml` 未改，G-28—G-30/G-39—G-41 仍 planned，转 implemented 由 5.3 裁定；
   「B 不可用」用 `Enablement::Blocked` 表达而非真下线。详见 `p2-fault-acceptance.md`。
+  切片 5.3 落地出口汇总 `docs/reports/p2-exit-evidence.md`（结论 `blocked`，阻塞项 4.4/5.2）：
+  汇总 4.1—4.3、4.5、5.1 的机内证据与两类「必须由人跑一遍」的缺口；支持矩阵追加 §8
+  （接续/双运行时/对照指标 `Planned`，三项机内已实测记 `Unverified`，无一行 `Supported`）。
+  `tests/p2_exit_evidence.rs` 做漂移检查（6 条），并反向验证过：把结论改成 `ready` 立即失败。
+  **5.3 未勾选**——验收要求的「与手工交接对比」依赖 5.2 的人工数据，4.4 缺第二运行配置与人工耗时。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

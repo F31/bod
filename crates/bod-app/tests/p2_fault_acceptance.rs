@@ -28,8 +28,8 @@ use bod_app::handoff_package::{CombinationKey, HandoffLevel, TestedCombination};
 use bod_app::invocation::{StartTransport, StartVerdict, reconcile_invocation, submit_start};
 use bod_app::lifecycle_recovery::{CaseError, CaseRequest, open_case, resolve_case};
 use bod_app::manager_transfer::{
-    AppointRequest, ManagementAppointment, ManagementCommand, ManagementCommandSet,
-    ManagementGate, ManagementScope, ManagementTicket, TransferError,
+    AppointRequest, ManagementAppointment, ManagementCommand, ManagementCommandSet, ManagementGate,
+    ManagementScope, ManagementTicket, TransferError,
 };
 use bod_app::store::SqliteStore;
 use bod_app::workspace_safety::{
@@ -65,10 +65,8 @@ impl TempRoot {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|value| value.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "bod-p2-fault-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("bod-p2-fault-{tag}-{}-{nanos}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("创建临时目录");
         Self { path }
@@ -172,10 +170,7 @@ fn case_stop_old_writer_rejects_foreign_diff_and_keeps_the_scene() {
     .expect("新执行写文件");
 
     // 新工作包的写范围只覆盖自己的目录。
-    let scope = WriteScope::new(
-        vec!["crates/bod-app/src/new_work/".to_string()],
-        Vec::new(),
-    );
+    let scope = WriteScope::new(vec!["crates/bod-app/src/new_work/".to_string()], Vec::new());
     let verdict = gate_diff(
         &repo,
         &scope,
@@ -288,7 +283,10 @@ fn case_lost_reply_reconciles_without_a_second_invocation() {
         other => panic!("丢回包必须进 Unknown，实际 {other:?}"),
     }
     assert_eq!(
-        store.list_invocations(COMPANY).expect("列 invocation").len(),
+        store
+            .list_invocations(COMPANY)
+            .expect("列 invocation")
+            .len(),
         1,
         "回包丢失不得新建第二条 invocation"
     );
@@ -303,7 +301,10 @@ fn case_lost_reply_reconciles_without_a_second_invocation() {
         "对账后必须得到真实状态"
     );
     assert_eq!(
-        store.list_invocations(COMPANY).expect("列 invocation").len(),
+        store
+            .list_invocations(COMPANY)
+            .expect("列 invocation")
+            .len(),
         1,
         "对账不得复制出第二条 invocation"
     );
@@ -322,7 +323,10 @@ fn case_lost_reply_reconciles_without_a_second_invocation() {
     };
     let opened = open_case(&mut store, &req, NOW_MS + 30).expect("开案应成功");
     let again = open_case(&mut store, &req, NOW_MS + 40).expect("重复开案应返回原案");
-    assert_eq!(opened.case_id, again.case_id, "同一逻辑动作键不应开出第二个案件");
+    assert_eq!(
+        opened.case_id, again.case_id,
+        "同一逻辑动作键不应开出第二个案件"
+    );
     assert_eq!(
         store
             .list_reconciliation_cases(COMPANY, true)
@@ -341,8 +345,14 @@ fn case_lost_reply_reconciles_without_a_second_invocation() {
     )
     .expect("结案应成功");
     assert!(resolved.known_evidence.contains("裁决："));
-    let err = resolve_case(&mut store, COMPANY, &opened.case_id, "再次裁决", NOW_MS + 60)
-        .expect_err("已结案不得再结");
+    let err = resolve_case(
+        &mut store,
+        COMPANY,
+        &opened.case_id,
+        "再次裁决",
+        NOW_MS + 60,
+    )
+    .expect_err("已结案不得再结");
     assert!(matches!(err, CaseError::CaseNotOpen(_)), "实际 {err:?}");
 }
 
@@ -368,7 +378,12 @@ fn case_crash_mid_handoff_never_reuses_epoch() {
     // 恢复后旧票证不能再用：撤任会递增 epoch，旧凭据连 epoch 都对不上头指针。
     let mut gate = ManagementGate::new(&store, COMPANY, AUDIENCE);
     let refused = gate
-        .submit(&old_ticket, "cmd-old-51", "2026-11-20T12:06:00Z", NOW_MS + 2)
+        .submit(
+            &old_ticket,
+            "cmd-old-51",
+            "2026-11-20T12:06:00Z",
+            NOW_MS + 2,
+        )
         .expect_err("已撤任的票证必须被拒");
     match &refused {
         TransferError::Rejected { code, .. } => {
@@ -397,7 +412,12 @@ fn case_crash_mid_handoff_never_reuses_epoch() {
     // 新票证可用：交接完成后管理命令能正常落实。
     let new_ticket = ticket(&new, ManagementCommand::ReadStatus);
     let verified = gate
-        .submit(&new_ticket, "cmd-new-51", "2026-11-20T12:07:00Z", NOW_MS + 4)
+        .submit(
+            &new_ticket,
+            "cmd-new-51",
+            "2026-11-20T12:07:00Z",
+            NOW_MS + 4,
+        )
         .expect("新经理的票证应可用");
     assert_eq!(verified.authority_epoch, new.authority_epoch);
     assert!(!verified.replayed, "首次提交不能被当成重放");
@@ -491,16 +511,10 @@ fn case_target_runtime_unavailable_yields_no_binding() {
     let HandoffRefusal::Capability(selection) = refusal else {
         panic!("应先被能力门拒绝，而不是缺证据：{refusal:?}");
     };
-    assert!(
-        !selection.has_candidate(),
-        "被禁用的运行时不能出现在候选里"
-    );
+    assert!(!selection.has_candidate(), "被禁用的运行时不能出现在候选里");
     assert_eq!(selection.notice.code, "BOD_CAPABILITY_UNSATISFIED");
     assert!(
-        selection
-            .notice
-            .message
-            .contains("禁用"),
+        selection.notice.message.contains("禁用"),
         "提示必须说明是禁用：「{}」",
         selection.notice.message
     );

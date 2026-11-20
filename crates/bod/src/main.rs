@@ -334,9 +334,7 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(out)
         }
         [cmd, rest @ ..] if cmd == "conformance" => conformance(rest),
-        [cmd, sub, rest @ ..] if cmd == "adapter" && sub == "release-check" => {
-            release_check(rest)
-        }
+        [cmd, sub, rest @ ..] if cmd == "adapter" && sub == "release-check" => release_check(rest),
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }
 }
@@ -531,7 +529,9 @@ fn release_check(flags: &[String]) -> Result<String, String> {
                 index += 2;
             }
             other => {
-                return Err(format!("adapter release-check 不支持参数 {other}\n\n{USAGE}"));
+                return Err(format!(
+                    "adapter release-check 不支持参数 {other}\n\n{USAGE}"
+                ));
             }
         }
     }
@@ -578,8 +578,8 @@ fn release_check(flags: &[String]) -> Result<String, String> {
         log_lines: Vec::new(),
     };
     if let Some(path) = &logs_path {
-        let text = fs::read_to_string(path)
-            .map_err(|err| format!("读取日志 {path} 失败：{err}"))?;
+        let text =
+            fs::read_to_string(path).map_err(|err| format!("读取日志 {path} 失败：{err}"))?;
         evidence.log_lines = text.lines().map(|line| line.to_string()).collect();
     }
 
@@ -861,7 +861,10 @@ mod tests {
         // 本机适配器未声明去重保留期，这一项必须是 fail 而不是「大概可以」。
         assert!(out.contains("no_dedup_retention"), "{out}");
         assert!(out.contains("结论: blocked"), "{out}");
-        assert!(!out.contains("结论: releasable"), "证据不足时不得给出可发布结论:\n{out}");
+        assert!(
+            !out.contains("结论: releasable"),
+            "证据不足时不得给出可发布结论:\n{out}"
+        );
         // 三处一致必须真的比对过，并列出范围。
         assert!(out.contains("能力缺失三处一致"), "{out}");
         assert!(out.contains("recovery"), "{out}");
@@ -870,10 +873,8 @@ mod tests {
     #[test]
     fn release_check_flags_credentials_in_logs_without_echoing_them() {
         let n = FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "bod-release-log-{}-{n}.log",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("bod-release-log-{}-{n}.log", std::process::id()));
         fs::write(
             &path,
             "boot ok\nAuthorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz012345\n",
