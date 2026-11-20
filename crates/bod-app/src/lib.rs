@@ -14,6 +14,7 @@ pub mod cas;
 pub mod claim_concurrency;
 pub mod clarity_dialogue;
 pub mod cleanup_recovery;
+pub mod coding_integration;
 pub mod config;
 pub mod context_handoff;
 pub mod control_api;

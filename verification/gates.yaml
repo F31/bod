@@ -108,6 +108,22 @@
   status: implemented
   evidence: cargo test -p bod-app context_handoff
   note: 装配为内存值类型 + 只读装配，未落 workspaces/context_bundles 表（4.x 直派闭环再落库）；清单摘要由规范化正文派生，省略项与引用按稳定键排序，声明顺序不影响摘要
+- id: I-18
+  kind: invariant
+  requirement: 不同角色不能并发覆盖仓库共享指令文件
+  module: bod-app::coding_integration
+  tests: bod-app::coding_integration::tests::invariant_i_18_different_roles_cannot_concurrently_overwrite_shared_instructions
+  status: implemented
+  evidence: cargo test -p bod-app coding_integration
+  note: SharedInstructionLedger 对同一路径只许当前 holder 角色基于确定 base revision 修订；其他角色的候选进入 rejected 留痕，不改写当前修订
+- id: I-20
+  kind: invariant
+  requirement: 并发规则修订检查基础版本，不最后写覆盖
+  module: bod-app::coding_integration
+  tests: bod-app::coding_integration::tests::invariant_i_20_concurrent_rule_revisions_check_base_revision
+  status: implemented
+  evidence: cargo test -p bod-app coding_integration
+  note: 规则修订接受跨角色排队但每次必须精确命中当前 base；HEAD/latest 被拒，陈旧 base 进入 rejected 且不改变当前修订
 - id: I-26
   kind: invariant
   requirement: 控制面常规协调不依赖协调 Agent 在线或模型返回

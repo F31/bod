@@ -42,7 +42,8 @@
 ## 4. 直派闭环与工作台
 
 - [ ] 4.1 实现首次使用路径与自动最小工作约定，验证无 Team/WorkPackage/Run 配置即可完成一次真实仓库指派（`invariant_i_10`）。
-- [ ] 4.2 打通真实仓库实现→本地验证→人工/预授权接受闭环，验证 `bod-app::coding_integration` 的 `invariant_i_18`、`invariant_i_20`：接受绑定确定提交/规格/报告，桌面重启后仍可查询。
+- [x] 4.2 打通真实仓库实现→本地验证→人工/预授权接受闭环，验证 `bod-app::coding_integration` 的 `invariant_i_18`、`invariant_i_20`：接受绑定确定提交/规格/报告，桌面重启后仍可查询。
+  - 证据（2026-11-20，`cargo test -p bod-app coding_integration` → 9 passed，真实 git 仓库 + 文件型 SQLite）：`SharedInstructionLedger` 对同一路径按 holder 角色串行修订，其他角色候选进 `rejected()` 且不覆盖（I-18），规则修订 base 必须精确命中当前 `ir-<sha256>`、`HEAD` 被拒（I-20）。`register_git_candidate` 绑定 `git rev-parse HEAD` 的 40 位提交与外部定位 `git:<path>#<sha>`，只写 Pending。`record_local_verification` 只接受匹配提交/规则/环境且由非实现者出具的报告，否则落 `NeedsRevision`；`accept_delivery` 复用 P0 `artifact_acceptance::accept`，人工 `Accepted`、预授权 Agent `AutoAccepted`、实现者自批 `SelfApprovalDenied`。`human_acceptance_binds_commit_spec_report_and_survives_restart` 丢弃 store 后从同一 DB 文件重开，五项绑定/证据/定位全部一致。G-6/G-9 仍由 P0 模块承担，本切片不重复登记。详见 `docs/spec-notes/p1-delivery.md`。
 - [ ] 4.3 实现取消请求/确认停止分离与 Unknown 对账入口，验证 cancel_ack 不释放占用、不新建 Attempt，界面显示待核实与处理人（`invariant_i_11`）。
 - [ ] 4.4 实现本地验证报告绑定与备份核验，验证自报通过但无报告时验收保持 Pending/NeedsRevalidation，备份缺 WAL/CAS 引用不标可恢复（G-6、G-9）。
 - [ ] 4.5 实现工作台首页四问与任务页证据视图（只投影宿主事实、无第二 DB），验证待决定事项含阻塞主体、所需决定与可采取动作，任务页显示拒绝原因与证据（`invariant_i_55`）。
