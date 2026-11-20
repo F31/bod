@@ -4,7 +4,17 @@
 
 ## 1. 交接包与规范编码
 
-- [ ] 1.1 实现 HandoffPackage schema、L1/L2/L3 等级与准入判定，验证未测组合的 L3 请求被拒绝且可降级为 L1/L2。
+- [x] 1.1 实现 HandoffPackage schema、L1/L2/L3 等级与准入判定，验证未测组合的 L3 请求被拒绝且可降级为 L1/L2。
+  - 证据（2026-11-20，`cargo test -p bod-app handoff_package` → 13 passed）：新增
+    `bod-app::handoff_package`，固定 `bod.handoff/v1` 与身份骨架，`HandoffLevel` L1<L2<L3；
+    `admit_level` 为纯判定，L1/L2 无需已测组合，L3 必须命中一条 `RuntimeObserved` 以上、
+    来源上限达 `RuntimeObserved` 且未过期的同组合记录，否则回显 `UntestedCombination`
+    与缺失维度并拒绝；`admit_with_fallback` 只在显式选择更低等级时返回 `Downgraded`，
+    同级/升格原样拒绝。组合键按运行时 + 排序去重 tools + 任务类别生成，任一维度变化即不命中。
+    复用 P0 `EvidenceSource::ceiling()` / `EvidenceLevel::rank()` 防自报与探测级证据冒充已测；
+    决策类型无主体/命令/凭据/epoch，准入不授予管理权。详见 `docs/spec-notes/p2-handoff.md`。
+  - 编号差异如实记录：tasks 把 I-46/I-47 分别写在 1.2/1.5，而 §39.10 权威语义不同，
+    本切片不写 `gates.yaml`；P2 全部引用留到出口 5.3 统一补齐后再切 `BINDING_SOURCES`。
 - [ ] 1.2 实现规范编码与 payload_digest（摘要不递归计入自身）及原始字节摘要，验证跨语言测试向量得到一致结果（`invariant_i_46`）。
 - [ ] 1.3 实现宿主事实骨架与 Agent 叙述分栏、done 无证据保持 unverified，验证叙述不能覆盖账本或外部终态。
 - [ ] 1.4 实现部分快照（missing/来源/完整性状态）与版本/snapshot_seq 绑定，验证崩溃样本可登记且无关元数据变化不触发失效。

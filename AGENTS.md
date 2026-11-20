@@ -88,6 +88,10 @@
   `p0-support-matrix.md` §7 追加 P1 行并统一保持 `Target`（归档评审前不升 Supported）。
   本 Change 已于 2026-11-20 归档，4 份 delta 已同步 `openspec/specs/`；支持矩阵 P1 行保持
   `Target`，升格 `Supported` 仍需独立评审确认。
+  P2 工作接续 Change 已开工：切片 1.1 落地 `bod-app::handoff_package` 的 L1/L2/L3 等级骨架与
+  纯准入判定（13 项命名用例）；未测组合的 L3 被拒并说明缺失证据，允许显式降级 L1/L2，
+  自报/探测/过期证据不得冒充已测组合，准入不授予管理权。P2 的 I/G 绑定仍全部 planned，
+  `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 
