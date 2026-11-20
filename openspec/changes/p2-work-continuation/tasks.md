@@ -37,7 +37,19 @@
     规范编码求摘要，冲突列表为派生视图不写入 payload。边界：不持久化、不判定接续、不校验授权；
     §39.10 把 I-46 映射到 `manager_transfer`（3.x 才有），本切片用例仅作支撑证据，
     不写 `gates.yaml`。详见 `docs/spec-notes/p2-facts.md`。
-- [ ] 1.4 实现部分快照（missing/来源/完整性状态）与版本/snapshot_seq 绑定，验证崩溃样本可登记且无关元数据变化不触发失效。
+- [x] 1.4 实现部分快照（missing/来源/完整性状态）与版本/snapshot_seq 绑定，验证崩溃样本可登记且无关元数据变化不触发失效。
+  - 证据（2026-11-20，`cargo test -p bod-app handoff_snapshot` → 14 passed）：新增
+    `bod-app::handoff_snapshot` 与迁移 `007_handoff.sql`（`handoff_snapshots`，只建表建索引）。
+    `CaptureSource` 区分正常交接与三种尽力快照；`MissingPart` 强制带原因（未捕获/捕获失败/
+    不可导出/已过滤）；`IntegrityStatus` 中只有 `verified` 算完整，`unverified` 不算通过；
+    `Completeness` 由缺项与片段核验状态派生，payload 摘要只从已核验的 `payload` 片段报告。
+    登记用文件型 SQLite 实测：崩溃样本关开后读回一致；同键同内容幂等（行数仍 1、登记时间不变），
+    同键不同内容报 `SnapshotKeyConflict` 且不覆盖既有现场；冗余 `completeness` 被改则 `CorruptRow`。
+    `evaluate_binding` 只比 input/work_package/scene revision 与 `snapshot_seq`：三者变化才 `Drifted`
+    并使工作失效，序号前进为 `Superseded`（不失效），序号倒退直接报错不猜；标题/标签/评论数/
+    更新时间只进 `metadata_changes`，实测四条全列出仍判 `Current`。迁移计数断言同步 6→7、37→38。
+    边界：不判定接续、不做凭据过滤、不接工作台、不写第二业务库；不新增 `gates.yaml` 条目
+    （P2 绑定仍 planned，`invariant_i_47` 属 1.5）。详见 `docs/spec-notes/p2-snapshot.md`。
 - [ ] 1.5 实现现场清单边界（submodule/LFS/锁文件/冲突/密钥过滤）与交接事件类型，验证 `invariant_i_47`：包内无凭据值，重复 accept 返回同一结果。
 
 ## 2. 接管事务

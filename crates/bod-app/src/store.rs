@@ -25,6 +25,7 @@ use crate::domain::model::{
 };
 use crate::domain::queue::{EffectStatus, OutboxDelivery, QueueState, WakeReceipt, WorkQueueEntry};
 use crate::domain::{DenialReason, DomainId, Version};
+use crate::handoff_snapshot::HandoffSnapshotRow;
 use crate::recovery_models::{
     BackupRecord, BackupStatus, CaseState, CleanupAbandon, CleanupRequest, CleanupState,
     CleanupTargetKind, MigrationRecord, MigrationRisk, ReconciliationCase, RevisionPin,
@@ -35,7 +36,8 @@ use std::fs;
 use std::path::Path;
 
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
-/// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理；
+/// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
+/// 007 为 P2 交接快照；
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
@@ -44,6 +46,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/004_execution.sql"),
     include_str!("../migrations/005_artifacts.sql"),
     include_str!("../migrations/006_recovery.sql"),
+    include_str!("../migrations/007_handoff.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -54,6 +57,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "004_execution.sql",
     "005_artifacts.sql",
     "006_recovery.sql",
+    "007_handoff.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -1103,6 +1107,114 @@ impl SqliteStore {
     ) -> Result<Option<CleanupRequest>, StoreError> {
         read_cleanup_request(&self.conn, company_id, kind, target_id)
     }
+
+    /// 插入一条交接快照。同 `(company_id, snapshot_key)` 已存在时**不做任何修改**并返回 `false`：
+    /// 部分现场一旦登记就不得被后续登记覆盖（§18.11），冲突由调用方读回后判定。
+    pub fn insert_handoff_snapshot(&self, row: &HandoffSnapshotRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO handoff_snapshots (
+                company_id, snapshot_key, project_id, issue_id, work_package_revision,
+                source_attempt_id, level, source, completeness, missing_json, integrity_json,
+                input_revision, scene_revision, snapshot_seq, payload_digest, captured_at,
+                registered_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(company_id, snapshot_key) DO NOTHING",
+            params![
+                row.company_id,
+                row.snapshot_key,
+                row.project_id,
+                row.issue_id,
+                row.work_package_revision,
+                row.source_attempt_id,
+                row.level,
+                row.source,
+                row.completeness,
+                row.missing_json,
+                row.integrity_json,
+                row.input_revision,
+                row.scene_revision,
+                row.snapshot_seq as i64,
+                row.payload_digest,
+                row.captured_at,
+                row.registered_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// 按 `(company_id, snapshot_key)` 读取已登记快照。
+    pub fn get_handoff_snapshot(
+        &self,
+        company_id: &str,
+        snapshot_key: &str,
+    ) -> Result<Option<HandoffSnapshotRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{HANDOFF_SNAPSHOT_SELECT} WHERE company_id = ?1 AND snapshot_key = ?2"),
+                params![company_id, snapshot_key],
+                map_handoff_snapshot_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 列出某 Company 的全部快照（按 snapshot_seq 升序），供人工恢复查看。
+    pub fn list_handoff_snapshots(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<HandoffSnapshotRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{HANDOFF_SNAPSHOT_SELECT} WHERE company_id = ?1 ORDER BY snapshot_seq"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id], map_handoff_snapshot_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 只列部分快照：崩溃、预算耗尽与强制停止后留给人工恢复的现场。
+    pub fn list_partial_handoff_snapshots(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<HandoffSnapshotRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{HANDOFF_SNAPSHOT_SELECT}
+             WHERE company_id = ?1 AND completeness = 'partial' ORDER BY snapshot_seq"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id], map_handoff_snapshot_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+}
+
+/// 交接快照的读取列；`list_*` 与 `get_*` 共用，避免列序漂移。
+const HANDOFF_SNAPSHOT_SELECT: &str = "SELECT company_id, snapshot_key, project_id, issue_id,
+        work_package_revision, source_attempt_id, level, source, completeness, missing_json,
+        integrity_json, input_revision, scene_revision, snapshot_seq, payload_digest, captured_at,
+        registered_at_ms
+     FROM handoff_snapshots";
+
+fn map_handoff_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HandoffSnapshotRow> {
+    Ok(HandoffSnapshotRow {
+        company_id: row.get(0)?,
+        snapshot_key: row.get(1)?,
+        project_id: row.get(2)?,
+        issue_id: row.get(3)?,
+        work_package_revision: row.get(4)?,
+        source_attempt_id: row.get(5)?,
+        level: row.get(6)?,
+        source: row.get(7)?,
+        completeness: row.get(8)?,
+        missing_json: row.get(9)?,
+        integrity_json: row.get(10)?,
+        input_revision: row.get(11)?,
+        scene_revision: row.get(12)?,
+        snapshot_seq: row.get::<_, i64>(13)? as u64,
+        payload_digest: row.get(14)?,
+        captured_at: row.get(15)?,
+        registered_at_ms: row.get(16)?,
+    })
 }
 
 /// 一个业务命令只开一个 Company UnitOfWork；BEGIN IMMEDIATE 串行化写入。
@@ -3221,8 +3333,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 37,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 表"
+            count, 38,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 1 张 P2 表"
         );
     }
 

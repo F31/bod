@@ -29,6 +29,7 @@ pub mod fault_matrix;
 pub mod first_use;
 pub mod handoff_facts;
 pub mod handoff_package;
+pub mod handoff_snapshot;
 pub mod host_handshake;
 pub mod invocation;
 pub mod lifecycle_recovery;

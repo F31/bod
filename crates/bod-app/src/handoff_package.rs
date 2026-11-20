@@ -36,6 +36,16 @@ impl HandoffLevel {
     pub const fn requires_tested_combination(self) -> bool {
         matches!(self, Self::L3)
     }
+
+    /// 从持久化字符串还原；未知等级返回 `None`（不猜测、不默认成 L1）。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "L1" => Some(Self::L1),
+            "L2" => Some(Self::L2),
+            "L3" => Some(Self::L3),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for HandoffLevel {
