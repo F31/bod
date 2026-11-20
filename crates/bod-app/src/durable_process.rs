@@ -279,6 +279,16 @@ impl DurableProcessAdapter {
         self.descriptor = build_descriptor(&self.config, now_ms);
     }
 
+    /// 换成 conformance 用的含凭据负载。与 `local_process` 共用同一份脚本定义，
+    /// 避免两个真实配置在「什么算敏感样本」上各说一套。
+    pub fn use_conformance_payload(&mut self, now_ms: i64) {
+        let hint = self.config.executable.clone();
+        self.set_args(
+            crate::local_process::LocalProcessConfig::conformance_script(&hint),
+            now_ms,
+        );
+    }
+
     fn session_dir(&self, invocation_id: &str) -> PathBuf {
         self.config.root.join(session_dir_name(invocation_id))
     }
@@ -884,8 +894,10 @@ mod tests {
         first.set_args(
             script(
                 &first,
-                "import time\nprint('a', flush=True)\ntime.sleep(0.6)\nprint('b', flush=True)\ntime.sleep(0.6)",
-                "console.log('a'); setTimeout(()=>{console.log('b')},600); setTimeout(()=>{},1200);",
+                // 第二行之后留足存活时间：本测试要跨「宿主退出 → 新宿主接管」两个时刻，
+                // 进程若在 inspect 之前退出，会被正确判成 Unknown，测试就测不到接管。
+                "import time\nprint('a', flush=True)\ntime.sleep(0.6)\nprint('b', flush=True)\ntime.sleep(5)",
+                "console.log('a'); setTimeout(()=>{console.log('b')},600); setTimeout(()=>{},5600);",
             ),
             now_ms(),
         );
@@ -1131,7 +1143,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 对真实适配器跑完整 conformance：核心用例必须真过，闸门类用例如实 not_applicable。
+    /// 对真实适配器跑完整 conformance：闸门类三条都必须有证据，其余故障类如实 not_applicable。
     #[test]
     fn live_suite_passes_core_cases_and_reports_gate_cases_as_not_applicable() {
         let root = temp_root("suite");
@@ -1139,14 +1151,7 @@ mod tests {
             eprintln!("跳过：本机没有 python/node");
             return;
         };
-        adapter.set_args(
-            script(
-                &adapter,
-                "import time\nprint('ok', flush=True)\ntime.sleep(0.2)",
-                "console.log('ok'); setTimeout(()=>{},200);",
-            ),
-            now_ms(),
-        );
+        adapter.use_conformance_payload(now_ms());
         let report = crate::adapter_conformance::run_live_suite(&mut adapter, now_ms());
         let (pass, fail, na) = report.summary();
         assert_eq!(
@@ -1155,18 +1160,22 @@ mod tests {
             "真实适配器不得有用例失败：\n{}",
             report.to_markdown()
         );
-        assert!(pass >= 5, "核心用例应真过：\n{}", report.to_markdown());
-        assert_eq!(na, 9, "九条需故障注入的用例必须如实记 not_applicable");
+        assert!(pass >= 7, "核心用例应真过：\n{}", report.to_markdown());
+        assert_eq!(
+            na,
+            7,
+            "只有真正需要故障注入的七条应记 not_applicable：\n{}",
+            report.to_markdown()
+        );
 
-        // 闸门类（auth-expired / sensitive-redaction）因缺故障注入拿不到证据，
-        // 所以真实适配器只能是 Unverified——这条限制是结构的，不是本适配器偷懒。
-        match crate::adapter_conformance::enablement(&report) {
-            crate::adapter_conformance::Enablement::Unverified { cases } => {
-                assert!(cases.contains(&"auth-expired"), "实际 {cases:?}");
-                assert!(cases.contains(&"sensitive-redaction"), "实际 {cases:?}");
-            }
-            other => panic!("真实适配器不应是 {other:?}"),
-        }
+        // 闸门类三条全部有证据：授权走「无凭据面 + 授权约束仍生效」，完整性走真实负载。
+        // 这正是 durable-process 相对 local-process 的差别之一：它可以被准入。
+        assert_eq!(
+            crate::adapter_conformance::enablement(&report),
+            crate::adapter_conformance::Enablement::Enabled,
+            "闸门类齐全时应可准入：\n{}",
+            report.to_markdown()
+        );
         // 取消请求与确认分离这条必须真过：否则"确认停止"没有证据。
         let cancel = report
             .outcomes

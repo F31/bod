@@ -97,6 +97,39 @@ impl LocalProcessConfig {
             vec!["-c".to_string(), "print('done')".to_string()]
         }
     }
+
+    /// conformance 专用负载：一段**正常**输出，其中含三类真实凭据形态。
+    ///
+    /// 敏感字段过滤不需要故障注入，它需要的是一条带凭据的真实负载。这份脚本由**调用方**
+    /// （conformance 入口）配置给适配器，不是适配器自己挑样本——适配器只负责把子进程的
+    /// stdout/stderr 如实交出来，脱敏发生在宿主的接收管道里。
+    ///
+    /// 三类形态对应 `observation_redaction` 的三种识别方式：bearer、`key=value`/JSON 键值、
+    /// 公认令牌前缀（`AKIA`）。三行都保留，便于断言「命中几处就脱敏几处」。
+    pub fn conformance_script(language_hint: &str) -> Vec<String> {
+        if language_hint.contains("node") {
+            vec![
+                "-e".to_string(),
+                "console.log('bod-conformance ready');\
+                 console.log('Authorization: Bearer sk-live-probe0123456789abcd');\
+                 console.log('{\"api_key\": \"AKIAIOSFODNN7EXAMPLE\"}');\
+                 console.log('password=hunter2');\
+                 setTimeout(()=>{}, 2500);"
+                    .to_string(),
+            ]
+        } else {
+            vec![
+                "-c".to_string(),
+                "import time\n\
+                 print('bod-conformance ready', flush=True)\n\
+                 print('Authorization: Bearer sk-live-probe0123456789abcd', flush=True)\n\
+                 print('{\"api_key\": \"AKIAIOSFODNN7EXAMPLE\"}', flush=True)\n\
+                 print('password=hunter2', flush=True)\n\
+                 time.sleep(2.5)"
+                    .to_string(),
+            ]
+        }
+    }
 }
 
 struct ManagedChild {
@@ -154,6 +187,12 @@ impl LocalProcessAdapter {
     pub fn set_args(&mut self, args: Vec<String>, now_ms: i64) {
         self.config.args = args;
         self.descriptor = build_descriptor(&self.config, now_ms);
+    }
+
+    /// 换成 conformance 用的含凭据负载。由 conformance 入口调用，适配器不自行选择样本。
+    pub fn use_conformance_payload(&mut self, now_ms: i64) {
+        let hint = self.config.executable.clone();
+        self.set_args(LocalProcessConfig::conformance_script(&hint), now_ms);
     }
 
     pub fn exit_code(&self, invocation_id: &str) -> Option<i32> {

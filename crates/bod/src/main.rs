@@ -396,6 +396,9 @@ fn adapter_capabilities(need: Option<&str>) -> Result<String, String> {
     }
 
     if let Some(level_value) = level {
+        // 准入评估用标准化的含凭据负载：否则敏感的脱敏用例拿不到样本，
+        // 真实适配器会一律落在 unverified 上——那是评估方式的问题，不是适配器的问题。
+        adapter.use_conformance_payload(now);
         let report = run_live_suite(&mut adapter, now);
         let verdict = enablement(&report);
         let required = RequiredGuarantees::for_handoff(level_value);
@@ -468,6 +471,9 @@ fn conformance(flags: &[String]) -> Result<String, String> {
 
     if !fake_only {
         let mut adapter = adapter_or_err()?;
+        // 用含凭据的正常负载驱动：敏感字段过滤验的是「真实负载经过宿主脱敏管道」，
+        // 而不是让适配器自己挑一份不含秘密的样本来免责。
+        adapter.use_conformance_payload(now);
         let descriptor = adapter.descriptor().clone();
         let live = run_live_suite(&mut adapter, now);
         sections.push(SectionedReport::build(&live, Some(&descriptor), now));
@@ -553,6 +559,9 @@ fn release_check(flags: &[String]) -> Result<String, String> {
 
     let now = now_ms();
     let mut adapter = adapter_or_err()?;
+    // 与 conformance / capabilities 用同一份标准负载：同一个适配器在不同命令下得到
+    // 不同的 enablement，本身就是 4.5「三处一致」要防的那种不一致。
+    adapter.use_conformance_payload(now);
     let descriptor = adapter.descriptor().clone();
     let live = run_live_suite(&mut adapter, now);
     let report = SectionedReport::build(&live, Some(&descriptor), now);

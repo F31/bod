@@ -247,6 +247,16 @@
   `auth-expired`/`sensitive-redaction` 需故障注入，真实适配器恒 `not_applicable` →
   `enablement=Unverified` → `select()` 永远过滤真实候选（今天没有任何真实执行端可被调度准入）；
   两条可选解留待评审，不单方面放宽证据。详见 `docs/spec-notes/p2-durable-adapter.md`。
+  **该冲突已按「不改判定阈值、改用例驱动方式」解掉**：`auth-expired` 改为按声明的凭据面分支
+  （`unsupported` 时验「诚实界定 + 授权约束仍生效」，含跨公司 `E_SCOPE_MISMATCH`）；
+  `sensitive-redaction` 改为真实负载驱动，含凭据负载由 conformance 入口通过
+  `use_conformance_payload()` 配置，不由适配器自选；`dispatch_case` 返回
+  `CaseFailure::{Fail, NotApplicable}`，用例可依运行时观察自判不适用。结果：两个真实配置都是
+  `pass=7 fail=0 na=7`、`enabled`；`capabilities --need l1` 从「无候选」变为
+  `BOD_CAPABILITY_SATISFIED`，`--need l2` 只剩 `capability_not_supported`（诚实的能力边界）；
+  `release-check` 的 `effect_authorization` 由 `not_evidenced` 变 `pass`（整体仍 `blocked`）。
+  已知漏检：`observation_redaction` 不认 `--token value` 空格分隔形态，未顺手改。
+  详见 `p2-conformance.md` §5。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
