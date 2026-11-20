@@ -187,6 +187,37 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
+    /// 统计某 Company 的 Attempt 行数；供取消对账断言"不新建 Attempt"。
+    pub fn count_attempts(&self, company_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE company_id = ?1",
+                params![company_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
+    /// 读取某聚合最新事件载荷；取消对账只从宿主事件推导状态，不另建状态库。
+    pub fn latest_event_payload(&self, aggregate_id: &str) -> Result<Option<String>, StoreError> {
+        self.conn.query_row(
+            "SELECT payload FROM events WHERE aggregate_id = ?1 ORDER BY aggregate_version DESC LIMIT 1",
+            params![aggregate_id],
+            |row| row.get(0),
+        ).optional().map_err(StoreError::Sql)
+    }
+
+    /// 统计某聚合的事件数，供事件版本单调递增。
+    pub fn count_events(&self, aggregate_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE aggregate_id = ?1",
+                params![aggregate_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
     /// 列出某 Company 的预留行；供预算解释与测试断言。
     pub fn list_reservations(&self, company_id: &str) -> Result<Vec<Reservation>, StoreError> {
         let mut stmt = self.conn.prepare(

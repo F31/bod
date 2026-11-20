@@ -50,7 +50,10 @@
   已完成切片 4.2「真实仓库直派闭环」——`bod-app::coding_integration` 提供共享指令/规则按确定
   base 串行修订（I-18/I-20）、真实 git 提交候选绑定、本地验证报告的独立性检查与 NeedsRevalidation、
   人工/预授权接受（复用 P0 `artifact_acceptance`）以及重启后从同一 SQLite 文件查询交付快照；
-  沿用 P0 表，不建第二业务库。P1 的首次使用路径、取消/Unknown 展示、工作台与出口切片尚未开始。
+  沿用 P0 表，不建第二业务库。已完成切片 4.3「取消与 Unknown 对账」——`bod-app::cancel_reconciliation`
+  把取消请求与停止确认分离：cancel_ack 只记送达，不释放预留、不新建 Attempt、不结案；Unknown 显示
+  待核实与处理人，确认停止需独立证据；`pending_cancellations` 只投影宿主事件与案件（I-11 新用例）。
+  P1 的首次使用路径、工作台与出口切片尚未开始。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

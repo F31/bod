@@ -87,11 +87,11 @@
 - id: I-11
   kind: invariant
   requirement: 未确认远程停止不显示全部已停止，也不清空风险预留
-  module: bod-app::effect_recovery
-  tests: bod-app::effect_recovery::tests::i_11_dispatched_without_evidence_inspects_first_then_marks_confirmed
+  module: bod-app::cancel_reconciliation
+  tests: bod-app::cancel_reconciliation::tests::invariant_i_11_cancel_ack_keeps_risk_and_attempt
   status: implemented
-  evidence: cargo test -p bod-app effect_recovery && cargo test -p bod-app cleanup_recovery
-  note: outbox 侧证据不足外报 Confirmed 由 i_11 覆盖；停止确认与风险占用保留由 cleanup_recovery 的 stop/budget 条件补强
+  evidence: cargo test -p bod-app cancel_reconciliation && cargo test -p bod-app effect_recovery && cargo test -p bod-app cleanup_recovery
+  note: cancel_ack 只记送达、不确认停止、不新建 Attempt、不释放风险预留（4.3 新增用例）；outbox 证据不足外报 Confirmed 仍由 effect_recovery::tests::i_11_dispatched_without_evidence_inspects_first_then_marks_confirmed 覆盖；清理侧 stop/budget 条件由 cleanup_recovery 补强
 - id: I-12
   kind: invariant
   requirement: 一次性同意不能授权不同逻辑动作

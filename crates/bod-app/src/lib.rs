@@ -10,6 +10,7 @@ pub mod artifact_acceptance;
 pub mod authorization;
 pub mod backoff;
 pub mod budget_admission;
+pub mod cancel_reconciliation;
 pub mod cas;
 pub mod claim_concurrency;
 pub mod clarity_dialogue;
