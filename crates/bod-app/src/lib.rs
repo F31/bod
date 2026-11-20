@@ -41,6 +41,7 @@ pub mod handoff_sample;
 pub mod handoff_snapshot;
 pub mod history_continuity;
 pub mod host_handshake;
+pub mod impact_revalidation;
 pub mod invocation;
 pub mod isolation_check;
 pub mod lifecycle_recovery;
