@@ -402,8 +402,21 @@
     候选。即**今天没有任何真实执行端能被调度准入**；两条可选解（改用例驱动方式 / 区分
     `not_applicable` 的准入含义）留待评审，本切片不单方面放宽证据。详见
     `docs/spec-notes/p2-durable-adapter.md` §6。
-  - **仍未完成**：同任务样本的双配置 L1/L2 接续与负责人切换采样（需采样驱动）、
-    环境/版本/失败路径记录、人工耗时。故 4.4 保持未勾选。
+  - 进展（2026-11-20，`bod handoff sample` → `docs/reports/p2-handoff-samples.md`）：
+    补上采样驱动 `bod-app::handoff_sample` + CLI `bod handoff sample`。样本
+    `sample.resume-from-snapshot/v1` 让配置 A 产出两个检查点 → 写交接快照（工作包修订 +
+    最后一条观察的真实序号）→ 确认停止 → **新实例**读快照续跑，首行必须回声
+    `resume from <序号>`。回声是唯一不可省的断言：没有它，把任务从头重跑的执行端也会「成功」，
+    而重来与接续在副作用上是两件事（反证用例 `resume_ignoring_the_snapshot_is_not_continuation`）。
+    L2 再加「交接后新实例重放旧观察」：序号连续、内容一致、重放判 duplicate 且不重复落库
+    （反证 `missing_replay_is_a_failure_not_a_pass`）。
+    实测 L2：`evidenced (2/2)`——Python 3.13.14 与 node v22.22.2 各一个 `durable-process`
+    配置通过（13 项断言）；`local-process` 因声明 `reliable_observation: unsupported` 记
+    `unsupported` 不计入（L1 对照下它通过，说明差距来自能力而非缺陷）。L3 报
+    `unsupported(verified_continuation)`：样本没有核验步骤，不拿 L1/L2 冒充。
+  - **仍未完成**：① 负责人切换只有库内状态机（5.1 三条 case），没有真实项目演练；
+    ② 人工分钟只有脚本化的 0（`--human-minutes` 留给真实演练填秒表读数）。
+    两项都要人跑一遍，机器代替不了，故 4.4 保持未勾选。
 - [x] 4.5 实现发布验收检查（停止/重放/副作用/账号预算/证据）与日志脱敏，验证日志中无凭据值且能力缺失在探测/准入/UI 三处一致（G-4、G-46）。
   - 证据（2026-11-20，`cargo test -p bod-app --lib release_acceptance` → 15 passed；
     `cargo test -p bod` → 14 passed）：

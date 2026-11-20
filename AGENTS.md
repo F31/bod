@@ -257,6 +257,14 @@
   `release-check` 的 `effect_authorization` 由 `not_evidenced` 变 `pass`（整体仍 `blocked`）。
   已知漏检：`observation_redaction` 不认 `--token value` 空格分隔形态，未顺手改。
   详见 `p2-conformance.md` §5。
+  补上 **4.4 的采样驱动**：`bod-app::handoff_sample` + `bod handoff sample`。样本
+  `sample.resume-from-snapshot/v1` = 产出两个检查点 → 写交接快照（含真实 `last_sequence`）→
+  确认停止 → **新实例**读快照续跑，首行必须回声 `resume from <序号>`（防「从头重跑也算接续」）；
+  L2 再加「新实例重放旧观察、序号连续、重放判 duplicate」。实测 L2 = `evidenced (2/2)`
+  （Python 3.13.14 与 node v22.22.2 各一个 `durable-process` 配置），`local-process` 因声明
+  `reliable_observation: unsupported` 记 `unsupported` 不计入；L3 报 `unsupported`（样本无核验步）。
+  **4.4 仍未勾选**：负责人切换只有库内 case、人工分钟只有脚本化的 0——两项都要人真实跑一遍。
+  实测见 `docs/reports/p2-handoff-samples.md`，设计见 `p2-handoff-sample.md`。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

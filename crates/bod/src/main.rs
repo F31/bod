@@ -8,6 +8,9 @@ use bod_app::conformance_report::SectionedReport;
 use bod_app::domain::execution::CapabilitySlot;
 use bod_app::fake_executor::{FakeExecutor, FakeScenario};
 use bod_app::handoff_package::HandoffLevel;
+use bod_app::handoff_sample::{
+    self, DurableSampleConfig, HumanTime, LocalSampleConfig, SampleReport, run_sample,
+};
 use bod_app::invocation::StartTransport;
 use bod_app::local_process::{default_adapter, descriptor_json};
 use bod_app::release_acceptance::{ReleaseAcceptance, ReleaseEvidence};
@@ -15,6 +18,7 @@ use bod_app::{explain, load_from_str, schema_text};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod smoke;
@@ -38,6 +42,11 @@ const USAGE: &str = "\
   bod conformance                  分项报告：按版本/协议/平台/能力/日期逐项列出，不出整体通过标记
   bod conformance --fake-only      只跑 Fake Executor 的分项报告
   bod conformance --json           同上，输出机器可读结果（多适配器时为 reports 数组）
+  bod handoff sample               在真实运行配置上跑 L2 接续样本，给出双运行时证据结论
+  bod handoff sample --level l1    只要求 L1（不验重启后重放）
+  bod handoff sample --root <dir>  指定样本工作目录（默认系统临时目录下带时间戳的子目录）
+  bod handoff sample --human-minutes 2.5  真实演练的秒表读数（缺省 0 = 脚本化、无人工介入）
+  bod handoff sample --json        同上，输出机器可读结果
   bod smoke                        跑通指派→执行→候选登记→重启找回的最小冒烟
   bod smoke --json                 同上，输出机器可读结果
   bod fault-matrix                 执行 P0 五个核心故障场景并输出实测报告
@@ -334,6 +343,7 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(out)
         }
         [cmd, rest @ ..] if cmd == "conformance" => conformance(rest),
+        [cmd, sub, rest @ ..] if cmd == "handoff" && sub == "sample" => handoff_sample(rest),
         [cmd, sub, rest @ ..] if cmd == "adapter" && sub == "release-check" => release_check(rest),
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }
@@ -439,6 +449,114 @@ fn adapter_capabilities(need: Option<&str>) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+/// `bod handoff sample`：P2 任务 4.4 的采样入口。
+///
+/// 对每个**不同运行时**各跑一遍 `durable-process` 与 `local-process` 的接续样本。结论只按
+/// 「不同运行时」计数：同一运行时换适配器不算跨运行时接续，因此本命令即使在单运行时机器上
+/// 全绿，也只会给出 `insufficient`——这是正确结论，不是配置问题。
+fn handoff_sample(flags: &[String]) -> Result<String, String> {
+    let mut level = HandoffLevel::L2;
+    let mut json = false;
+    let mut root: Option<PathBuf> = None;
+    // 缺省是「脚本化，实测无人工介入」；只有真实演练才用 --human-minutes 填秒表读数。
+    let mut human_time = HumanTime::Scripted;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--level" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| format!("--level 需要取值 l1 / l2\n\n{USAGE}"))?;
+                level = match value.to_ascii_lowercase().as_str() {
+                    "l1" => HandoffLevel::L1,
+                    "l2" => HandoffLevel::L2,
+                    "l3" => HandoffLevel::L3,
+                    other => {
+                        return Err(format!(
+                            "--level 只接受 l1 / l2 / l3，收到 {other}\n\n{USAGE}"
+                        ));
+                    }
+                };
+                index += 2;
+            }
+            "--root" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| format!("--root 需要目录\n\n{USAGE}"))?;
+                root = Some(PathBuf::from(value));
+                index += 2;
+            }
+            "--human-minutes" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| format!("--human-minutes 需要分钟数\n\n{USAGE}"))?;
+                let minutes: f64 = value
+                    .parse()
+                    .map_err(|_| format!("--human-minutes 需要数字，收到 {value}\n\n{USAGE}"))?;
+                if !minutes.is_finite() || minutes < 0.0 {
+                    return Err(format!("--human-minutes 必须是非负有限值，收到 {value}"));
+                }
+                human_time = HumanTime::Measured(minutes);
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            other => return Err(format!("未知参数 {other}\n\n{USAGE}")),
+        }
+    }
+
+    let now = now_ms();
+    let runtimes = handoff_sample::detect_runtimes(&["python3", "python", "node"]);
+    if runtimes.is_empty() {
+        return Err(
+            "未找到可运行运行时（python3 / python / node）；没有运行时就不出样本，不假装通过"
+                .to_string(),
+        );
+    }
+    let base = root.unwrap_or_else(|| std::env::temp_dir().join(format!("bod-handoff-{now}")));
+    let mut report = SampleReport::new(level, now);
+    for (position, executable) in runtimes.iter().enumerate() {
+        // durable：可回放观察，L2 的重放断言就落在它身上。
+        let durable_root = base.join(format!("durable-{position}"));
+        let durable = DurableSampleConfig::new(
+            bod_app::durable_process::DurableProcessConfig::new(
+                executable.as_str(),
+                Vec::new(),
+                &durable_root,
+            ),
+            now,
+        );
+        report.push(run_sample(
+            &durable,
+            level,
+            &base.join(format!("ws-durable-{position}")),
+            human_time.clone(),
+            now,
+        ));
+        // local-process：观察在内存里，L2 上应如实得到 unsupported。
+        let local = LocalSampleConfig::new(
+            bod_app::local_process::LocalProcessConfig::new(executable.as_str(), Vec::new()),
+            now,
+        );
+        report.push(run_sample(
+            &local,
+            level,
+            &base.join(format!("ws-local-{position}")),
+            human_time.clone(),
+            now,
+        ));
+    }
+    // 样本目录只放会话与快照；子进程都已被 cancel 确认停止，清掉不留垃圾。
+    let _ = fs::remove_dir_all(&base);
+    if json {
+        Ok(report.to_json())
+    } else {
+        Ok(report.to_markdown())
+    }
 }
 
 /// `bod conformance`：分项报告入口（P2 任务 4.1）。

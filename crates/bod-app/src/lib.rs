@@ -36,6 +36,7 @@ pub mod handoff_event;
 pub mod handoff_facts;
 pub mod handoff_manifest;
 pub mod handoff_package;
+pub mod handoff_sample;
 pub mod handoff_snapshot;
 pub mod history_continuity;
 pub mod host_handshake;
