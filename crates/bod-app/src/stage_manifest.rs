@@ -698,7 +698,9 @@ impl ProjectedView {
 }
 
 /// 形态识别：视图不能因为"类别标对了"就把凭据放出去。
-fn looks_like_credential(value: &str) -> bool {
+///
+/// 公开给发布治理复用：Manifest 里不许出现密钥，判据和这里必须是同一套。
+pub fn looks_like_credential(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     value.contains("begin private key")
         || value.contains("begin rsa private key")

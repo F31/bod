@@ -298,7 +298,14 @@
   被扣数量；内容清单身份（排序后摘要）与运输文件身份分离，签名必须写明覆盖 payload，脱敏包不得
   声称原始哈希链连续；离线校验固定五项分列，自签/嵌入公钥只证明包内一致（`invariant_i_52`、G-33）。
   16 条命名用例 + 5 条漂移检查，说明见 `docs/spec-notes/p4-evidence.md`。
-  **3.x—5.x 未开始**：发布治理、覆盖回执与出口证据需要真实环境与真实业务流程，未接入前不标
+  `bod-app::release_governance` 与 `bod-app::maintenance` 承接发布治理：`EnvironmentRef` 分开记
+  desired/observed，只有相等才投影为已部署，观测缺失即 `Unknown`，Manifest 明文拒绝密钥字段；
+  `Approval` 绑 digest/环境/参数/有效期，改目标即失效（AZ05）；部署状态机要求提交后派发，
+  回包丢失进 `Unknown` 并禁止盲重发，查询须带证据落定；回滚只恢复已声明可回退资源，
+  不可逆迁移与前向修复分列；预算解释按「限额 − C − R − U」算可用额度，不足即拒且只读；
+  `maintenance` 按去重键生成只读提案，预算到限停止、白名单外检查拒绝、恒不升级不发布（G-35）。
+  20 条命名用例 + 5 条漂移检查，说明见 `docs/spec-notes/p4-release.md`。
+  **4.x—5.x 未开始**：覆盖回执与出口证据需要真实环境与真实业务流程，未接入前不标
   Supported；P4 的 I/G 绑定全部保持 planned。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
