@@ -198,6 +198,28 @@ impl SqliteStore {
             .map_err(StoreError::Sql)
     }
 
+    /// 统计工作包修订行数（首次使用断言「从零自动补齐」）。
+    pub fn count_work_package_revisions(&self, company_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM work_package_revisions WHERE company_id = ?1",
+                params![company_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
+    /// 统计运行实例行数，语义同 [`Self::count_work_package_revisions`]。
+    pub fn count_runs(&self, company_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE company_id = ?1",
+                params![company_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
     /// 读取某聚合最新事件载荷；取消对账只从宿主事件推导状态，不另建状态库。
     pub fn latest_event_payload(&self, aggregate_id: &str) -> Result<Option<String>, StoreError> {
         self.conn.query_row(
@@ -931,6 +953,71 @@ impl<'a> UnitOfWork<'a> {
         self.conn.execute_batch("ROLLBACK")?;
         self.finished = true;
         Ok(())
+    }
+
+    /// 首次使用路径自动补齐最小工作包修订：无需预先配置 WorkPackage。
+    pub fn insert_work_package_revision(
+        &self,
+        revision_id: &str,
+        company_id: &str,
+        issue_uid: &str,
+        spec_revision: &str,
+        acceptance_revision: &str,
+        created_at: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO work_package_revisions
+             (revision_id, company_id, issue_uid, spec_revision, acceptance_revision, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                revision_id,
+                company_id,
+                issue_uid,
+                spec_revision,
+                acceptance_revision,
+                created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 首次使用路径自动补齐最小运行实例：无需预先配置 Run/执行图。
+    pub fn insert_run(
+        &self,
+        uid: &str,
+        company_id: &str,
+        issue_uid: &str,
+        plan_revision: &str,
+        desired_state: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO runs (uid, company_id, issue_uid, plan_revision, desired_state)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![uid, company_id, issue_uid, plan_revision, desired_state],
+        )?;
+        Ok(())
+    }
+
+    /// 统计工作包修订行数；首次使用断言"从零自动补齐"，不是复用预置配置。
+    pub fn count_work_package_revisions(&self, company_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM work_package_revisions WHERE company_id = ?1",
+                params![company_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
+    /// 统计运行实例行数，语义同 [`Self::count_work_package_revisions`]。
+    pub fn count_runs(&self, company_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE company_id = ?1",
+                params![company_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
     }
 
     pub fn insert_issue(&self, issue: &Issue) -> Result<(), StoreError> {

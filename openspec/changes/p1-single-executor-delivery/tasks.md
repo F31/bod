@@ -41,7 +41,8 @@
 
 ## 4. 直派闭环与工作台
 
-- [ ] 4.1 实现首次使用路径与自动最小工作约定，验证无 Team/WorkPackage/Run 配置即可完成一次真实仓库指派（`invariant_i_10`）。
+- [x] 4.1 实现首次使用路径与自动最小工作约定，验证无 Team/WorkPackage/Run 配置即可完成一次真实仓库指派（`invariant_i_10`）。
+  - 证据（2026-11-20，`cargo test -p bod-app first_use` → 6 passed，真实 git 仓库 + 文件型 SQLite）：派发前 `work_package_revisions`/`runs`/`issues` 均为 0，派发后各为 1；Issue owner 是已接入 Agent、验收逐字保留、事件载荷含目标摘要与 `git rev-parse HEAD` 的 40 位提交。`plan_first_use` 只预览不写库，同输入两次结构相等；写范围取仓库顶层目录，`Cargo.toml`/`.git/config` 进 NeedsRevision 并列出路径。I-10 按 §39.2 的权威语义登记为「合并证据对应实际目标与候选组合」：`merge_combination` 由目标摘要+提交+规则+环境派生，`bind_first_use_evidence` 拒绝跨提交/自报/错规则报告，接受记录带同一组合且关闭重开 SQLite 后仍可查。tasks.md 原先把 I-10 写成「无 Team 配置」本身，已纠正——首次派发是该不变量的宿主入口，C/R/U 互斥仍属 I-71。详见 `docs/spec-notes/p1-first-use.md`。
 - [x] 4.2 打通真实仓库实现→本地验证→人工/预授权接受闭环，验证 `bod-app::coding_integration` 的 `invariant_i_18`、`invariant_i_20`：接受绑定确定提交/规格/报告，桌面重启后仍可查询。
   - 证据（2026-11-20，`cargo test -p bod-app coding_integration` → 9 passed，真实 git 仓库 + 文件型 SQLite）：`SharedInstructionLedger` 对同一路径按 holder 角色串行修订，其他角色候选进 `rejected()` 且不覆盖（I-18），规则修订 base 必须精确命中当前 `ir-<sha256>`、`HEAD` 被拒（I-20）。`register_git_candidate` 绑定 `git rev-parse HEAD` 的 40 位提交与外部定位 `git:<path>#<sha>`，只写 Pending。`record_local_verification` 只接受匹配提交/规则/环境且由非实现者出具的报告，否则落 `NeedsRevision`；`accept_delivery` 复用 P0 `artifact_acceptance::accept`，人工 `Accepted`、预授权 Agent `AutoAccepted`、实现者自批 `SelfApprovalDenied`。`human_acceptance_binds_commit_spec_report_and_survives_restart` 丢弃 store 后从同一 DB 文件重开，五项绑定/证据/定位全部一致。G-6/G-9 仍由 P0 模块承担，本切片不重复登记。详见 `docs/spec-notes/p1-delivery.md`。
 - [x] 4.3 实现取消请求/确认停止分离与 Unknown 对账入口，验证 cancel_ack 不释放占用、不新建 Attempt，界面显示待核实与处理人（`invariant_i_11`）。

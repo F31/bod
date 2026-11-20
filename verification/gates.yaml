@@ -79,11 +79,11 @@
 - id: I-10
   kind: invariant
   requirement: 合并证据对应实际目标与候选组合
-  module: ""
-  tests: ""
-  status: planned
-  evidence: ""
-  note: 本 Change 未实现合并证据门禁；tasks.md 4.2 把 I-10 用于 C/R/U 互斥，该语义按 §39.12 实为 I-71，已在 I-71 条目绑定
+  module: bod-app::first_use
+  tests: bod-app::first_use::tests::invariant_i_10_first_use_needs_no_team_work_package_or_run_config
+  status: implemented
+  evidence: cargo test -p bod-app first_use
+  note: §39.2 权威语义是合并证据；4.1 把首次派发的目标/提交/规则/环境合成 merge_combination，并在 bind_first_use_evidence 逐项校验。tasks.md 曾把 I-10 误绑到「无 Team 配置」与 C/R/U 互斥；前者现作为 I-10 的宿主入口，后者按 §39.12 属 I-71，不在本条目重复登记
 - id: I-11
   kind: invariant
   requirement: 未确认远程停止不显示全部已停止，也不清空风险预留

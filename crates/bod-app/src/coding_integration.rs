@@ -413,11 +413,32 @@ pub fn register_git_candidate(
     produced_by: &DomainId,
     now_ms: i64,
 ) -> Result<DeliveryCandidate, CodingIntegrationError> {
+    register_git_candidate_in_project(
+        store,
+        company_id,
+        "project-local",
+        repo,
+        baseline,
+        produced_by,
+        now_ms,
+    )
+}
+
+/// 与 [`register_git_candidate`] 相同，但绑定首次使用路径解析出的真实项目 id。
+pub fn register_git_candidate_in_project(
+    store: &mut SqliteStore,
+    company_id: &str,
+    project_id: &str,
+    repo: &Path,
+    baseline: &DeliveryBaseline,
+    produced_by: &DomainId,
+    now_ms: i64,
+) -> Result<DeliveryCandidate, CodingIntegrationError> {
     let commit = resolve_head(repo)?;
     let artifact = Artifact {
         id: baseline.artifact_id.clone(),
         company_id: DomainId::new(company_id),
-        project_id: DomainId::new("project-local"),
+        project_id: DomainId::new(project_id),
         kind: ArtifactKind::SourceCode,
         title: format!("真实仓库交付 {}", &commit[..12]),
         owner: produced_by.clone(),
