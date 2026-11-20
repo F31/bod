@@ -410,10 +410,10 @@ fn now_ms() -> i64 {
 
 #[cfg(unix)]
 fn sync_dir(path: Option<&Path>) {
-    if let Some(path) = path {
-        if let Ok(dir) = File::open(path) {
-            let _ = dir.sync_all();
-        }
+    if let Some(path) = path
+        && let Ok(dir) = File::open(path)
+    {
+        let _ = dir.sync_all();
     }
 }
 

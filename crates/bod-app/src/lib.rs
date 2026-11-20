@@ -58,6 +58,7 @@ pub mod rebuild_precheck;
 pub mod recovery_models;
 pub mod release_acceptance;
 pub mod resource_state;
+pub mod runtime_verification;
 pub mod scope_boundary;
 pub mod staff_continuation;
 pub mod store;

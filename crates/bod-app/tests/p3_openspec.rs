@@ -116,9 +116,7 @@ fn tasks_1_1_to_1_6_are_checked_only_with_the_note_in_place() {
         };
         let is_checked = rest.starts_with('x');
         let body = rest.get(3..).unwrap_or_default().trim();
-        if is_checked
-            && let Some(id) = body.split_whitespace().next()
-        {
+        if is_checked && let Some(id) = body.split_whitespace().next() {
             checked.insert(id.to_string());
         }
     }

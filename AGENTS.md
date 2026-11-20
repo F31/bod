@@ -282,6 +282,16 @@
   **2.6 与 5.2 未勾选**：G-31 与「共享接口变化从发现到再次接受」需要真实项目样本，
   机器造不出来。出口结论 `blocked`（`docs/reports/p3-exit-evidence.md`），支持矩阵 §9 无 Supported 行，
   P3 的 I/G 绑定同样全部保持 planned。CI 见 `.github/workflows/ci.yml`（Linux + Windows + workbench + openspec）。
+- **P4 进行中（2026-11-21）**：`openspec/changes/p4-runtime-delivery` 任务 1.1—1.6 已勾选。
+  `bod-app::runtime_verification` 把运行验收拆成五件事：计划必须覆盖五个面且 API/浏览器/Agent
+  三类检查必须指名已有工具（自建引擎被拒）；报告绑定 commit/digest、规格与规则修订、环境、
+  工具版本、执行者、时间与原始引用，不匹配分 `StaleCommit`（`invariant_i_08`）、`DigestMismatch`、
+  `NeedsRevalidation`、`Unknown` 四类且只有 `Usable` 可接受；`BuildRecord` 一次构建按 digest
+  晋升，平台进身份摘要，平台变化强制重建重验；门禁为 Required/Advisory/Manual ×
+  Pass/Fail/Unknown/NotApplicable，未运行不是 Pass、`NotApplicable` 需豁免、豁免单独留痕；
+  失败分类只有业务断言失败归咎代码，只换执行人不算独立验证。17 条命名用例 + 6 条漂移检查，
+  说明见 `docs/spec-notes/p4-verification.md`。**2.x—5.x 未开始**：阶段清单、发布治理与
+  覆盖回执需要真实环境与真实业务流程，未接入前不标 Supported；P4 的 I/G 绑定全部保持 planned。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

@@ -4,12 +4,12 @@
 
 ## 1. 运行验收与构建记录
 
-- [ ] 1.1 实现 VerificationPlan 与 Scenario/Criterion→检查映射，验证计划覆盖启动/健康、核心 API、权限与数据读写、关键 UI 流程与失败路径。
-- [ ] 1.2 实现验证报告绑定 commit/digest、规格/规则修订、环境、工具版本、执行者与时间，验证 `invariant_i_08`：旧提交报告不用于新制品接受。
-- [ ] 1.3 实现 BuildRecord 与按 digest 晋升，验证同一候选跨环境复用同一包，平台特定重建生成新记录与验证。
-- [ ] 1.4 实现 Required/Advisory/Manual 与 Pass/Fail/Unknown/NotApplicable 语义，验证未运行必需项不默认 Pass、自动接受被阻止。
-- [ ] 1.5 实现失败分类与证据独立性检查，验证环境失败不归咎代码、自生成测试缺独立来源时要求基准或人工抽样。
-- [ ] 1.6 编写 P4 验证计划与证据模板到 `docs/spec-notes/p4-verification.md`，验证模板字段可追溯到本 Change requirement。
+- [x] 1.1 实现 VerificationPlan 与 Scenario/Criterion→检查映射，验证计划覆盖启动/健康、核心 API、权限与数据读写、关键 UI 流程与失败路径。
+- [x] 1.2 实现验证报告绑定 commit/digest、规格/规则修订、环境、工具版本、执行者与时间，验证 `invariant_i_08`：旧提交报告不用于新制品接受。
+- [x] 1.3 实现 BuildRecord 与按 digest 晋升，验证同一候选跨环境复用同一包，平台特定重建生成新记录与验证。
+- [x] 1.4 实现 Required/Advisory/Manual 与 Pass/Fail/Unknown/NotApplicable 语义，验证未运行必需项不默认 Pass、自动接受被阻止。
+- [x] 1.5 实现失败分类与证据独立性检查，验证环境失败不归咎代码、自生成测试缺独立来源时要求基准或人工抽样。
+- [x] 1.6 编写 P4 验证计划与证据模板到 `docs/spec-notes/p4-verification.md`，验证模板字段可追溯到本 Change requirement。
 
 ## 2. 阶段清单与证据包
 
