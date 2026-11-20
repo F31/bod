@@ -210,7 +210,37 @@
     暂停不递增 epoch（每条命令重查状态），暂停期间不能直接换人——原子「结束旧委任 + 切指针 +
     新 epoch」属 3.3，不用近似做法代替。边界：不实现切换流程、员工继续、历史成果与费用、专项
     边界；不写 `gates.yaml`（P2 绑定仍 planned）。详见 `docs/spec-notes/p2-manager-transfer.md` §1。
-- [ ] 3.2 实现员工独立继续与执行/管理身份分离，验证切换时运行任务继续、已接受成果不重做，旧经理执行身份上传的合法成果保留（`invariant_i_59`）。
+- [x] 3.2 实现员工独立继续与执行/管理身份分离，验证切换时运行任务继续、已接受成果不重做，旧经理执行身份上传的合法成果保留（`invariant_i_59`）。
+  - 证据（2026-11-20，`cargo test -p bod-app staff_continuation` → 19 passed）：新增
+    `bod-app::staff_continuation`，只读投影不建表（迁移仍 10 条、表仍 44 张，沿用 2.5 的做法），
+    事实来源是 issues / runs / invocations / artifacts / artifact_revisions / acceptances。
+    身份分离做成两条互不推导的来源：执行座位只能由 `ExecutionSeat::from_issue`（Issue 的
+    Assignment）构造，签名里没有 Appointment 参数；管理身份只来自 3.1 的当前委任，
+    `role_of().holds_management()` 仅在 `Active` 时为真。双向顶替都没有代码路径：
+    `management_ticket_as_execution()` 恒 `ManagementIsNotExecution`，
+    `ExecutionCredential::as_management_ticket()` 恒 `ExecutionIsNotManagement`；执行凭据只有
+    `for_invocation` 入口，attempt 与 fencing token 取自持久化记录。
+    「切换不停止员工」是类型事实：`Directive` 只有 Continue / Preserve / Retain /
+    RebuildViaHandoff / ResolveBeforeSwitch，没有 Cancel/Stop/Restart/Redo（用例逐个断言缺席），
+    因此切换期的重做/重启/改派请求只能被拒（`RedoAccepted` / `RestartRunning` or
+    `RestartBlocked` / `ExecutorLockedWhileRunning`）。
+    「已接受成果不重做」= 未被取代 + `decision.is_accepted()` + 接受指针指向该修订，三者缺一进
+    `stale_acceptances`（单列可数，不并入保留也不静默丢弃）；贡献只从保留的接受所绑定修订推导，
+    `produced_by` 一次 join 查出，接受指向缺失修订报 `CorruptAcceptance` 而不跳过。
+    旧经理兼任执行按 §19.10 分支：只有宿主显式声明 `Separable` 才 `Continue`（保留 Assignment、
+    只移除管理能力），`Undeclared`/`NotSeparable`/座位未登记一律 `RebuildViaHandoff` 并指向
+    2.2/2.4/2.5，本模块不自己停进程；声明必须命中真实座位、不许重复，缺省不当可分离。
+    `Cancelling`/`Unknown` 只产出 `ResolveBeforeSwitch`（分别指向停止确认与对账），`may_restart`
+    对两者都拒绝，避免双重执行。
+    实测：A→B 切换（撤任 epoch 1→2、任命 B 为 epoch 3）后 running/accepted/contributions 逐字段
+    相等、计划 items 逐条相等、invocation 仍 Running、接受行未增删；旧票提交返回
+    `StaleAppointment`；员工项的指令与 `outgoing` 无关（另按 `manager-z` 求计划比对）。
+    边界：不做切换事务（3.3）、不改历史接受与费用（3.4）、专项子树作用域显式拒绝并指向 3.5；
+    不写 `gates.yaml`（P2 绑定仍 planned，`invariant_i_59` 的 tasks 编号与 §39.10 权威语义差异
+    延续 1.1/1.5/2.2/2.3 的记录）。另修一处既有门禁缺口：`xtask migration-check` 的
+    `MIGRATION_TABLES` 只登记到 006，P2 前几片新增的 007—010 从未登记，补齐后
+    `[migration-check] PASS 10 个迁移脚本含 44 张必需表且无破坏性 DDL`。
+    详见 `docs/spec-notes/p2-manager-transfer.md` §2。
 - [ ] 3.3 实现检查点增量读取与接管确认事务，验证只读确认不产生管理权、确认后命令仍逐条校验当前委任（`invariant_i_60`、G-42）。
 - [ ] 3.4 实现历史成果/费用不可变与争议待核查标记，验证 `invariant_i_61`：新经理不能追溯修改旧接受或费用主体。
 - [ ] 3.5 实现专项委任边界与组织元数据分离，验证项目负责人不能越过专项范围指挥，reportsTo 变更不迁移 Run/租约/权限（`invariant_i_62`—`invariant_i_64`）。

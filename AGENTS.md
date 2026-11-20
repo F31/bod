@@ -162,6 +162,15 @@
   ——本模块没有改预算/计划/派发/成果的代码路径。实测修正两处：撤任后「头 epoch 大于委任行 epoch」
   是正常态，首版当成 `CorruptScopeHead`；epoch 因撤任也占一格，历史是 1/3/5 而非 1/3/4。暂停不递增
   epoch，且暂停期间不能直接换人（原子切换属 3.3）（23 项命名用例）。
+  切片 3.2 落地 `bod-app::staff_continuation`（只读投影，不建表）：执行座位只能从 Issue 的
+  Assignment 读出（构造入口没有 Appointment 参数），管理身份只来自当前委任，双向顶替都没有代码
+  路径；`Directive` 没有 Cancel/Stop/Restart/Redo，所以「切换不停止员工、不重跑、不重做」是类型
+  事实而非开关。已接受成果按「未取代 + 非待人工 + 接受指针指向该修订」保留，其余进
+  `stale_acceptances` 单列可数；旧经理兼任执行按 §19.10 分支——只有宿主显式声明可分离才 `Continue`，
+  未声明/不可分离/座位未登记一律 `RebuildViaHandoff` 指向 2.2/2.4/2.5，本模块不自己停进程。实测
+  A→B 切换后运行/接受/贡献逐字段相等、计划逐条不变、旧票 `StaleAppointment`，员工项与「谁走」
+  无关。同时补齐 `xtask migration-check` 自 007 起未登记的四个 P2 迁移（该检查此前一直是红的）
+  （19 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

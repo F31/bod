@@ -868,6 +868,31 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
+    /// 项目内修订的产出者（只读）：负责人切换要判断某项成果由谁以执行身份产出。
+    ///
+    /// 返回 `(revision_id, artifact_id, produced_by)`，按 revision_id 排序；不读内容。
+    pub fn list_project_revision_producers(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<(String, String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT revisions.revision_id, revisions.artifact_id, revisions.produced_by
+             FROM artifact_revisions AS revisions
+             JOIN artifacts ON artifacts.uid = revisions.artifact_id
+             WHERE revisions.company_id = ?1 AND artifacts.project_id = ?2
+             ORDER BY revisions.revision_id",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
     /// 项目运行 ID 列表：预算与执行事实按 Run 归属，需先落到项目范围。
     pub fn list_project_run_ids(
         &self,
@@ -880,6 +905,26 @@ impl SqliteStore {
         )?;
         let rows = stmt.query_map(params![company_id, project_id], |row| {
             row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目内 Run → Issue 归属（只读）：负责人切换的连续性投影按 Run 找执行者。
+    ///
+    /// 返回 `(run_id, issue_uid)` 并按 run_id 排序；执行者仍从 Issue 的 Assignment 读，
+    /// 不从 adapter 或调用方自述推导。
+    pub fn list_project_run_issues(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT runs.uid, runs.issue_uid FROM runs
+             JOIN issues ON issues.uid = runs.issue_uid
+             WHERE runs.company_id = ?1 AND issues.project_id = ?2 ORDER BY runs.uid",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }

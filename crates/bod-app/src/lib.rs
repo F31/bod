@@ -46,6 +46,7 @@ pub mod protocol_reliability;
 pub mod rebuild_precheck;
 pub mod recovery_models;
 pub mod resource_state;
+pub mod staff_continuation;
 pub mod store;
 pub mod takeover_intent;
 pub mod verification_registry;

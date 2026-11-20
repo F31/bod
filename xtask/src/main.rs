@@ -345,6 +345,22 @@ const MIGRATION_TABLES: &[(&str, &[&str])] = &[
             "cleanup_abandons",
         ],
     ),
+    // P2 切片新增迁移：先前几片只更新了 store 的计数断言，没登记到这里，
+    // 于是 `migration-check` 一直报「未登记」；3.2 收口时补齐（表仍只建表建索引）。
+    ("007_handoff.sql", &["handoff_snapshots"]),
+    (
+        "008_handoff_events.sql",
+        &["handoff_events", "handoff_acceptances"],
+    ),
+    ("009_takeover.sql", &["takeover_intents"]),
+    (
+        "010_management.sql",
+        &[
+            "management_appointments",
+            "management_scope_heads",
+            "management_commands",
+        ],
+    ),
 ];
 
 fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str>, Vec<String>) {
