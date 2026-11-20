@@ -43,7 +43,8 @@ use std::path::Path;
 /// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
 /// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图，
 /// 010 为 P2 管理委任/作用域头/命令审计，011 为 P2 检查点与接管确认，
-/// 012 为 P2 历史争议与接受五元组冻结；新增迁移只能追加，不可原地改写（§33.7）。
+/// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据；
+/// 新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_queue.sql"),
@@ -57,6 +58,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/010_management.sql"),
     include_str!("../migrations/011_handover_review.sql"),
     include_str!("../migrations/012_history_disputes.sql"),
+    include_str!("../migrations/013_scope_org.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -73,6 +75,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "010_management.sql",
     "011_handover_review.sql",
     "012_history_disputes.sql",
+    "013_scope_org.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -137,6 +140,42 @@ pub struct DisputeRow {
     pub resolved_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+/// 专项边界层级（P2 3.5）：只登记父子，不改 `issues` 表与域对象。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyRow {
+    pub issue_uid: String,
+    pub parent_issue_uid: String,
+}
+
+/// 租约事实（P2 3.5）：组织元数据变更前后逐字段比对，证明没有 fencing/迁移。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseFactRow {
+    pub resource_key: String,
+    pub owner: String,
+    pub lease_token: i64,
+    pub expires_at: Option<String>,
+    pub state: String,
+}
+
+/// 授权事实（P2 3.5）：reportsTo 变更不得改动任何一条 grant。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantFactRow {
+    pub principal_id: String,
+    pub project_id: Option<String>,
+    pub permission: String,
+    pub revision: i64,
+    pub active: i64,
+}
+
+/// 组织元数据行（`agent_org_metadata`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgMetadataRow {
+    pub agent_id: String,
+    pub reports_to: Option<String>,
+    pub updated_at_ms: i64,
+    pub updated_by: String,
 }
 
 #[derive(Debug)]
@@ -1091,6 +1130,148 @@ impl SqliteStore {
             params![dispute_id, state, resolution, resolved_by, at_ms],
         )?;
         Ok(changed == 1)
+    }
+
+    /// 公司级全部委任（只读）：专项边界的归属需要一次看全项目/各专项的活跃委任。
+    pub fn list_company_appointments(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<AppointmentRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{APPOINTMENT_SELECT} WHERE company_id = ?1 ORDER BY scope_key, authority_epoch"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id], map_appointment_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 公司级全部租约事实（只读）：reportsTo 变更前后比对「未 fencing」。
+    pub fn list_company_leases(&self, company_id: &str) -> Result<Vec<LeaseFactRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT resource_key, owner, lease_token, lease_expires_at, state
+             FROM leases WHERE company_id = ?1 ORDER BY resource_key",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            Ok(LeaseFactRow {
+                resource_key: row.get(0)?,
+                owner: row.get(1)?,
+                lease_token: row.get(2)?,
+                expires_at: row.get(3)?,
+                state: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 公司级全部授权事实（只读）：权限不因组织字段变化而迁移。
+    pub fn list_company_grants(&self, company_id: &str) -> Result<Vec<GrantFactRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT principal_id, project_id, permission, revision, active
+             FROM grants WHERE company_id = ?1 ORDER BY principal_id, permission, revision",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            Ok(GrantFactRow {
+                principal_id: row.get(0)?,
+                project_id: row.get(1)?,
+                permission: row.get(2)?,
+                revision: row.get(3)?,
+                active: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 项目内父子层级（只读）。
+    pub fn list_project_hierarchy(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<HierarchyRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT issue_uid, parent_issue_uid FROM issue_hierarchy
+             WHERE company_id = ?1 AND project_id = ?2 ORDER BY issue_uid",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            Ok(HierarchyRow {
+                issue_uid: row.get(0)?,
+                parent_issue_uid: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 登记一条父子关系。层级只写一次，改父节点由治理流程重建（本期不提供）。
+    pub fn insert_issue_hierarchy(
+        &self,
+        company_id: &str,
+        project_id: &str,
+        issue_uid: &str,
+        parent_issue_uid: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO issue_hierarchy (company_id, project_id, issue_uid, parent_issue_uid,
+                created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![company_id, project_id, issue_uid, parent_issue_uid, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// 成员是否存在（组织元数据只对已登记主体写入，避免拼写错误变成新手）。
+    pub fn member_exists(&self, company_id: &str, uid: &str) -> Result<bool, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM members WHERE company_id = ?1 AND uid = ?2",
+            params![company_id, uid],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn get_org_metadata(
+        &self,
+        company_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<OrgMetadataRow>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT agent_id, reports_to, updated_at_ms, updated_by
+                 FROM agent_org_metadata WHERE company_id = ?1 AND agent_id = ?2",
+                params![company_id, agent_id],
+                |row| {
+                    Ok(OrgMetadataRow {
+                        agent_id: row.get(0)?,
+                        reports_to: row.get(1)?,
+                        updated_at_ms: row.get(2)?,
+                        updated_by: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    pub fn upsert_org_metadata(
+        &self,
+        company_id: &str,
+        row: &OrgMetadataRow,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO agent_org_metadata (company_id, agent_id, reports_to, updated_at_ms,
+                updated_by) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(company_id, agent_id) DO UPDATE SET
+                reports_to = excluded.reports_to,
+                updated_at_ms = excluded.updated_at_ms,
+                updated_by = excluded.updated_by",
+            params![
+                company_id,
+                row.agent_id,
+                row.reports_to,
+                row.updated_at_ms,
+                row.updated_by
+            ],
+        )?;
+        Ok(())
     }
 
     /// 项目下仍在运行的 Issue 数（清理阻塞判定）。
@@ -4578,8 +4759,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 47,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 10 张 P2 表"
+            count, 49,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表"
         );
     }
 

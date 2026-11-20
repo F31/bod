@@ -47,6 +47,7 @@ pub mod protocol_reliability;
 pub mod rebuild_precheck;
 pub mod recovery_models;
 pub mod resource_state;
+pub mod scope_boundary;
 pub mod staff_continuation;
 pub mod store;
 pub mod takeover_intent;

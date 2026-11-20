@@ -185,6 +185,12 @@
   P3 的提案要求）。「重验旧成果」只有「保留旧接受 + 要求新提案」一个出口，改写接受、改费用主体、
   删历史三个请求在类型上恒错。核对中发现 `decisions` 表没有不可变约束，本切片只发现不阻止并如实
   记录（迁移 12 条 / 表 47 张，21 项命名用例）。
+  切片 3.5 落地 `bod-app::scope_boundary` 与迁移 `013_scope_org.sql`：专项边界靠新增层级表
+  `issue_hierarchy`（不改 `issues`/域对象，一次写定，载入查悬空与环）解析「最近的专项祖先优先」，
+  项目负责人越界指挥报 `CrossesSpecialBoundary`、在子树内建任务报 `BypassAttempt`、专项越出子树报
+  `OutsideScope`，撤任后子树回到项目委任；嵌套专项只由治理主体创建且只返回作用域。reportsTo 只写
+  `agent_org_metadata`，写入前后比对 issues/runs/leases/grants/appointments 摘要，「没有迁移状态」
+  是比对结果而不是声明（迁移 13 条 / 表 49 张，16 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

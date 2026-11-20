@@ -304,7 +304,25 @@
     边界：不判断「可用额度是否被重置」（预算解释属 3.1/4.x）、不实现影响图与重验调度（P3）、
     不写 `gates.yaml`（P2 绑定仍 planned）。本任务引用的 `invariant_i_61` 与 §39.11 语义一致，
     但同段的 G-40（费用风险保留）未因此验收。
-- [ ] 3.5 实现专项委任边界与组织元数据分离，验证项目负责人不能越过专项范围指挥，reportsTo 变更不迁移 Run/租约/权限（`invariant_i_62`—`invariant_i_64`）。
+- [x] 3.5 实现专项委任边界与组织元数据分离，验证项目负责人不能越过专项范围指挥，reportsTo 变更不迁移 Run/租约/权限（`invariant_i_62`—`invariant_i_64`）。
+  - 证据（2026-11-20，`cargo test -p bod-app scope_boundary` → 16 passed）：新增
+    `bod-app::scope_boundary` 与迁移 `013_scope_org.sql`（`issue_hierarchy`、`agent_org_metadata`），
+    迁移 12 → 13、表 47 → 49，`xtask migration-check` 同步登记。
+    层级单独登记而不改 `issues` 表与 `bod-core::Issue`（否则要动 37 处构造点），一次写定、
+    UPDATE/DELETE 都被 trigger 拒绝；载入时校验悬空父节点、自环/环（上限 64 层）与找不到的专项根。
+    归属判定按「最近的专项祖先优先，其次项目默认委任」：项目负责人指挥专项子树内的 Issue 报
+    `CrossesSpecialBoundary`（回显根、专项委任 id 与目标），在子树内建任务报 `BypassAttempt`
+    （与普通越界分开，防止「建个任务绕过去」），专项负责人越出子树报 `OutsideScope`；
+    撤任后子树自动回到项目委任。嵌套专项必须由治理主体创建、根必须落在父专项子树内且未被占用，
+    本模块只返回作用域，落库仍走 3.1 的 `appoint`。
+    reportsTo 只写 `agent_org_metadata`（无 roles/租约字段，结构上无法捎带执行状态），
+    写入前后对 issues/runs/leases/grants/appointments 求摘要，不等即
+    `MetadataTouchedExecution` 并拒绝；自指、未知成员、汇报环三种输入分别拒绝。
+    边界：不重算权限交集（`authorization` 仍是唯一判定处）、不落嵌套委任、层级不参与派发。
+    编号差异：tasks 引用的 I-62—I-64 在 §39.11 分别是「旧管理身份失效率不使独立执行反馈失效」
+    「切换/命令重复不产生双委任」「Committed 后只向前恢复且换人用新 epoch」，实际由 3.1/3.2 覆盖；
+    本切片按 manager-transfer 的「作用域边界」「组织元数据不迁移状态」两条需求落地，
+    不宣称 I-62—I-64 已验收。详见 `docs/spec-notes/p2-manager-transfer.md` §5。
 - [ ] 3.6 编写负责人切换操作说明到 `docs/spec-notes/p2-manager-transfer.md`，验证 §41.8 的每项验收要求都有对应命令与拒绝样本。
 
 ## 4. 公开符合性与双运行时
