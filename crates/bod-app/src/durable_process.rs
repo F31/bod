@@ -181,8 +181,23 @@ fn pid_alive(pid: u32) -> bool {
     })
 }
 
+/// `kill -0` 只证明「pid 还在进程表里」，**僵尸也满足它**——已退出但父进程没回收的进程
+/// 照样能收信号，signal 探测会一直说它活着。因此 Linux 侧的存活判断要看状态位。
+///
+/// `/proc/<pid>/stat` 的 `comm`（第二个字段）可以含空格与括号，所以取**最后一个** `)` 之后
+/// 的内容。返回 `None` 表示格式不认识，调用方应回落到 signal 探测，不要猜成活或死。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_stat_reports_dead(stat: &str) -> Option<bool> {
+    let rest = stat.rsplit_once(')')?.1;
+    let state = rest.trim_start().chars().next()?;
+    // Z = 僵尸；X/x = 已终止（新内核用它表示已死）；S/R/D/T 等一律算存活。
+    Some(matches!(state, 'Z' | 'X' | 'x'))
+}
+
+/// signal 探测。只用于**没有** `/proc` 的 Unix，以及 `/proc` 读不出来的场合
+/// （容器未挂载等）。这些场合下僵尸会被误判为存活——这是已知妥协，写在注释里而不是隐瞒。
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+fn kill_zero(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
@@ -193,6 +208,28 @@ fn pid_alive(pid: u32) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => match proc_stat_reports_dead(&stat) {
+            Some(dead) => !dead,
+            None => kill_zero(pid),
+        },
+        // /proc 里没有这一条：进程已不存在。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        // 读不出来时不猜，回落到 signal 探测。
+        Err(_) => kill_zero(pid),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_alive(pid: u32) -> bool {
+    kill_zero(pid)
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -1105,12 +1142,44 @@ mod tests {
             waited += Duration::from_millis(50);
         }
         assert!(!pid_alive(pid), "子进程应已消失");
+        // 先断言、后回收，顺序不能反：先 wait 掉僵尸，signal 探测也会返回 false，
+        // 这条断言就退化成同义反复，测不到「僵尸被判死」这件事。
+        if let Some(mut child) = first.children.remove("inv-died") {
+            let _ = child.wait();
+        }
         drop(first);
 
         let mut second = detect(&root).expect("第二个适配器");
         // 宿主不在时子进程死了：没有退出码，只能报未知；不能猜 Completed/Failed。
         assert_eq!(second.inspect("inv-died"), Some(ExecutionState::Unknown));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 僵尸判定是纯字符串解析，可以在任何平台测——而这正是 Linux 那条红灯的根因，
+    /// 不能只靠「在 Linux 上跑一遍」来兜。
+    #[test]
+    fn zombie_state_reads_as_dead_while_signal_probe_would_say_alive() {
+        // 真实 /proc/<pid>/stat 的形状：pid (comm) state ppid pgrp ...
+        assert_eq!(
+            proc_stat_reports_dead("1234 (python3) S 1 1234 1234 0 -1"),
+            Some(false),
+            "S（可中断睡眠）是活着"
+        );
+        assert_eq!(
+            proc_stat_reports_dead("1234 (python3) Z 1 1234 1234 0 -1"),
+            Some(true),
+            "Z（僵尸）必须判死：kill -0 对它仍然成功"
+        );
+        assert_eq!(proc_stat_reports_dead("1234 (python3) X 1"), Some(true));
+        assert_eq!(
+            proc_stat_reports_dead("1234 (my (weird) proc) Z 1"),
+            Some(true),
+            "comm 含空格与括号时按最后一个 ')' 切"
+        );
+        // 不认识就返回 None，让调用方回落；把垃圾当成「活着」会让进程永远收不了尾。
+        assert_eq!(proc_stat_reports_dead("garbage"), None);
+        assert_eq!(proc_stat_reports_dead("1234 (python3)"), None);
+        assert_eq!(proc_stat_reports_dead(""), None);
     }
 
     #[test]
