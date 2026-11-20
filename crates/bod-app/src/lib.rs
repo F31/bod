@@ -61,6 +61,7 @@ pub mod resource_state;
 pub mod runtime_verification;
 pub mod scope_boundary;
 pub mod staff_continuation;
+pub mod stage_manifest;
 pub mod store;
 pub mod takeover_intent;
 pub mod takeover_review;

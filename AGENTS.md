@@ -282,7 +282,7 @@
   **2.6 与 5.2 未勾选**：G-31 与「共享接口变化从发现到再次接受」需要真实项目样本，
   机器造不出来。出口结论 `blocked`（`docs/reports/p3-exit-evidence.md`），支持矩阵 §9 无 Supported 行，
   P3 的 I/G 绑定同样全部保持 planned。CI 见 `.github/workflows/ci.yml`（Linux + Windows + workbench + openspec）。
-- **P4 进行中（2026-11-21）**：`openspec/changes/p4-runtime-delivery` 任务 1.1—1.6 已勾选。
+- **P4 进行中（2026-11-21）**：`openspec/changes/p4-runtime-delivery` 任务 1.1—1.6、2.1—2.6 已勾选。
   `bod-app::runtime_verification` 把运行验收拆成五件事：计划必须覆盖五个面且 API/浏览器/Agent
   三类检查必须指名已有工具（自建引擎被拒）；报告绑定 commit/digest、规格与规则修订、环境、
   工具版本、执行者、时间与原始引用，不匹配分 `StaleCommit`（`invariant_i_08`）、`DigestMismatch`、
@@ -290,8 +290,16 @@
   晋升，平台进身份摘要，平台变化强制重建重验；门禁为 Required/Advisory/Manual ×
   Pass/Fail/Unknown/NotApplicable，未运行不是 Pass、`NotApplicable` 需豁免、豁免单独留痕；
   失败分类只有业务断言失败归咎代码，只换执行人不算独立验证。17 条命名用例 + 6 条漂移检查，
-  说明见 `docs/spec-notes/p4-verification.md`。**2.x—5.x 未开始**：阶段清单、发布治理与
-  覆盖回执需要真实环境与真实业务流程，未接入前不标 Supported；P4 的 I/G 绑定全部保持 planned。
+  说明见 `docs/spec-notes/p4-verification.md`。
+  `bod-app::stage_manifest` 承接对外表达：Manifest 冻结修订（浮动引用与名称一律拒绝）+
+  `base_revision` 乐观并发（过期即 Conflict，候选保留不动指针）+ 外部变化只登记 `PendingReview`；
+  `Publication` 的签发者/连接器声明未宿主核对即 `Unconfirmed`，`Fixed` 只在「已确认投递 + 验收通过」
+  出现；internal/customer/audit 三视图按字段类别裁剪，凭据在**任何**视图都不出现，客户视图只报
+  被扣数量；内容清单身份（排序后摘要）与运输文件身份分离，签名必须写明覆盖 payload，脱敏包不得
+  声称原始哈希链连续；离线校验固定五项分列，自签/嵌入公钥只证明包内一致（`invariant_i_52`、G-33）。
+  16 条命名用例 + 5 条漂移检查，说明见 `docs/spec-notes/p4-evidence.md`。
+  **3.x—5.x 未开始**：发布治理、覆盖回执与出口证据需要真实环境与真实业务流程，未接入前不标
+  Supported；P4 的 I/G 绑定全部保持 planned。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 
