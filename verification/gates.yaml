@@ -307,7 +307,7 @@
   tests: bod-app::budget_admission::tests::i_71_cancel_to_risk_keeps_total_and_never_double_counts
   status: implemented
   evidence: cargo test -p bod-app budget_admission
-  note: ""
+  note: "P1 4.6 并列用例（不替换 P0 目标）：bod-app::budget_dispatch_gate::tests::settled_fee_consumes_availability_and_blocks_with_stable_reactivation、bod-app::control_api::tests::g_21::exhausted_budget_blocks_dispatch_without_binding_and_keeps_accepted_delivery（InsufficientBudget 稳定阻塞、无 Binding、已接受成果与结算保留）。详见 docs/spec-notes/p1-budget-gate.md"
 - id: G-48
   kind: gate
   requirement: 缓存隔离/撤权/清空/容量与热点回源

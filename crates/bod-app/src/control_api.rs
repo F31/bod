@@ -4,6 +4,7 @@
 //! 只读查询路径不改变资源版本、不写事件、不调用派发探针。
 
 use crate::artifact_acceptance::{self, AcceptOutcome, AcceptRequest, AcceptanceStoreError};
+use crate::budget_dispatch_gate;
 use crate::domain::artifact::AcceptancePolicy;
 use crate::domain::model::{
     ControlChange, Denial, DenialReason, Grant, Issue, Permission, Principal, Scope, WriterKind,
@@ -418,12 +419,74 @@ impl ControlApi {
         }
 
         let queue_key = format!("issue:{}", issue_uid);
+        // 预算门禁（P1 4.6）：只读判定；耗尽时同一事务写稳定阻塞，不产生派发意图。
+        let gate = budget_dispatch_gate::evaluate_dispatch_budget(
+            &uow,
+            ctx.scope.company_id.as_str(),
+            issue.meta.project_id.as_ref().map(|id| id.as_str()),
+        )
+        .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
         let existing = uow
             .get_queue(ctx.scope.company_id.as_str(), &queue_key)
             .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
 
+        if let budget_dispatch_gate::BudgetGateOutcome::Blocked(block) = gate {
+            let mut entry = existing.unwrap_or_else(|| crate::domain::queue::WorkQueueEntry {
+                company_id: ctx.scope.company_id.clone(),
+                queue_key: queue_key.clone(),
+                state: crate::domain::queue::QueueState::Blocked,
+                wanted_generation: issue.meta.generation,
+                claimed_generation: 0,
+                completed_generation: 0,
+                next_due_at_ms: now_ms,
+                attempts: 0,
+                lease_owner: None,
+                lease_token: 0,
+                lease_expires_at_ms: None,
+                last_error: None,
+                blocked_reason: None,
+            });
+            // 稳定阻塞：只写队列状态；不预留、不写 Outbox/Attempt、不计数探针。
+            entry.wanted_generation = entry.wanted_generation.max(issue.meta.generation);
+            entry.state = crate::domain::queue::QueueState::Blocked;
+            entry.blocked_reason = Some(block.reason);
+            // 解除条件随队列行持久化：工作台的阻塞卡直接显示人读下一步。
+            entry.last_error = Some(block.reactivation.clone());
+            entry.next_due_at_ms = now_ms;
+            uow.put_queue(&entry)
+                .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
+            uow.commit()
+                .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
+            return Err(ApiError::conflict(
+                ctx.request_id,
+                block.stable_code(),
+                &block.message(),
+                &block.reactivation,
+            ));
+        }
+
         if let Some(entry) = existing {
             if entry.wanted_generation >= issue.meta.generation {
+                // 预算获批/提额后重新派发：清除稳定阻塞，并真正通知执行端一次。
+                if matches!(
+                    entry.blocked_reason,
+                    Some(crate::domain::DenialReason::InsufficientBudget)
+                ) {
+                    let mut next = entry;
+                    next.state = crate::domain::queue::QueueState::Pending;
+                    next.blocked_reason = None;
+                    next.last_error = None;
+                    next.next_due_at_ms = now_ms;
+                    uow.put_queue(&next)
+                        .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
+                    uow.commit()
+                        .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
+                    self.probe.record();
+                    return Ok(DispatchReceipt {
+                        queue_key,
+                        already_queued: false,
+                    });
+                }
                 // 已有覆盖该代的消费者：不新建第二个，也不重复派发。
                 return Ok(DispatchReceipt {
                     queue_key,
@@ -433,6 +496,8 @@ impl ControlApi {
             let mut next = entry;
             next.wanted_generation = issue.meta.generation;
             next.state = crate::domain::queue::QueueState::Pending;
+            next.blocked_reason = None;
+            next.last_error = None;
             next.next_due_at_ms = now_ms;
             uow.put_queue(&next)
                 .map_err(|err| ApiError::unavailable(ctx.request_id, err.to_string()))?;
@@ -865,6 +930,265 @@ mod tests {
                 .unwrap();
             assert!(second.already_queued, "同一代不新建第二个消费者");
             assert_eq!(api.dispatch_probe().count(), 1);
+        }
+
+        /// 项目预算 500 微元先真实结算，随后可用额为零（C=500、R/U=0）。
+        fn seed_exhausted_budget(store: &mut SqliteStore) {
+            use crate::budget_admission::{
+                AdmissionRequest, BudgetLimit, BudgetScopeKind, Measure, admit_in, settle_in,
+            };
+            let uow = store.transaction().unwrap();
+            for (kind, scope_id, limit) in [
+                (BudgetScopeKind::Company, "company-default", 5_000),
+                (BudgetScopeKind::Project, "project-1", 500),
+                (BudgetScopeKind::Agent, "coder-1", 5_000),
+                (BudgetScopeKind::Run, "run-1", 5_000),
+                (BudgetScopeKind::WorkPackage, "wp-1", 5_000),
+            ] {
+                uow.put_budget_limit(&BudgetLimit {
+                    company_id: id("company-default"),
+                    scope_kind: kind,
+                    scope_id: id(scope_id),
+                    measure: Measure::money_micros(0, "CNY"),
+                    limit,
+                    version: 1,
+                })
+                .unwrap();
+            }
+            uow.commit().unwrap();
+
+            let uow = store.transaction().unwrap();
+            let receipt = admit_in(
+                &uow,
+                &AdmissionRequest {
+                    reservation_id: "res-gated".to_string(),
+                    company_id: id("company-default"),
+                    project_id: id("project-1"),
+                    agent_id: id("coder-1"),
+                    run_id: id("run-1"),
+                    work_package_id: id("wp-1"),
+                    measure: Measure::money_micros(500, "CNY"),
+                    logical_key: "logic-gated".to_string(),
+                    destination_id: "executor-1".to_string(),
+                    source: "test".to_string(),
+                },
+                NOW,
+            )
+            .unwrap();
+            settle_in(
+                &uow,
+                &receipt.reservation_id,
+                "usage-gated",
+                500,
+                "test",
+                NOW + 1,
+            )
+            .unwrap();
+            uow.commit().unwrap();
+        }
+
+        /// 已接受成果：一条不可变接受记录 + 指向该修订的 accepted_revision。
+        fn seed_accepted_artifact(store: &mut SqliteStore) {
+            use crate::domain::artifact::{
+                AcceptanceBinding, AcceptanceDecision, AcceptanceRecord, Artifact, ArtifactKind,
+                ArtifactVisibility,
+            };
+            let uow = store.transaction().unwrap();
+            uow.insert_artifact(
+                &Artifact {
+                    id: id("artifact-1"),
+                    company_id: id("company-default"),
+                    project_id: id("project-1"),
+                    kind: ArtifactKind::SourceCode,
+                    title: "已接受交付".to_string(),
+                    owner: id("user-1"),
+                    visibility: ArtifactVisibility::Internal,
+                    accepted_revision: None,
+                },
+                NOW,
+            )
+            .unwrap();
+            uow.insert_acceptance(
+                "company-default",
+                &AcceptanceRecord {
+                    acceptance_id: id("acceptance-1"),
+                    artifact_id: id("artifact-1"),
+                    binding: AcceptanceBinding {
+                        work_package_revision: id("wp-1"),
+                        input_baseline: id("input-1"),
+                        artifact_revision: id("rev-1"),
+                        verification_rules: id("rules-1"),
+                        target_environment: id("env-1"),
+                        merge_combination: None,
+                    },
+                    decision: AcceptanceDecision::Accepted,
+                    actor: id("user-1"),
+                    reason: String::new(),
+                    evidence_refs: vec!["cas:digest-1".to_string()],
+                    accepted_at_ms: NOW,
+                    superseded_by: None,
+                },
+            )
+            .unwrap();
+            assert!(
+                uow.cas_accepted_revision("artifact-1", None, "rev-1")
+                    .unwrap()
+            );
+            uow.commit().unwrap();
+        }
+
+        #[test]
+        fn exhausted_budget_blocks_dispatch_without_binding_and_keeps_accepted_delivery() {
+            use crate::budget_admission::{BudgetLimit, BudgetScopeKind, Measure};
+            use crate::domain::queue::{EffectStatus, QueueState};
+            use crate::workbench_projection::{DecisionSource, collect_host_facts, project_home};
+
+            let (mut store, _path) = store();
+            seed(&mut store);
+            seed_exhausted_budget(&mut store);
+            seed_accepted_artifact(&mut store);
+
+            let reservations_before = store.list_reservations("company-default").unwrap();
+            let ledger_before = store.list_ledger_entries("company-default").unwrap();
+            let outbox_before = store.list_outbox_by_status(EffectStatus::Prepared).unwrap();
+            let attempts_before = store.count_attempts("company-default").unwrap();
+            let acceptances_before = store
+                .list_acceptances_for_company("company-default")
+                .unwrap();
+            let uow = store.transaction().unwrap();
+            let artifact_before = uow.get_artifact("artifact-1").unwrap().unwrap();
+            uow.commit().unwrap();
+
+            let api = ControlApi::new();
+            let coder = Principal {
+                id: id("coder-1"),
+                kind: PrincipalKind::Agent,
+                claimed_roles: Vec::new(),
+            };
+            let scope = scope();
+
+            // 重复请求都得到同一个稳定状态，不热重试、不新建任何派发产物。
+            for seq in 0..3 {
+                let error = api
+                    .request_dispatch(
+                        &mut store,
+                        &ctx(&format!("req-blocked-{seq}"), &coder, &scope),
+                        "issue-1",
+                        &dispatch_grants("coder-1", 1),
+                        NOW,
+                    )
+                    .unwrap_err();
+                assert_eq!(error.code, ErrorCode::Conflict);
+                assert_eq!(error.reason_code, "BOD_INSUFFICIENT_BUDGET");
+                assert!(error.next_step.contains("增加限额"));
+            }
+            assert_eq!(api.dispatch_probe().count(), 0, "阻塞派发不得触碰探针");
+
+            let queue = store.list_queue("company-default").unwrap();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].state, QueueState::Blocked);
+            assert_eq!(
+                queue[0].blocked_reason,
+                Some(crate::domain::DenialReason::InsufficientBudget)
+            );
+
+            // 不创建 Binding/派发意图：Reservation/Outbox/Attempt 均未新增。
+            assert_eq!(
+                store.list_reservations("company-default").unwrap().len(),
+                reservations_before.len()
+            );
+            assert_eq!(
+                store.list_ledger_entries("company-default").unwrap().len(),
+                ledger_before.len(),
+                "已结算费用不得被改写或重复入账"
+            );
+            assert_eq!(
+                store
+                    .list_outbox_by_status(EffectStatus::Prepared)
+                    .unwrap()
+                    .len(),
+                outbox_before.len()
+            );
+            assert_eq!(
+                store.count_attempts("company-default").unwrap(),
+                attempts_before
+            );
+
+            // 已接受成果原样保留。
+            assert_eq!(
+                store
+                    .list_acceptances_for_company("company-default")
+                    .unwrap(),
+                acceptances_before
+            );
+            let uow = store.transaction().unwrap();
+            assert_eq!(
+                uow.get_artifact("artifact-1").unwrap().unwrap(),
+                artifact_before
+            );
+            uow.commit().unwrap();
+
+            // 批准入口由工作台投影可见（真实宿主事实，不是写死的按钮）。
+            let facts = collect_host_facts(&store, "company-default", "project-1").unwrap();
+            let cards = project_home(&facts).decisions;
+            let budget_card = cards
+                .iter()
+                .find(|card| card.source == DecisionSource::Budget)
+                .expect("预算阻塞必须出现在待决定清单");
+            assert!(
+                budget_card
+                    .available_actions
+                    .iter()
+                    .any(|action| action == "approve_budget")
+            );
+            assert!(!budget_card.blocking_actor.is_empty());
+            assert!(!budget_card.required_decision.is_empty());
+            let blockers = project_home(&facts).blockers;
+            assert!(
+                blockers
+                    .iter()
+                    .any(|card| card.reason == "InsufficientBudget"
+                        && card.next_step.contains("增加限额"))
+            );
+
+            // 模拟批准：提高项目限额后再次派发，阻塞被显式解除且只通知一次。
+            let uow = store.transaction().unwrap();
+            uow.put_budget_limit(&BudgetLimit {
+                company_id: id("company-default"),
+                scope_kind: BudgetScopeKind::Project,
+                scope_id: id("project-1"),
+                measure: Measure::money_micros(0, "CNY"),
+                limit: 2_000,
+                version: 2,
+            })
+            .unwrap();
+            uow.commit().unwrap();
+            let receipt = api
+                .request_dispatch(
+                    &mut store,
+                    &ctx("req-approved", &coder, &scope),
+                    "issue-1",
+                    &dispatch_grants("coder-1", 1),
+                    NOW,
+                )
+                .unwrap();
+            assert!(!receipt.already_queued);
+            assert_eq!(api.dispatch_probe().count(), 1);
+            let queue = store.list_queue("company-default").unwrap();
+            assert_eq!(queue[0].state, QueueState::Pending);
+            assert_eq!(queue[0].blocked_reason, None);
+
+            // 解除阻塞不得回写已接受成果与已结算费用。
+            assert_eq!(
+                store
+                    .list_acceptances_for_company("company-default")
+                    .unwrap(),
+                acceptances_before
+            );
+            assert_eq!(
+                store.list_ledger_entries("company-default").unwrap().len(),
+                ledger_before.len()
+            );
         }
 
         #[test]

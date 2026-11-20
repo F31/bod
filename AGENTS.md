@@ -66,7 +66,14 @@
   首页四问（目标/下一项交付/受阻/待用户决定）与任务页证据视图；每张待决定卡强制带阻塞主体、
   所需决定与可采取动作，Unknown 不猜"已停止"，任务页证据按修订→成果关联归属并显示拒绝原因；
   `collect_host_facts` 只用 `SqliteStore` 只读 `list_*`、不写库不派发，相同事实得相同视图（I-55 的
-  P1 侧断言，module/tests 仍保持 P0 control_api 目标）。P1 的 4.6/4.7 与出口切片尚未开始。
+  P1 侧断言，module/tests 仍保持 P0 control_api 目标）。
+  已完成切片 4.6「预算耗尽派发门禁」——`bod-app::budget_dispatch_gate` 只读复核派发入口可确定的
+  Company/Project 显式限额（固定次序、未配置不阻塞），`control_api::request_dispatch` 在耗尽或已超额时
+  同事务写 `Blocked + InsufficientBudget + 解除条件`，返回稳定 409 `BOD_INSUFFICIENT_BUDGET`，
+  不创建 Reservation/Outbox/Attempt/Binding、不触碰派发探针；工作台可见 `approve_budget` 入口与具体解除条件，
+  提额后显式重派解除阻塞，已接受成果与已结算费用全程只读保留（G-45 的 P1 并列断言）。
+  入口只判 CNY 金额维度的 1 微元下界，真实请求量仍由 P0 `budget_admission::admit_in` 五层复核；
+  未新增提额命令，UI 动作仍只展示。P1 的 4.7 与出口切片（5.1—5.3）尚未开始。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 
