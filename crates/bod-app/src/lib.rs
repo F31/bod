@@ -26,6 +26,7 @@ pub mod continuation_card;
 pub mod control_api;
 pub mod delivery_verification;
 pub mod descriptor_schema;
+pub mod durable_process;
 pub mod effect_reconciliation;
 pub mod effect_recovery;
 pub mod fake_executor;

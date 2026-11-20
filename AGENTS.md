@@ -239,6 +239,14 @@
   （接续/双运行时/对照指标 `Planned`，三项机内已实测记 `Unverified`，无一行 `Supported`）。
   `tests/p2_exit_evidence.rs` 做漂移检查（6 条），并反向验证过：把结论改成 `ready` 立即失败。
   **5.3 未勾选**——验收要求的「与手工交接对比」依赖 5.2 的人工数据，4.4 缺第二运行配置与人工耗时。
+  为解 4.4 的能力缺口新增 `bod-app::durable_process`（`adapter.durable-process v1.0.0`）：
+  stdout/stderr 追加进会话目录事件文件、序号=行号、**不持久化读游标**（重启从 0 重放，由宿主
+  inbox 按序号去重），因此能以 test_result 声明 `recovery` + `reliable_observation`；宿主不在时
+  子进程已死则报 `Unknown` 而非终态。`Drop` 不杀子进程（否则无法重启接管），孤儿由 cancel 收尾。
+  11 条真实子进程用例；完整 conformance 实跑 pass=5/fail=0/na=9。**跑出结构性冲突**：闸门类
+  `auth-expired`/`sensitive-redaction` 需故障注入，真实适配器恒 `not_applicable` →
+  `enablement=Unverified` → `select()` 永远过滤真实候选（今天没有任何真实执行端可被调度准入）；
+  两条可选解留待评审，不单方面放宽证据。详见 `docs/spec-notes/p2-durable-adapter.md`。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

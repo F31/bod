@@ -390,6 +390,20 @@
     没有多候选选择位置），故不宣称「已在调度器禁用」；准入按声明+有效期而非 4.1 的 verified，
     该风险由 4.4 承担。详见 `docs/spec-notes/p2-conformance.md` §3。
 - [ ] 4.4 在两个真实运行配置上完成 L1/L2（适用时 L3）接续与负责人切换样本，验证 G-28、G-38—G-42 有实际报告、样本数与人工分钟，失败路径如实保留。
+  - 进展（2026-11-20，`cargo test -p bod-app --lib durable_process` → 11 passed）：
+    先解**能力缺口**——核查发现 L2 样本在 `adapter.local-process` 上根本产不出来（它如实声明
+    `reliable_observation`/`recovery` 为 unsupported，观察在内存里、重启即丢）。新增
+    `adapter.durable-process v1.0.0`：stdout/stderr 追加进会话目录事件文件，序号=行号，
+    重启从 0 重放由宿主 inbox 去重；`recovery` 靠会话目录 + 进程号存活判断（宿主不在时子进程
+    已死 → `Unknown`，不猜终态）。两项能力均以 test_result 声明，11 条真实子进程用例固定。
+    完整 conformance 实跑：pass=5 / fail=0 / na=9。
+  - **如实记录（结构性）**：闸门类用例 `auth-expired`、`sensitive-redaction` 被标 `needs_fault_injection`，
+    真实适配器恒为 `not_applicable` → `enablement=Unverified` → 4.3 的 `select()` 永远过滤掉真实
+    候选。即**今天没有任何真实执行端能被调度准入**；两条可选解（改用例驱动方式 / 区分
+    `not_applicable` 的准入含义）留待评审，本切片不单方面放宽证据。详见
+    `docs/spec-notes/p2-durable-adapter.md` §6。
+  - **仍未完成**：同任务样本的双配置 L1/L2 接续与负责人切换采样（需采样驱动）、
+    环境/版本/失败路径记录、人工耗时。故 4.4 保持未勾选。
 - [x] 4.5 实现发布验收检查（停止/重放/副作用/账号预算/证据）与日志脱敏，验证日志中无凭据值且能力缺失在探测/准入/UI 三处一致（G-4、G-46）。
   - 证据（2026-11-20，`cargo test -p bod-app --lib release_acceptance` → 15 passed；
     `cargo test -p bod` → 14 passed）：
