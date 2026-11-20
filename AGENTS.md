@@ -108,6 +108,13 @@
   六类事件按状态机折叠并重放校验，agent 只能 `requested/captured` 且限于自身 attempt，
   accept 幂等由 `(company_id, handoff_id)` 主键保证——重复请求返回同一序号与事件 id，
   不追加第二条事件、不新建第二份包或执行（14 + 17 项命名用例）。
+  切片 2.1 落地 `bod-app::takeover_intent`（迁移 `009_takeover.sql`）：意图按
+  `(company_id, takeover_key)` 幂等开单，阶段按 §19.1 八阶段推进并单独区分
+  `awaiting_summary` 与 `aborted`；「等待总结」是持久状态而非事务，重启后重载仍为
+  `awaiting_summary`、重复请求读回第一次时间而不推进版本，`invocations` 仍为 0；
+  所有写入走 `WHERE version = expected` 条件提交，迟到写入报 `VersionConflict` 并保留
+  先写者结果；进入 `attempt_created` 要求新 fencing token 严格大于旧值，但意图层只登记
+  不创建 Attempt（14 项命名用例）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

@@ -57,7 +57,22 @@
 
 ## 2. 接管事务
 
-- [ ] 2.1 实现持久交接意图与分阶段状态机、expected_version 条件提交，验证等待总结期间重启不重复请求或创建 Attempt。
+- [x] 2.1 实现持久交接意图与分阶段状态机、expected_version 条件提交，验证等待总结期间重启不重复请求或创建 Attempt。
+  - 证据（2026-11-20，`cargo test -p bod-app takeover_intent` → 14 passed）：新增
+    `bod-app::takeover_intent` 与迁移 `009_takeover.sql`（`takeover_intents`，只建表建索引）。
+    意图按 `(company_id, takeover_key)` 幂等开单：同键同内容 `AlreadyOpen` 且保留第一次创建时间，
+    同键不同内容 `IntentConflict`。阶段按 §19.1 八阶段推进并额外区分 `awaiting_summary`
+    与 `aborted`，任何非终态可中止但必须给原因；每次推进写一条 `{phase, at, note}` 历史，
+    读回时要求历史末条与阶段列一致，手工改库伪装阶段报 `CorruptRow`。
+    「等待总结」是持久状态而非事务：`request_summary` 只写请求与阶段，宿主在事务外等 Agent；
+    实测请求后丢弃内存态、从存储重载仍为 `awaiting_summary`，重复请求读回第一次时间且不推进版本
+    不追加历史，`attempt` 为 `None`、`invocations` 为 0、意图仍 1 条。
+    所有写入走 `UPDATE ... WHERE version = expected` 条件提交，受影响 0 行即 `VersionConflict`
+    并保留先写者结果；同阶段重复提交返回 `Unchanged` 不刷假历史。进入 `attempt_created` 必须
+    带 `AttemptCreation`，给了旧 token 时新 token 必须严格更大，但意图层只登记不创建 Attempt
+    （实测 `invocations`/`acceptances` 均为 0）。迁移条数断言 8→9、表计数 40→41。
+    边界：不判断旧执行是否真停（2.2）、不对账（2.3）、不预检（2.4）、不写 `gates.yaml`
+    （P2 绑定仍 planned）。详见 `docs/spec-notes/p2-takeover.md` §1。
 - [ ] 2.2 实现旧执行停止确认与隔离检查，验证 `invariant_i_48`：旧写入未停时新执行者写同一现场被拒绝，允许独立无冲突工作。
 - [ ] 2.3 实现 effect_id/逻辑动作键对账与不可信 reconcile_hint 过滤，验证恶意 hint 中的脚本或 URL 不被执行且不明结果只阻塞相关依赖。
 - [ ] 2.4 实现重建预检（摘要/授权/输入差异/文件/工具依赖）与 Question 生成，验证摘要不匹配时阻止自动继续。

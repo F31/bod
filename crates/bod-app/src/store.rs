@@ -31,6 +31,7 @@ use crate::recovery_models::{
     BackupRecord, BackupStatus, CaseState, CleanupAbandon, CleanupRequest, CleanupState,
     CleanupTargetKind, MigrationRecord, MigrationRisk, ReconciliationCase, RevisionPin,
 };
+use crate::takeover_intent::TakeoverIntentRow;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fmt;
 use std::fs;
@@ -38,7 +39,7 @@ use std::path::Path;
 
 /// 有序迁移列表。001 为 D1 领域表，002 为 D2 队列/outbox，003 为 D3 预算，
 /// 004 为 D4 执行协议，005 为 D5 成果/修订/接受，006 为 D6 恢复与清理，
-/// 007 为 P2 交接快照，008 为 P2 交接事件与接受；
+/// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图；
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
@@ -49,6 +50,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/006_recovery.sql"),
     include_str!("../migrations/007_handoff.sql"),
     include_str!("../migrations/008_handoff_events.sql"),
+    include_str!("../migrations/009_takeover.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -61,6 +63,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "006_recovery.sql",
     "007_handoff.sql",
     "008_handoff_events.sql",
+    "009_takeover.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -1312,6 +1315,158 @@ impl SqliteStore {
             .optional()
             .map_err(StoreError::Sql)
     }
+
+    /// 插入一条接管意图。同 `(company_id, takeover_key)` 已存在时不修改并返回 `false`：
+    /// 幂等开单由调用方读回比对内容，不允许覆盖第一次提出的切换。
+    pub fn insert_takeover_intent(&self, row: &TakeoverIntentRow) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO takeover_intents (
+                company_id, takeover_key, intent_id, project_id, issue_id,
+                work_package_revision, from_attempt_id, requested_by, reason,
+                baseline_fencing_token, created_at, phase, version, summary_state,
+                summary_requested_at, summary_snapshot_key, attempt_id, fencing_token,
+                abort_reason, history_json, updated_at, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                       ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+             ON CONFLICT(company_id, takeover_key) DO NOTHING",
+            params![
+                row.company_id,
+                row.takeover_key,
+                row.intent_id,
+                row.project_id,
+                row.issue_id,
+                row.work_package_revision,
+                row.from_attempt_id,
+                row.requested_by,
+                row.reason,
+                row.baseline_fencing_token.map(|value| value as i64),
+                row.created_at,
+                row.phase,
+                row.version as i64,
+                row.summary_state,
+                row.summary_requested_at,
+                row.summary_snapshot_key,
+                row.attempt_id,
+                row.fencing_token.map(|value| value as i64),
+                row.abort_reason,
+                row.history_json,
+                row.updated_at,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// 按 `(company_id, takeover_key)` 读取意图。
+    pub fn get_takeover_intent(
+        &self,
+        company_id: &str,
+        takeover_key: &str,
+    ) -> Result<Option<TakeoverIntentRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{TAKEOVER_INTENT_SELECT} WHERE company_id = ?1 AND takeover_key = ?2"),
+                params![company_id, takeover_key],
+                map_takeover_intent_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 列出某 Company 的全部意图（按提出时间）。重启扫描待接管工作用。
+    pub fn list_takeover_intents(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<TakeoverIntentRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{TAKEOVER_INTENT_SELECT} WHERE company_id = ?1 ORDER BY created_at, takeover_key"
+        ))?;
+        let rows = stmt
+            .query_map(params![company_id], map_takeover_intent_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 条件更新：只有库里的 `version` 仍等于 `expected_version` 才写入，并把它 +1。
+    ///
+    /// 返回是否真的改了行；`false` 表示别人的推进已经先到，调用方必须报版本冲突而不是覆盖。
+    pub fn update_takeover_intent_cas(
+        &self,
+        row: &TakeoverIntentRow,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        let updated = self.conn.execute(
+            "UPDATE takeover_intents SET
+                intent_id = ?3, project_id = ?4, issue_id = ?5, work_package_revision = ?6,
+                from_attempt_id = ?7, requested_by = ?8, reason = ?9,
+                baseline_fencing_token = ?10, created_at = ?11, phase = ?12, version = ?13,
+                summary_state = ?14, summary_requested_at = ?15, summary_snapshot_key = ?16,
+                attempt_id = ?17, fencing_token = ?18, abort_reason = ?19, history_json = ?20,
+                updated_at = ?21, recorded_at_ms = ?22
+             WHERE company_id = ?1 AND takeover_key = ?2 AND version = ?23",
+            params![
+                row.company_id,
+                row.takeover_key,
+                row.intent_id,
+                row.project_id,
+                row.issue_id,
+                row.work_package_revision,
+                row.from_attempt_id,
+                row.requested_by,
+                row.reason,
+                row.baseline_fencing_token.map(|value| value as i64),
+                row.created_at,
+                row.phase,
+                row.version as i64,
+                row.summary_state,
+                row.summary_requested_at,
+                row.summary_snapshot_key,
+                row.attempt_id,
+                row.fencing_token.map(|value| value as i64),
+                row.abort_reason,
+                row.history_json,
+                row.updated_at,
+                row.recorded_at_ms,
+                expected_version as i64,
+            ],
+        )?;
+        Ok(updated == 1)
+    }
+}
+
+/// 接管意图读取列。
+const TAKEOVER_INTENT_SELECT: &str = "SELECT company_id, takeover_key, intent_id, project_id,
+        issue_id, work_package_revision, from_attempt_id, requested_by, reason,
+        baseline_fencing_token, created_at, phase, version, summary_state, summary_requested_at,
+        summary_snapshot_key, attempt_id, fencing_token, abort_reason, history_json, updated_at,
+        recorded_at_ms
+     FROM takeover_intents";
+
+fn map_takeover_intent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TakeoverIntentRow> {
+    Ok(TakeoverIntentRow {
+        company_id: row.get(0)?,
+        takeover_key: row.get(1)?,
+        intent_id: row.get(2)?,
+        project_id: row.get(3)?,
+        issue_id: row.get(4)?,
+        work_package_revision: row.get(5)?,
+        from_attempt_id: row.get(6)?,
+        requested_by: row.get(7)?,
+        reason: row.get(8)?,
+        baseline_fencing_token: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
+        created_at: row.get(10)?,
+        phase: row.get(11)?,
+        version: row.get::<_, i64>(12)? as u64,
+        summary_state: row.get(13)?,
+        summary_requested_at: row.get(14)?,
+        summary_snapshot_key: row.get(15)?,
+        attempt_id: row.get(16)?,
+        fencing_token: row.get::<_, Option<i64>>(17)?.map(|value| value as u64),
+        abort_reason: row.get(18)?,
+        history_json: row.get(19)?,
+        updated_at: row.get(20)?,
+        recorded_at_ms: row.get(21)?,
+    })
 }
 
 /// 交接事件读取列。
@@ -3486,8 +3641,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 40,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 3 张 P2 表"
+            count, 41,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 4 张 P2 表"
         );
     }
 

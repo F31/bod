@@ -42,6 +42,7 @@ pub mod protocol_reliability;
 pub mod recovery_models;
 pub mod resource_state;
 pub mod store;
+pub mod takeover_intent;
 pub mod verification_registry;
 pub mod wakeup;
 pub mod workbench_projection;
