@@ -19,6 +19,7 @@ pub mod claim_concurrency;
 pub mod clarity_dialogue;
 pub mod cleanup_recovery;
 pub mod coding_integration;
+pub mod collaboration_plan;
 pub mod config;
 pub mod conformance_report;
 pub mod context_handoff;
