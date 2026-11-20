@@ -357,7 +357,22 @@
     CLI 新增 `bod conformance` / `--fake-only` / `--json`，与 P0 的 `bod adapter conformance`
     并存（后者仍是 `verification/gates.yaml` 引用的证据命令，未改动）。
     本切片只做报告，不做禁用（4.2）与调度过滤（4.3）。详见 `docs/spec-notes/p2-conformance.md` §1。
-- [ ] 4.2 实现必需用例集合（范围身份、重复 start、参数冲突、丢回包、迟到观察、取消未确认、版本不匹配、敏感字段过滤、completed 与接受分离），验证身份/授权/完整性失败时适配器被禁用（`invariant_i_57`、G-17）。
+- [x] 4.2 实现必需用例集合（范围身份、重复 start、参数冲突、丢回包、迟到观察、取消未确认、版本不匹配、敏感字段过滤、completed 与接受分离），验证身份/授权/完整性失败时适配器被禁用（`invariant_i_57`、G-17）。
+  - 证据（2026-11-20，`cargo test -p bod-app --lib adapter_conformance` → 8 passed；
+    `observation_redaction` → 9 passed；`conformance_report` → 12 passed）：
+    九类必需用例映射到 14 个命名用例，新增 `scope-identity`（跨公司同 ID 返回
+    `E_SCOPE_MISMATCH`）、`protocol-version`（协议/版本必须可核对）、`sensitive-redaction`
+    （落库前替换 Bearer/JSON 键值/命令行参数，`ObservationReceipt` 增 `redactions`）、
+    `late-observation`（终态后普通观察仍持久接收且不推翻终态）；`late-final-cost` 不再兼任
+    「迟到观察」。
+    用例分类 `identity/authorization/integrity/behaviour`，`enablement(report)` 三态
+    `Enabled` / `Unverified` / `Blocked`：闸门类失败即 `Blocked`，失败优先于未测；
+    「degraded 不能豁免」是结构保证——`enablement` 的入参只有报告，读不到描述符。
+    **修复真实缺陷**：`invocations` 主键全局唯一但 `submit_start` 未校验公司，跨公司同 ID 会
+    返回别家 `execution_id`；已在同参判定前拦下（审计 outcome 复用 `params_rejected` 并在
+    detail 写明作用域，如实记录分类不精确）。
+    新增 `bod-app::observation_redaction`（四类形态、中文键与全角冒号、证书不误伤）。
+    详见 `docs/spec-notes/p2-conformance.md` §2。本切片只交付判定，未接入派发拦截（属 4.3/5.x）。
 - [ ] 4.3 实现可选能力声明驱动的验证与调度过滤，验证不支持 recovery 的适配器不能承接需恢复保证的任务且界面显示一致限制。
 - [ ] 4.4 在两个真实运行配置上完成 L1/L2（适用时 L3）接续与负责人切换样本，验证 G-28、G-38—G-42 有实际报告、样本数与人工分钟，失败路径如实保留。
 - [ ] 4.5 实现发布验收检查（停止/重放/副作用/账号预算/证据）与日志脱敏，验证日志中无凭据值且能力缺失在探测/准入/UI 三处一致（G-4、G-46）。

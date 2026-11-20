@@ -130,6 +130,28 @@ pub fn submit_start(
 
     match existing {
         Some(record) => {
+            // 范围身份（4.2）：invocation_id 全局唯一，但归属只属于第一次受理它的公司。
+            // 另一家公司拿同一个 ID 重发不是「重放」，是串号 —— 必须在同参判定之前拦下，
+            // 否则会把别家的 execution_id 交出去。
+            if record.company_id != company_id {
+                let uow = store.transaction()?;
+                // `start_audits.outcome` 的枚举没有 scope 取值（改它要重建表），
+                // 这里归到「同 ID 被拒」一类，具体原因写进 detail，检索时按 detail 过滤。
+                uow.record_start_audit(
+                    &invocation_id,
+                    "params_rejected",
+                    Some("作用域不匹配：同一 invocation_id 已属于另一家公司"),
+                    now_ms,
+                )?;
+                uow.commit()?;
+                return Ok(StartVerdict::Rejected {
+                    code: "E_SCOPE_MISMATCH",
+                    reason: format!(
+                        "invocation {} 已属于公司 {}，不接受 {} 的提交",
+                        invocation_id, record.company_id, company_id
+                    ),
+                });
+            }
             if !record.same_params(request) {
                 let uow = store.transaction()?;
                 uow.record_start_audit(

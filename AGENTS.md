@@ -202,6 +202,15 @@
   ACK 推进、迟到费用接收当适配器能力证据，因此 Fake 的 `external_idempotency` 如实判为
   `declared_only` 而非 `verified`（11 项命名用例 + 3 项 CLI 用例，详见
   `docs/spec-notes/p2-conformance.md`）。
+  切片 4.2 补齐九类必需用例（用例集 10 → 14，新增 `scope-identity` / `protocol-version` /
+  `sensitive-redaction` / `late-observation`），把用例分为 identity/authorization/integrity/
+  behaviour 四类，`enablement(report)` 三态 `Enabled`/`Unverified`/`Blocked`——闸门类失败即禁用、
+  失败优先于未测，且「degraded 不能豁免」是结构保证（入参只有报告，读不到描述符）。同时新增
+  `observation_redaction` 并在 `receive_observation` 落库前生效。**修复真实缺陷**：`invocations`
+  主键全局唯一但 `submit_start` 未校验公司，跨公司同 ID 会返回别家 `execution_id`（现报
+  `E_SCOPE_MISMATCH`）；审计 outcome 枚举缺 scope 取值，复用 `params_rejected` 并如实记录分类不精确。
+  另把 `local_process` 真实进程用例的观察窗口从 2s 提到 10s（断言未放宽），因新增测试后全量并行
+  时解释器启动超过 2s（详见 `p2-conformance.md` §2）。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

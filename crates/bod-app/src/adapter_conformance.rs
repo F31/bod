@@ -22,77 +22,158 @@ use crate::protocol_reliability::{
 use crate::store::SqliteStore;
 use std::fmt::Write as _;
 
+/// 用例类别。身份、授权与消息完整性三类是**准入闸门**：
+/// 任一失败即禁用该适配器执行（4.2 / `invariant_i_57`、G-17），不允许用 `degraded` 声明豁免。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseClass {
+    Identity,
+    Authorization,
+    Integrity,
+    Behaviour,
+}
+
+impl CaseClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Authorization => "authorization",
+            Self::Integrity => "integrity",
+            Self::Behaviour => "behaviour",
+        }
+    }
+
+    /// 是否属于「失败即禁用」的闸门类别。
+    pub const fn is_gating(self) -> bool {
+        matches!(self, Self::Identity | Self::Authorization | Self::Integrity)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConformanceCase {
     pub id: &'static str,
     /// 对应的规格要求（spec delta 的 Requirement 名）。
     pub requirement: &'static str,
     pub scenario: FakeScenario,
+    pub class: CaseClass,
     /// 是否必须由具备故障注入能力的适配器驱动。
     pub needs_fault_injection: bool,
 }
 
-pub const CASES: [ConformanceCase; 10] = [
+const fn case(
+    id: &'static str,
+    requirement: &'static str,
+    scenario: FakeScenario,
+    class: CaseClass,
+    needs_fault_injection: bool,
+) -> ConformanceCase {
     ConformanceCase {
-        id: "duplicate-start",
-        requirement: "Start 请求与持久去重",
-        scenario: FakeScenario::HappyPath,
-        needs_fault_injection: false,
-    },
-    ConformanceCase {
-        id: "params-conflict",
-        requirement: "Start 请求与持久去重",
-        scenario: FakeScenario::HappyPath,
-        needs_fault_injection: false,
-    },
-    ConformanceCase {
-        id: "start-reply-lost",
-        requirement: "回包丢失先对账",
-        scenario: FakeScenario::ReplyLostOnce,
-        needs_fault_injection: true,
-    },
-    ConformanceCase {
-        id: "observation-out-of-order",
-        requirement: "观察信封与缺口",
-        scenario: FakeScenario::OutOfOrder,
-        needs_fault_injection: true,
-    },
-    ConformanceCase {
-        id: "observation-gap",
-        requirement: "观察信封与缺口",
-        scenario: FakeScenario::GapBeyondRetention,
-        needs_fault_injection: true,
-    },
-    ConformanceCase {
-        id: "process-exit-zero",
-        requirement: "接收状态与终态边界",
-        scenario: FakeScenario::ProcessExitZero,
-        needs_fault_injection: true,
-    },
-    ConformanceCase {
-        id: "cancel-request-vs-confirm",
-        requirement: "接收状态与终态边界",
-        scenario: FakeScenario::CancelUnconfirmed,
-        needs_fault_injection: false,
-    },
-    ConformanceCase {
-        id: "auth-expired",
-        requirement: "必需操作与分项探测",
-        scenario: FakeScenario::AuthExpired,
-        needs_fault_injection: true,
-    },
-    ConformanceCase {
-        id: "huge-log",
-        requirement: "观察信封与缺口",
-        scenario: FakeScenario::HugeLog,
-        needs_fault_injection: true,
-    },
-    ConformanceCase {
-        id: "late-final-cost",
-        requirement: "接收状态与终态边界",
-        scenario: FakeScenario::LateCost,
-        needs_fault_injection: true,
-    },
+        id,
+        requirement,
+        scenario,
+        class,
+        needs_fault_injection,
+    }
+}
+
+pub const CASES: [ConformanceCase; 14] = [
+    case(
+        "scope-identity",
+        "必需用例：范围身份",
+        FakeScenario::HappyPath,
+        CaseClass::Identity,
+        false,
+    ),
+    case(
+        "duplicate-start",
+        "Start 请求与持久去重",
+        FakeScenario::HappyPath,
+        CaseClass::Integrity,
+        false,
+    ),
+    case(
+        "params-conflict",
+        "Start 请求与持久去重",
+        FakeScenario::HappyPath,
+        CaseClass::Integrity,
+        false,
+    ),
+    case(
+        "protocol-version",
+        "必需用例：版本不匹配",
+        FakeScenario::HappyPath,
+        CaseClass::Integrity,
+        false,
+    ),
+    case(
+        "start-reply-lost",
+        "回包丢失先对账",
+        FakeScenario::ReplyLostOnce,
+        CaseClass::Behaviour,
+        true,
+    ),
+    case(
+        "observation-out-of-order",
+        "观察信封与缺口",
+        FakeScenario::OutOfOrder,
+        CaseClass::Behaviour,
+        true,
+    ),
+    case(
+        "observation-gap",
+        "观察信封与缺口",
+        FakeScenario::GapBeyondRetention,
+        CaseClass::Behaviour,
+        true,
+    ),
+    case(
+        "process-exit-zero",
+        "接收状态与终态边界",
+        FakeScenario::ProcessExitZero,
+        CaseClass::Behaviour,
+        true,
+    ),
+    case(
+        "cancel-request-vs-confirm",
+        "接收状态与终态边界",
+        FakeScenario::CancelUnconfirmed,
+        CaseClass::Behaviour,
+        false,
+    ),
+    case(
+        "auth-expired",
+        "必需操作与分项探测",
+        FakeScenario::AuthExpired,
+        CaseClass::Authorization,
+        true,
+    ),
+    case(
+        "huge-log",
+        "观察信封与缺口",
+        FakeScenario::HugeLog,
+        CaseClass::Behaviour,
+        true,
+    ),
+    case(
+        "late-final-cost",
+        "接收状态与终态边界",
+        FakeScenario::LateCost,
+        CaseClass::Behaviour,
+        true,
+    ),
+    case(
+        "sensitive-redaction",
+        "必需用例：敏感字段过滤",
+        FakeScenario::SensitivePayload,
+        CaseClass::Integrity,
+        true,
+    ),
+    case(
+        "late-observation",
+        "必需用例：迟到观察",
+        FakeScenario::LateProgress,
+        CaseClass::Behaviour,
+        true,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +367,10 @@ fn dispatch_case(
         "auth-expired" => case_auth_expired(transport, now_ms),
         "huge-log" => case_huge_log(transport, now_ms),
         "late-final-cost" => case_late_cost(transport, now_ms),
+        "scope-identity" => case_scope_identity(transport, now_ms),
+        "protocol-version" => case_protocol_version(transport, now_ms),
+        "sensitive-redaction" => case_sensitive_redaction(transport, now_ms),
+        "late-observation" => case_late_observation(transport, now_ms),
         other => Err(format!("未实现的 conformance 用例: {other}")),
     }
 }
@@ -611,6 +696,216 @@ fn case_late_cost(transport: &mut dyn StartTransport, now_ms: i64) -> Result<usi
     Ok(assertions)
 }
 
+// ---------------------------------------------------------------------------
+// 4.2 新增的四个必需用例
+// ---------------------------------------------------------------------------
+
+/// 范围身份：`invocation_id` 全局唯一，但归属只属于第一次受理它的公司。
+/// 另一家公司拿同一个 ID 重发不是重放，必须在同参判定之前被拒。
+fn case_scope_identity(transport: &mut dyn StartTransport, now_ms: i64) -> Result<usize, String> {
+    let mut store = store()?;
+    let request = conformance_request("inv-scope");
+    let first = submit_start(&mut store, transport, "company-a", &request, now_ms)
+        .map_err(|err| err.to_string())?;
+    let mut assertions = 0;
+    assertions += assert_true(
+        matches!(first, StartVerdict::Accepted { .. }),
+        "首次提交必须被受理",
+    )?;
+
+    let second = submit_start(&mut store, transport, "company-b", &request, now_ms + 10)
+        .map_err(|err| err.to_string())?;
+    match second {
+        StartVerdict::Rejected { code, reason } => {
+            assertions += assert_true(
+                code == "E_SCOPE_MISMATCH",
+                &format!("跨公司重发应报 E_SCOPE_MISMATCH，实际 {code}"),
+            )?;
+            assertions += assert_true(reason.contains("company-a"), "拒绝理由必须点明原归属公司")?;
+        }
+        other => return Err(format!("跨公司同 ID 提交未被拒绝: {other:?}")),
+    }
+    assertions += assert_true(
+        store
+            .list_invocations("company-a")
+            .map_err(|err| err.to_string())?
+            .len()
+            == 1,
+        "原公司仍只有一条 invocation",
+    )?;
+    assertions += assert_true(
+        store
+            .list_invocations("company-b")
+            .map_err(|err| err.to_string())?
+            .is_empty(),
+        "另一家公司不得因同 ID 获得 invocation 记录",
+    )?;
+    Ok(assertions)
+}
+
+/// 版本不匹配：描述符里的协议版本必须与宿主支持的版本一致，且适配器版本可读。
+/// 不一致属 Integrity 类失败 —— 适配器被禁用，而不是「试着跑跑看」。
+fn case_protocol_version(
+    transport: &mut dyn StartTransport,
+    _now_ms: i64,
+) -> Result<usize, String> {
+    let descriptor = transport.descriptor();
+    let mut assertions = 0;
+    assertions += assert_true(
+        descriptor.protocol == PROTOCOL_ID,
+        &format!(
+            "适配器协议 {} 与宿主 {} 不一致；版本不匹配必须禁用该适配器",
+            descriptor.protocol, PROTOCOL_ID
+        ),
+    )?;
+    assertions += assert_true(
+        !descriptor.adapter_version.trim().is_empty(),
+        "适配器版本为空时无法核对报告与支持矩阵",
+    )?;
+    Ok(assertions)
+}
+
+/// 敏感字段过滤：观察里的凭据形态内容必须在落库前被替换，且留下脱敏标记。
+fn case_sensitive_redaction(
+    transport: &mut dyn StartTransport,
+    now_ms: i64,
+) -> Result<usize, String> {
+    let mut store = store()?;
+    let envelopes = transport.observations("inv-redact");
+    if envelopes.is_empty() {
+        return Err("适配器未提供观察，无法验证敏感字段过滤".to_string());
+    }
+    let mut assertions = 0;
+    let mut total_redactions = 0usize;
+    for envelope in envelopes {
+        let receipt = receive_observation(&mut store, &envelope, None, now_ms)
+            .map_err(|err| err.to_string())?;
+        total_redactions += receipt.redactions;
+    }
+    assertions += assert_true(
+        total_redactions >= 3,
+        &format!("Bearer / JSON 键值 / 命令行参数三类都应被识别，实际 {total_redactions} 处"),
+    )?;
+    let stored = pending_observations(&mut store, "inv-redact").map_err(|err| err.to_string())?;
+    let joined = stored
+        .iter()
+        .map(|item| item.payload.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for secret in ["sk-live-abcdef0123456789", "abcd1234efgh5678", "hunter2"] {
+        assertions += assert_true(
+            !joined.contains(secret),
+            &format!("落库内容仍含凭据片段 {secret}"),
+        )?;
+    }
+    assertions += assert_true(
+        joined.contains("<redacted:"),
+        "应留下脱敏标记，让读者知道这里本来有秘密",
+    )?;
+    Ok(assertions)
+}
+
+/// 迟到观察：终态之后到达的**普通**观察仍要持久接收，且不得推翻权威终态。
+/// 与 `late-final-cost` 的区别是这里不含费用，验的是「终态之后的一切观察」。
+fn case_late_observation(transport: &mut dyn StartTransport, now_ms: i64) -> Result<usize, String> {
+    let mut store = store()?;
+    let request = conformance_request("inv-late");
+    submit_start(&mut store, transport, "company-default", &request, now_ms)
+        .map_err(|err| err.to_string())?;
+    let envelopes = transport.observations("inv-late");
+    if envelopes.len() < 2 {
+        return Err("适配器未提供终态后的观察样本".to_string());
+    }
+    advance_invocation_state(
+        &mut store,
+        "inv-late",
+        ExecutionState::Completed,
+        TransitionAuthority::Observed,
+        now_ms + 1,
+    )
+    .map_err(|err| err.to_string())?;
+
+    let mut assertions = 0;
+    for envelope in envelopes {
+        let receipt = receive_observation(&mut store, &envelope, None, now_ms + 2)
+            .map_err(|err| err.to_string())?;
+        assertions += assert_true(receipt.persisted, "终态后到达的观察仍要持久接收")?;
+    }
+    let invocations = store
+        .list_invocations("company-default")
+        .map_err(|err| err.to_string())?;
+    assertions += assert_true(
+        invocations[0].state == ExecutionState::Completed,
+        "迟到观察不得推翻权威终态",
+    )?;
+    Ok(assertions)
+}
+
+// ---------------------------------------------------------------------------
+// 4.2 准入判定：闸门类用例失败即禁用
+// ---------------------------------------------------------------------------
+
+/// 适配器启用判定。
+///
+/// 只看**用例结果**，不看适配器自报的 `limitations`：声明 `degraded` 不能豁免，
+/// 因为 `enablement` 的入参里根本没有描述符。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Enablement {
+    /// 闸门类用例全部通过。
+    Enabled,
+    /// 没有失败，但闸门类有 not_applicable —— 未取得证据，不得标 Supported。
+    Unverified { cases: Vec<&'static str> },
+    /// 闸门类有用例失败：禁用执行。
+    Blocked {
+        failures: Vec<(&'static str, String)>,
+    },
+}
+
+impl Enablement {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Unverified { .. } => "unverified",
+            Self::Blocked { .. } => "blocked",
+        }
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, Self::Blocked { .. })
+    }
+
+    /// 是否允许在「探测/试用」范围内使用（未验证可以试用，被禁用不行）。
+    pub fn may_probe(&self) -> bool {
+        !self.is_blocked()
+    }
+}
+
+/// 对一份 conformance 报告做准入判定。
+pub fn enablement(report: &ConformanceReport) -> Enablement {
+    let mut failures: Vec<(&'static str, String)> = Vec::new();
+    let mut unverified: Vec<&'static str> = Vec::new();
+    for outcome in &report.outcomes {
+        let Some(case) = CASES.iter().find(|case| case.id == outcome.id) else {
+            continue;
+        };
+        if !case.class.is_gating() {
+            continue;
+        }
+        match &outcome.status {
+            CaseStatus::Pass { .. } => {}
+            CaseStatus::Fail { detail } => failures.push((outcome.id, detail.clone())),
+            CaseStatus::NotApplicable { .. } => unverified.push(outcome.id),
+        }
+    }
+    if !failures.is_empty() {
+        return Enablement::Blocked { failures };
+    }
+    if !unverified.is_empty() {
+        return Enablement::Unverified { cases: unverified };
+    }
+    Enablement::Enabled
+}
+
 /// 便捷入口：对 Fake Executor 跑全套，并断言 Fake 不产生生产能力声明。
 pub fn verify_fake_suite(now_ms: i64) -> Result<ConformanceReport, String> {
     let report = run_fake_suite(now_ms);
@@ -706,7 +1001,7 @@ mod tests {
         let (pass, fail, na) = report.summary();
         assert_eq!(fail, 0, "可适用用例不得失败: {}", report.to_markdown());
         assert!(pass >= 3, "至少应有 3 个可适用用例真跑");
-        assert_eq!(na, 7, "7 个故障注入用例应如实标 not_applicable");
+        assert_eq!(na, 9, "9 个故障注入用例应如实标 not_applicable");
         for outcome in &report.outcomes {
             if case_needs_fault(outcome.id) {
                 assert!(matches!(outcome.status, CaseStatus::NotApplicable { .. }));
@@ -719,6 +1014,94 @@ mod tests {
             .iter()
             .find(|case| case.id == id)
             .is_some_and(|case| case.needs_fault_injection)
+    }
+
+    #[test]
+    fn gating_failure_blocks_enablement_even_when_adapter_claims_degraded() {
+        let mut report = run_fake_suite(1_763_500_000_000);
+        assert_eq!(enablement(&report), Enablement::Enabled);
+
+        let outcome = report
+            .outcomes
+            .iter_mut()
+            .find(|outcome| outcome.id == "scope-identity")
+            .expect("身份用例应存在");
+        outcome.status = CaseStatus::Fail {
+            detail: "跨公司同 ID 未被拒绝".to_string(),
+        };
+
+        // `enablement` 的入参只有报告：适配器把 limitations 写成 degraded 也无处生效。
+        let verdict = enablement(&report);
+        match &verdict {
+            Enablement::Blocked { failures } => {
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].0, "scope-identity");
+                assert!(failures[0].1.contains("跨公司"));
+            }
+            other => panic!("闸门类失败必须禁用，实际 {other:?}"),
+        }
+        assert!(!verdict.may_probe());
+    }
+
+    #[test]
+    fn behaviour_failure_does_not_block_by_itself() {
+        let mut report = run_fake_suite(1_763_500_000_000);
+        let outcome = report
+            .outcomes
+            .iter_mut()
+            .find(|outcome| outcome.id == "huge-log")
+            .expect("用例应存在");
+        outcome.status = CaseStatus::Fail {
+            detail: "截断长度未记录".to_string(),
+        };
+        assert_eq!(enablement(&report), Enablement::Enabled);
+    }
+
+    #[test]
+    fn gating_not_applicable_is_unverified_not_enabled() {
+        struct Plain(FakeExecutor);
+        impl StartTransport for Plain {
+            fn descriptor(&self) -> &crate::domain::execution::AdapterDescriptor {
+                self.0.descriptor()
+            }
+            fn start(&mut self, request: &StartRequest) -> crate::invocation::StartOutcome {
+                self.0.start(request)
+            }
+            fn inspect(&mut self, invocation_id: &str) -> Option<ExecutionState> {
+                self.0.inspect(invocation_id)
+            }
+        }
+        let mut transport = Plain(FakeExecutor::new(FakeScenario::HappyPath));
+        let report = run_live_suite(&mut transport, 1_763_500_000_000);
+        match enablement(&report) {
+            Enablement::Unverified { cases } => {
+                // 没有故障注入就驱动不了凭据失效场景：授权类拿不到证据。
+                assert!(cases.contains(&"auth-expired"), "实际 {cases:?}");
+            }
+            other => panic!("未取得授权证据应为 unverified，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gating_failure_takes_precedence_over_not_applicable() {
+        let mut report = run_fake_suite(1_763_500_000_000);
+        let auth = report
+            .outcomes
+            .iter_mut()
+            .find(|outcome| outcome.id == "auth-expired")
+            .expect("用例应存在");
+        auth.status = CaseStatus::NotApplicable {
+            reason: "无注入".to_string(),
+        };
+        let scope = report
+            .outcomes
+            .iter_mut()
+            .find(|outcome| outcome.id == "scope-identity")
+            .expect("用例应存在");
+        scope.status = CaseStatus::Fail {
+            detail: "串号".to_string(),
+        };
+        assert!(enablement(&report).is_blocked(), "失败优先于未测");
     }
 
     #[test]

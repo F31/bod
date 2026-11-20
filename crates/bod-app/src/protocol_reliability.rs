@@ -25,6 +25,8 @@ pub struct ObservationReceipt {
     pub missing: Option<(u64, u64)>,
     /// 截断时的原始字节数，如实记录而不假装完整。
     pub truncated_from: Option<usize>,
+    /// 落库前被脱敏的敏感字段个数；0 表示没有命中。
+    pub redactions: usize,
     /// 观察若携带状态变化，返回宿主侧状态推进结果。
     pub state_update: Option<StateUpdate>,
 }
@@ -66,6 +68,7 @@ pub fn receive_observation(
             requires_snapshot: false,
             missing: None,
             truncated_from: None,
+            redactions: 0,
             state_update: None,
         });
     }
@@ -83,6 +86,7 @@ pub fn receive_observation(
                 _ => None,
             },
             truncated_from: None,
+            redactions: 0,
             state_update: None,
         });
     }
@@ -95,6 +99,9 @@ pub fn receive_observation(
     } else {
         (envelope.payload.clone(), None)
     };
+    // 敏感字段过滤必须在落库前完成：脱敏后的文本才进 inbox，
+    // 否则凭据会经查询/导出/日志三个出口泄漏（4.2）。
+    let (payload, redaction) = crate::observation_redaction::redact(&payload);
     let stored = ObservationEnvelope {
         payload,
         ..envelope.clone()
@@ -149,6 +156,7 @@ pub fn receive_observation(
         requires_snapshot: false,
         missing,
         truncated_from,
+        redactions: redaction.replaced,
         state_update,
     })
 }

@@ -39,10 +39,14 @@ pub enum FakeScenario {
     HugeLog,
     /// 终态后到达最终费用。
     LateCost,
+    /// 观察里出现凭据形态的内容，用于验证落库前脱敏。
+    SensitivePayload,
+    /// 终态后到达普通进度观察（非费用），用于验证迟到观察不推翻终态。
+    LateProgress,
 }
 
 impl FakeScenario {
-    pub const ALL: [FakeScenario; 9] = [
+    pub const ALL: [FakeScenario; 11] = [
         Self::HappyPath,
         Self::ReplyLostOnce,
         Self::OutOfOrder,
@@ -52,6 +56,8 @@ impl FakeScenario {
         Self::AuthExpired,
         Self::HugeLog,
         Self::LateCost,
+        Self::SensitivePayload,
+        Self::LateProgress,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -65,6 +71,8 @@ impl FakeScenario {
             Self::AuthExpired => "auth_expired",
             Self::HugeLog => "huge_log",
             Self::LateCost => "late_cost",
+            Self::SensitivePayload => "sensitive_payload",
+            Self::LateProgress => "late_progress",
         }
     }
 }
@@ -175,6 +183,21 @@ impl FakeExecutor {
                 ObservationType::FinalResult,
                 "{\"candidate\":\"ok\",\"exit_code\":0}",
             )],
+            // 三类典型泄漏形态各一条：Bearer、JSON 键值、命令行参数。
+            FakeScenario::SensitivePayload => vec![make(
+                1,
+                ObservationType::Log,
+                "calling api with Authorization: Bearer sk-live-abcdef0123456789 \
+                 and {\"api_key\":\"abcd1234efgh5678\"} plus password=hunter2",
+            )],
+            FakeScenario::LateProgress => vec![
+                make(
+                    1,
+                    ObservationType::FinalResult,
+                    "{\"candidate\":\"ok\",\"exit_code\":0}",
+                ),
+                make(2, ObservationType::Progress, "cleanup-after-final"),
+            ],
             _ => vec![make(1, ObservationType::Progress, "accepted")],
         }
     }

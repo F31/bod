@@ -708,8 +708,11 @@ mod tests {
         assert!(execution_id.starts_with("local-process:"));
 
         // 观察到真实 stdout 行。
+        // 等待预算与下面的 `wait_until_terminal` 对齐（10s）：全量并行跑时解释器启动
+        // 可能超过 2s，短窗口会让「启动慢」伪装成「没有输出」。断言本身没有放宽 ——
+        // 仍然要求真的看到 ready。
         let mut lines: Vec<String> = Vec::new();
-        for _ in 0..100 {
+        for _ in 0..500 {
             for envelope in adapter.observations("inv-real-observe") {
                 lines.push(envelope.payload);
             }

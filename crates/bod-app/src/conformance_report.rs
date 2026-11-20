@@ -8,7 +8,9 @@
 //! 只有当存在**命名用例并全部 pass** 时，某能力才标 `verified`；否则一律是
 //! `declared_only` / `not_declared` / `stale`，不能凭声明写成已验证。
 
-use crate::adapter_conformance::{CaseOutcome, CaseStatus, ConformanceReport};
+use crate::adapter_conformance::{
+    CaseOutcome, CaseStatus, ConformanceReport, Enablement, enablement,
+};
 use crate::domain::execution::{AdapterDescriptor, CapabilitySlot, EvidenceLevel, EvidenceSource};
 use std::fmt::Write as _;
 
@@ -97,6 +99,8 @@ pub struct SectionedReport {
     pub cases: Vec<CaseOutcome>,
     pub inconsistencies: Vec<String>,
     pub limitations: Vec<String>,
+    /// 4.2 的准入判定：闸门类用例失败即禁用（声明 degraded 不能豁免）。
+    pub enablement: Enablement,
 }
 
 /// 唯一允许的「整体」结论：报告不可归约。这不是一个可以变绿的标记，而是一条固定约束。
@@ -149,6 +153,26 @@ impl SectionedReport {
             cases: report.outcomes.clone(),
             inconsistencies,
             limitations,
+            enablement: enablement(report),
+        }
+    }
+
+    /// 准入判定的展示文本。被禁用时把失败用例与原因一并写出，不给「大概可以」的余地。
+    pub fn enablement_note(&self) -> String {
+        match &self.enablement {
+            Enablement::Enabled => "enabled（闸门类用例全部通过）".to_string(),
+            Enablement::Unverified { cases } => format!(
+                "unverified（闸门类未取得证据：{}；可探测/试用，但不得标 Supported）",
+                cases.join(", ")
+            ),
+            Enablement::Blocked { failures } => {
+                let listed = failures
+                    .iter()
+                    .map(|(id, detail)| format!("{id}: {detail}"))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                format!("blocked（{listed}；禁用执行，声明 degraded 不能豁免）")
+            }
         }
     }
 
@@ -294,6 +318,8 @@ impl SectionedReport {
             }
         }
 
+        let _ = writeln!(out, "\n{hash}# 启用判定\n\n{}", self.enablement_note());
+
         let _ = writeln!(out, "\n{hash}# 结论口径\n\n{}", self.verdict_statement());
         out
     }
@@ -396,6 +422,13 @@ impl SectionedReport {
                 .map(|item| json_string(item))
                 .collect::<Vec<_>>()
                 .join(", ")
+        );
+        let _ = writeln!(
+            out,
+            "  \"enablement\": {{\"verdict\": {}, \"may_probe\": {}, \"note\": {}}},",
+            json_string(self.enablement.as_str()),
+            self.enablement.may_probe(),
+            json_string(&self.enablement_note())
         );
         let _ = writeln!(
             out,
@@ -810,6 +843,7 @@ mod tests {
             "\"cases\"",
             "\"inconsistencies\"",
             "\"limitations\"",
+            "\"enablement\"",
             "\"reducible\": false",
         ] {
             assert!(json.contains(key), "json 缺少 {key}:\n{json}");
@@ -845,6 +879,34 @@ mod tests {
                 .iter()
                 .any(|note| note.contains("未提供描述符"))
         );
+    }
+
+    #[test]
+    fn enablement_block_is_rendered_without_escape_hatch() {
+        let mut report = run_fake_suite(NOW_MS);
+        let ok = SectionedReport::build(&report, Some(&base_descriptor()), NOW_MS);
+        assert!(ok.enablement_note().starts_with("enabled"));
+        assert!(ok.to_markdown().contains("启用判定"));
+
+        let outcome = report
+            .outcomes
+            .iter_mut()
+            .find(|outcome| outcome.id == "scope-identity")
+            .expect("身份用例应存在");
+        outcome.status = CaseStatus::Fail {
+            detail: "跨公司同 ID 未被拒绝".to_string(),
+        };
+        let blocked = SectionedReport::build(&report, Some(&base_descriptor()), NOW_MS);
+        let note = blocked.enablement_note();
+        assert!(note.starts_with("blocked"), "{note}");
+        assert!(
+            note.contains("degraded 不能豁免"),
+            "必须写明没有豁免出口: {note}"
+        );
+        assert!(blocked.to_markdown().contains("blocked"));
+        let json = blocked.to_json();
+        assert!(json.contains("\"verdict\": \"blocked\""));
+        assert!(json.contains("\"may_probe\": false"));
     }
 
     #[test]
