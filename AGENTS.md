@@ -62,7 +62,11 @@
   命令（有界超时 + 输出摘要），报告正文落 CAS 并从 `verification_records` 反查证据，自报/跨提交/
   缺正文均不接受；`verify_backup_for_delivery` 在 P0 `verify_backup` 之上补交付 CAS 引用覆盖，
   缺 WAL/缺 CAS/快照被改均不标可恢复（G-6/G-9 的 P1 侧断言，module/tests 仍保持 P0 目标）。
-  P1 的 4.5/4.6/4.7 与出口切片尚未开始。
+  已完成切片 4.5「工作台只读投影」——`bod-app::workbench_projection` 以纯函数把宿主事实快照投影成
+  首页四问（目标/下一项交付/受阻/待用户决定）与任务页证据视图；每张待决定卡强制带阻塞主体、
+  所需决定与可采取动作，Unknown 不猜"已停止"，任务页证据按修订→成果关联归属并显示拒绝原因；
+  `collect_host_facts` 只用 `SqliteStore` 只读 `list_*`、不写库不派发，相同事实得相同视图（I-55 的
+  P1 侧断言，module/tests 仍保持 P0 control_api 目标）。P1 的 4.6/4.7 与出口切片尚未开始。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

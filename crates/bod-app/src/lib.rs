@@ -37,6 +37,7 @@ pub mod resource_state;
 pub mod store;
 pub mod verification_registry;
 pub mod wakeup;
+pub mod workbench_projection;
 pub mod workspace_safety;
 
 pub use config::{

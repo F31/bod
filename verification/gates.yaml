@@ -170,8 +170,8 @@
   module: bod-app::control_api
   tests: bod-app::control_api::tests::read_only_returns_view_without_mutating_state_or_dispatching
   status: implemented
-  evidence: cargo test -p bod-app control_api
-  note: tasks.md 7.3 用 I-55 指代清理语义，属编号引用错误；清理实际绑定 I-32（见 docs/spec-notes/p0-recovery.md 第 8 节）
+  evidence: cargo test -p bod-app control_api && cargo test -p bod-app workbench_projection
+  note: "tasks.md 7.3 用 I-55 指代清理语义，属编号引用错误；清理实际绑定 I-32（见 docs/spec-notes/p0-recovery.md 第 8 节）。P0 覆盖 control_api 只读入口零派发；P1 4.5 的 workbench_projection::tests::state_fingerprint_helper_reads_core_counts 与 projection_is_pure_and_deterministic 补「首页四问/任务页证据视图为纯只读投影、不改核心行数、相同宿主事实必得相同视图」。module/tests 保持 P0 目标，不替换原覆盖。"
 - id: I-68
   kind: invariant
   requirement: 已接受唤醒有持久幂等回执，重发不重复增加待办代数

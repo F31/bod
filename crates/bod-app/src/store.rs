@@ -625,6 +625,179 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
+    /// 列出项目下的 Issue（工作台投影只读来源，不改状态、不派发）。
+    pub fn list_issues_for_project(
+        &self,
+        company_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<Issue>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, company_id, project_id, kind, repo_provider, repo_id, title, acceptance,
+                    owner_id, owner_kind, assignment_grant_revision, resource_version,
+                    generation, observed_generation, phase
+             FROM issues WHERE company_id = ?1 AND project_id = ?2 ORDER BY uid",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id], |row| {
+            let uid: String = row.get(0)?;
+            let company_id = DomainId::new(row.get::<_, String>(1)?);
+            let project_id = row.get::<_, Option<String>>(2)?.map(DomainId::new);
+            let kind = match row.get::<_, String>(3)?.as_str() {
+                "Coding" => IssueKind::Coding,
+                _ => IssueKind::General,
+            };
+            let provider: Option<String> = row.get(4)?;
+            let repository_id: Option<String> = row.get(5)?;
+            let repository = match (provider, repository_id) {
+                (Some(provider), Some(repository_id)) => Some(RepositoryContext {
+                    provider,
+                    repository_id,
+                }),
+                _ => None,
+            };
+            let acceptance: String = row.get(7)?;
+            let owner_id: Option<String> = row.get(8)?;
+            let owner_kind: Option<String> = row.get(9)?;
+            let grant_revision: Option<i64> = row.get(10)?;
+            let assignment = match (owner_id, owner_kind) {
+                (Some(owner_id), Some(owner_kind)) => Some(Assignment {
+                    owner: Owner {
+                        kind: if owner_kind == "User" {
+                            OwnerKind::User
+                        } else {
+                            OwnerKind::Agent
+                        },
+                        id: DomainId::new(owner_id),
+                    },
+                    scope: Scope {
+                        company_id: company_id.clone(),
+                        project_id: project_id.clone(),
+                        issue_id: Some(DomainId::new(uid.clone())),
+                    },
+                    grant_revision: grant_revision.unwrap_or(0) as u64,
+                }),
+                _ => None,
+            };
+            let phase = match row.get::<_, String>(14)?.as_str() {
+                "Running" => Phase::Running,
+                "Blocked" => Phase::Blocked,
+                "Succeeded" => Phase::Succeeded,
+                "Cancelled" => Phase::Cancelled,
+                _ => Phase::Pending,
+            };
+            Ok(Issue {
+                meta: ResourceMeta {
+                    uid: DomainId::new(uid),
+                    company_id,
+                    project_id,
+                    resource_version: Version(row.get::<_, i64>(11)? as u64),
+                    generation: row.get::<_, i64>(12)? as u64,
+                    deletion_requested_at: None,
+                },
+                kind,
+                repository,
+                spec: IssueSpec {
+                    title: row.get(6)?,
+                    assignment,
+                    acceptance: AcceptanceCriteria {
+                        criteria: split_acceptance(&acceptance),
+                    },
+                },
+                status: ResourceStatus {
+                    phase,
+                    observed_generation: row.get::<_, i64>(13)? as u64,
+                    conditions: Vec::new(),
+                },
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 列出公司下每个成果修订的最新验证记录（任务页证据视图只读来源）。
+    pub fn list_verifications_for_company(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<VerificationRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT v.revision_id, v.state, v.actor_id, v.reason, v.evidence_refs,
+                    v.verification_rules, v.environment, v.observed_at_ms
+             FROM verification_records v
+             WHERE v.company_id = ?1
+               AND v.observed_at_ms = (
+                   SELECT MAX(v2.observed_at_ms) FROM verification_records v2
+                   WHERE v2.revision_id = v.revision_id
+               )
+             ORDER BY v.revision_id",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            let refs: String = row.get(4)?;
+            Ok(VerificationRecord {
+                revision_id: DomainId::new(row.get::<_, String>(0)?),
+                state: VerificationState::parse(&row.get::<_, String>(1)?)
+                    .unwrap_or(VerificationState::Pending),
+                actor: DomainId::new(row.get::<_, String>(2)?),
+                reason: row.get(3)?,
+                evidence_refs: split_list(&refs),
+                verification_rules: DomainId::new(row.get::<_, String>(5)?),
+                environment: DomainId::new(row.get::<_, String>(6)?),
+                observed_at_ms: row.get(7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 列出公司下「修订 → 成果」的只读关联（任务页证据归属来源）。
+    pub fn list_revision_artifact_links(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT revision_id, artifact_id FROM artifact_revisions
+             WHERE company_id = ?1 ORDER BY revision_id",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 列出公司下的接受记录（工作台投影只读来源，不改状态、不派发）。
+    pub fn list_acceptances_for_company(
+        &self,
+        company_id: &str,
+    ) -> Result<Vec<AcceptanceRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acceptance_id, artifact_id, work_package_revision, input_baseline,
+                    artifact_revision, verification_rules, target_environment, merge_combination,
+                    decision, actor_id, reason, evidence_refs, accepted_at_ms, superseded_by
+             FROM acceptances WHERE company_id = ?1
+             ORDER BY accepted_at_ms ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![company_id], |row| {
+            let decision = AcceptanceDecision::parse(&row.get::<_, String>(8)?)
+                .unwrap_or(AcceptanceDecision::RequiresHuman);
+            let evidence: String = row.get(11)?;
+            Ok(AcceptanceRecord {
+                acceptance_id: DomainId::new(row.get::<_, String>(0)?),
+                artifact_id: DomainId::new(row.get::<_, String>(1)?),
+                binding: AcceptanceBinding {
+                    work_package_revision: DomainId::new(row.get::<_, String>(2)?),
+                    input_baseline: DomainId::new(row.get::<_, String>(3)?),
+                    artifact_revision: DomainId::new(row.get::<_, String>(4)?),
+                    verification_rules: DomainId::new(row.get::<_, String>(5)?),
+                    target_environment: DomainId::new(row.get::<_, String>(6)?),
+                    merge_combination: row.get::<_, Option<String>>(7)?.map(DomainId::new),
+                },
+                decision,
+                actor: DomainId::new(row.get::<_, String>(9)?),
+                reason: row.get(10)?,
+                evidence_refs: split_list(&evidence),
+                accepted_at_ms: row.get::<_, i64>(12)?,
+                superseded_by: row.get::<_, Option<String>>(13)?.map(DomainId::new),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
     /// 项目下仍在运行的 Issue 数（清理阻塞判定）。
     pub fn count_running_issues(
         &self,
