@@ -1,7 +1,7 @@
 //! bod 宿主 CLI：P0 D0 阶段提供最小 headless 启动与配置 schema/explain 入口。
 //! HTTP 控制面与真实宿主启动在后续切片接入；当前不启动服务、不写运行时数据。
 
-use bod_app::adapter_conformance::{enablement, run_fake_suite, run_live_suite};
+use bod_app::adapter_conformance::{CaseStatus, enablement, run_fake_suite, run_live_suite};
 use bod_app::capability_dispatch::{Candidate, RequiredGuarantees, select};
 use bod_app::config::{BodConfig, FIELD_DOCS};
 use bod_app::conformance_report::SectionedReport;
@@ -10,6 +10,7 @@ use bod_app::fake_executor::{FakeExecutor, FakeScenario};
 use bod_app::handoff_package::HandoffLevel;
 use bod_app::invocation::StartTransport;
 use bod_app::local_process::{default_adapter, descriptor_json};
+use bod_app::release_acceptance::{ReleaseAcceptance, ReleaseEvidence};
 use bod_app::{explain, load_from_str, schema_text};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -30,6 +31,10 @@ const USAGE: &str = "\
   bod adapter capabilities         列出本机适配器逐项能力声明与有效期
   bod adapter capabilities --need l3  按 L1/L2/L3 的保证需求过滤候选并显示限制
   bod adapter conformance          运行 Fake + 本机真实适配器的 conformance 报告
+  bod adapter release-check        发布验收：五项检查 + 日志脱敏 + 能力缺失三处一致
+  bod adapter release-check --logs <p>  扫描该日志文件里的凭据值（命中即该项不通过）
+  bod adapter release-check --need l3   同时比对探测/准入/界面三处的缺失能力
+  bod adapter release-check --json      同上，输出机器可读结果
   bod conformance                  分项报告：按版本/协议/平台/能力/日期逐项列出，不出整体通过标记
   bod conformance --fake-only      只跑 Fake Executor 的分项报告
   bod conformance --json           同上，输出机器可读结果（多适配器时为 reports 数组）
@@ -329,6 +334,9 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(out)
         }
         [cmd, rest @ ..] if cmd == "conformance" => conformance(rest),
+        [cmd, sub, rest @ ..] if cmd == "adapter" && sub == "release-check" => {
+            release_check(rest)
+        }
         _ => Err(format!("未知命令: {}\n\n{}", args.join(" "), USAGE)),
     }
 }
@@ -490,6 +498,140 @@ fn conformance(flags: &[String]) -> Result<String, String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+/// `bod adapter release-check`：发布验收（P2 任务 4.5）。
+///
+/// 只做两件事：把**真实取得的**证据交给 4.5 的判定，缺的记 `not_evidenced`；以及在三处
+/// 之间比对能力缺失。命令不打开业务库（P0 单库约束），所以「重启意图仍在」与「账号预算
+/// 可评估」在本机恒为未核对——这是结论，不是遗漏。
+fn release_check(flags: &[String]) -> Result<String, String> {
+    let mut json = false;
+    let mut need: Option<String> = None;
+    let mut logs_path: Option<String> = None;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            "--need" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| format!("--need 需要 l1 / l2 / l3\n\n{USAGE}"))?;
+                need = Some(value.clone());
+                index += 2;
+            }
+            "--logs" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| format!("--logs 需要一个日志文件路径\n\n{USAGE}"))?;
+                logs_path = Some(value.clone());
+                index += 2;
+            }
+            other => {
+                return Err(format!("adapter release-check 不支持参数 {other}\n\n{USAGE}"));
+            }
+        }
+    }
+
+    // 先解析等级：参数错了不该去启适配器。
+    let level = match need.as_deref() {
+        None => HandoffLevel::L1,
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "l1" => HandoffLevel::L1,
+            "l2" => HandoffLevel::L2,
+            "l3" => HandoffLevel::L3,
+            other => {
+                return Err(format!(
+                    "--need 只接受 l1 / l2 / l3，收到 {other}\n\n{USAGE}"
+                ));
+            }
+        },
+    };
+
+    let now = now_ms();
+    let mut adapter = adapter_or_err()?;
+    let descriptor = adapter.descriptor().clone();
+    let live = run_live_suite(&mut adapter, now);
+    let report = SectionedReport::build(&live, Some(&descriptor), now);
+
+    let mut evidence = ReleaseEvidence {
+        adapter_id: descriptor.adapter_id.clone(),
+        adapter_version: descriptor.adapter_version.clone(),
+        platform: descriptor.platform.clone(),
+        operations: descriptor
+            .operations
+            .iter()
+            .map(|operation| operation.as_str().to_string())
+            .collect(),
+        // 三项都从本机真实用例取：not_applicable 就是「没取得证据」，不补默认值。
+        stop_confirmed: case_signal(&live, "cancel-request-vs-confirm"),
+        durable_intents: None,
+        dedup_retention_ms: descriptor.dedup_retention_ms,
+        reply_lost_reconciled: case_signal(&live, "start-reply-lost"),
+        effect_class: Some(descriptor.effect_class.as_str().to_string()),
+        authorization_refused: case_signal(&live, "auth-expired"),
+        budget: None,
+        report: Some(report.clone()),
+        log_lines: Vec::new(),
+    };
+    if let Some(path) = &logs_path {
+        let text = fs::read_to_string(path)
+            .map_err(|err| format!("读取日志 {path} 失败：{err}"))?;
+        evidence.log_lines = text.lines().map(|line| line.to_string()).collect();
+    }
+
+    let required = RequiredGuarantees::for_handoff(level);
+    let verdict = report.enablement.clone();
+    let selection = select(
+        &required,
+        &[Candidate {
+            descriptor: &descriptor,
+            enablement: &verdict,
+        }],
+        now,
+    );
+    let acceptance = ReleaseAcceptance::evaluate(&evidence, &required, Some(&selection), now);
+    if json {
+        return Ok(acceptance.to_json());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "# bod adapter release-check\n");
+    let _ = writeln!(
+        out,
+        "接续等级: {level}（所需保证{}）",
+        if required.is_empty() {
+            "无".to_string()
+        } else {
+            format!(
+                ": {}",
+                required
+                    .iter()
+                    .map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    );
+    let _ = writeln!(out, "{}\n", selection.notice.render());
+    out.push_str(&acceptance.to_markdown());
+    Ok(out)
+}
+
+/// 用例结果 → 证据信号：`not_applicable` 与「没有该用例」都返回 `None`，即未取得证据。
+fn case_signal(report: &bod_app::adapter_conformance::ConformanceReport, id: &str) -> Option<bool> {
+    report
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.id == id)
+        .and_then(|outcome| match &outcome.status {
+            CaseStatus::Pass { .. } => Some(true),
+            CaseStatus::Fail { .. } => Some(false),
+            CaseStatus::NotApplicable { .. } => None,
+        })
 }
 
 /// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。
@@ -695,6 +837,94 @@ mod tests {
         let args = vec!["conformance".to_string(), "--bogus".to_string()];
         let err = run(&args).expect_err("未知参数必须失败");
         assert!(err.contains("不支持参数 --bogus"));
+    }
+
+    #[test]
+    fn release_check_lists_every_item_and_never_claims_supported() {
+        let args = vec![
+            "adapter".to_string(),
+            "release-check".to_string(),
+            "--need".to_string(),
+            "l3".to_string(),
+        ];
+        let out = run(&args).expect("release-check 应成功");
+        for item in [
+            "stop_restart",
+            "replay_reconnect",
+            "effect_authorization",
+            "account_budget",
+            "acceptance_evidence",
+            "log_redaction",
+        ] {
+            assert!(out.contains(item), "缺少验收项 {item}:\n{out}");
+        }
+        // 本机适配器未声明去重保留期，这一项必须是 fail 而不是「大概可以」。
+        assert!(out.contains("no_dedup_retention"), "{out}");
+        assert!(out.contains("结论: blocked"), "{out}");
+        assert!(!out.contains("结论: releasable"), "证据不足时不得给出可发布结论:\n{out}");
+        // 三处一致必须真的比对过，并列出范围。
+        assert!(out.contains("能力缺失三处一致"), "{out}");
+        assert!(out.contains("recovery"), "{out}");
+    }
+
+    #[test]
+    fn release_check_flags_credentials_in_logs_without_echoing_them() {
+        let n = FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "bod-release-log-{}-{n}.log",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "boot ok\nAuthorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz012345\n",
+        )
+        .expect("写测试日志应成功");
+        let args = vec![
+            "adapter".to_string(),
+            "release-check".to_string(),
+            "--logs".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+        let out = run(&args).expect("release-check --logs 应成功");
+        assert!(out.contains("credentials_in_logs"), "{out}");
+        assert!(
+            !out.contains("sk-live-abcdefghijklmnopqrstuvwxyz012345"),
+            "输出不得包含原始凭据:\n{out}"
+        );
+        assert!(out.contains("<redacted:"), "证据必须保留脱敏后的行:\n{out}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn release_check_json_is_a_document_with_per_item_states() {
+        let args = vec![
+            "adapter".to_string(),
+            "release-check".to_string(),
+            "--need".to_string(),
+            "l2".to_string(),
+            "--json".to_string(),
+        ];
+        let out = run(&args).expect("release-check --json 应成功");
+        let value: serde_json::Value =
+            serde_json::from_str(&out).expect("输出必须是合法 JSON 文档");
+        assert_eq!(value["schema"], "bod.release.acceptance/v1");
+        let checks = value["checks"].as_array().expect("checks 必须是数组");
+        assert_eq!(checks.len(), 6);
+        assert_eq!(value["verdict"]["releasable"], false);
+        assert!(value.get("passed").is_none(), "不得有单一通过标记");
+        assert_eq!(value["alignment"]["compared"], true);
+    }
+
+    #[test]
+    fn release_check_rejects_unknown_level_before_touching_the_adapter() {
+        let args = vec![
+            "adapter".to_string(),
+            "release-check".to_string(),
+            "--need".to_string(),
+            "l9".to_string(),
+        ];
+        let err = run(&args).expect_err("未知等级必须失败");
+        assert!(err.contains("--need 只接受 l1 / l2 / l3"), "{err}");
     }
 
     #[test]

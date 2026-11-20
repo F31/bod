@@ -218,6 +218,15 @@
   CLI `bod adapter capabilities --need l3` 与调度共用同一渲染函数；实跑本机适配器得到三条
   真实原因。如实记录：派发路径仍是单适配器写队列，`admit_handoff` 尚未被 `request_dispatch`
   调用，故不宣称「已在调度器禁用」；准入按声明+有效期而非 4.1 的 verified，风险由 4.4 承担。
+  切片 4.5 落地 `bod-app::release_acceptance`：六项发布验收（停止/重放/副作用/账号预算/证据/日志）
+  各三态 `pass`/`fail`/`not_evidenced`，只有六项全 pass 且三处无分歧才 `releasable`，
+  `can_mark_supported()` 与结论同源；日志扫描复用 `observation_redaction`，**证据只存脱敏后的行**
+  （两个出口都断言不含原文凭据）；`align()` 按集合比对探测/准入/界面三处的缺失能力，四种分歧任一
+  即 `blocked`。CLI 新增 `bod adapter release-check [--logs] [--need] [--json]`。实跑本机适配器
+  `--need l3` 得 `blocked`（`replay_reconnect=no_dedup_retention` 等），三处一致为
+  [recovery, reliable_observation]。如实记录：CLI 不打开业务库，故「重启意图仍在」与
+  「账号预算可评估」在本机恒为 `not_evidenced`，不补默认值；`acceptance_evidence` 的 pass
+  只表示有证据且未过期，本机 `enablement` 仍是 `unverified`。详见 `p2-conformance.md` §4。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

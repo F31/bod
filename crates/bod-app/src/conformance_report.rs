@@ -581,7 +581,7 @@ fn opt_json_string(value: Option<&str>) -> String {
     value.map_or("null".to_string(), json_string)
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")

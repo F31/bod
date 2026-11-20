@@ -390,7 +390,36 @@
     没有多候选选择位置），故不宣称「已在调度器禁用」；准入按声明+有效期而非 4.1 的 verified，
     该风险由 4.4 承担。详见 `docs/spec-notes/p2-conformance.md` §3。
 - [ ] 4.4 在两个真实运行配置上完成 L1/L2（适用时 L3）接续与负责人切换样本，验证 G-28、G-38—G-42 有实际报告、样本数与人工分钟，失败路径如实保留。
-- [ ] 4.5 实现发布验收检查（停止/重放/副作用/账号预算/证据）与日志脱敏，验证日志中无凭据值且能力缺失在探测/准入/UI 三处一致（G-4、G-46）。
+- [x] 4.5 实现发布验收检查（停止/重放/副作用/账号预算/证据）与日志脱敏，验证日志中无凭据值且能力缺失在探测/准入/UI 三处一致（G-4、G-46）。
+  - 证据（2026-11-20，`cargo test -p bod-app --lib release_acceptance` → 15 passed；
+    `cargo test -p bod` → 14 passed）：
+    新模块 `release_acceptance`（schema `bod.release.acceptance/v1`）逐项判定六项
+    `stop_restart` / `replay_reconnect` / `effect_authorization` / `account_budget` /
+    `acceptance_evidence` / `log_redaction`，每项三态 `pass` / `fail` / `not_evidenced`
+    （每项最多一个稳定原因码）。只有六项全 `pass` **且**三处无分歧才 `releasable`，
+    `can_mark_supported()` 与结论同源。
+    **日志脱敏**复用 4.2 的 `observation_redaction`：命中即 `fail / credentials_in_logs`，
+    证据只放脱敏后的行（带行号），`to_markdown()` / `to_json()` 均断言不含原文凭据
+    （`Bearer sk-live-…`、`AKIA…` 两个出口都查）。
+    **三处一致**由 `align()` 比集合而非比文案：探测取 4.1 报告的 `cases_not_passing` /
+    `declared_unsupported` / `unknown` / `not_declared` / `stale`，准入取 4.3 `Filtered` 的
+    槽级原因，界面取 `CapabilityNotice.missing` 反查槽名；四种分歧
+    `probe_missing_admission_admits` / `admission_rejects_slot_probe_accepts` /
+    `interface_omits_missing` / `adapter_absent_from_selection`，任一分歧即 `blocked`。
+    第二种分歧不是假想：4.3 的 `select` 只看声明等级不看用例结果，`cases_not_passing`
+    在报告里是缺失、在准入里是放行，测试固定了这个分叉。
+    CLI 新增 `bod adapter release-check [--logs <p>] [--need l1|l2|l3] [--json]`，参数先校验再启适配器。
+    **实跑本机适配器 `--need l3`**：结论 `blocked`
+    （`stop_restart=restart_intent_unchecked`、`replay_reconnect=no_dedup_retention`、
+    `effect_authorization=authorization_unchecked`、`account_budget=budget_unchecked`、
+    `log_redaction=no_logs`，仅 `acceptance_evidence=pass`），三处一致为
+    [recovery, reliable_observation]。`--logs` 喂入含 `Bearer sk-live-…` 的日志后该项转
+    `fail`，证据为 `Authorization:<redacted:secret> <redacted:bearer>`。
+    **如实记录**：CLI 不打开业务库（P0 单库约束），故「重启后意图仍在」与「账号预算可评估」
+    在本机恒为 `not_evidenced`，不补默认值；`acceptance_evidence` 的 `pass` 只表示有证据且
+    未过期（30 天），本机适配器 `enablement` 仍是 `unverified`，报告原样写出。
+    未改 `verification/gates.yaml`，G-4/G-46 绑定仍为 `planned`。详见
+    `docs/spec-notes/p2-conformance.md` §4。
 
 ## 5. P2 验证与出口
 

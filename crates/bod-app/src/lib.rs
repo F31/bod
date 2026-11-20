@@ -49,6 +49,7 @@ pub mod perf_probe;
 pub mod protocol_reliability;
 pub mod rebuild_precheck;
 pub mod recovery_models;
+pub mod release_acceptance;
 pub mod resource_state;
 pub mod scope_boundary;
 pub mod staff_continuation;
