@@ -53,6 +53,7 @@ pub mod handoff_snapshot;
 pub mod history_continuity;
 pub mod host_guard;
 pub mod host_handshake;
+pub mod http_router;
 pub mod impact_revalidation;
 pub mod invocation;
 pub mod isolation_check;

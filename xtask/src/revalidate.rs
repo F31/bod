@@ -1477,11 +1477,11 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
     /// `plan` 要验的是排序与预算截断，本就不该读外部状态；真实 git 链路
     /// 由 `xtask impact` / `xtask revalidate` 的实跑覆盖。
     fn sample_run_for_tests() -> SampleRun {
+        use crate::impact_sample::{ChangedRegion, ScanStats};
         use bod_app::impact_revalidation::{
             ArtifactKind as ImpactKind, AssessmentInput, ChangeKind, ChangeTrigger, RevisionId,
             assess,
         };
-        use crate::impact_sample::{ChangedRegion, ScanStats};
 
         let pairs = [
             (

@@ -5,10 +5,13 @@
 //! 本模块提供三件事：
 //!
 //! 1. `HostServer`：绑定回环地址，把 `协议/地址/pid/实例 ID/握手令牌` 原子写成描述文件
-//!    （Unix 下 0600），并只回应 `/_bod/health`、`/_bod/handshake`、`/_bod/shutdown`
-//!    与 `/_bod/events`（SSE 基线订阅，语义见 `crate::event_stream`）。
+//!    （Unix 下 0600），并按 `ROUTES` 路由表回应控制面端点（含 SSE 基线订阅）。
 //! 2. `probe`：客户端读描述文件 → 确认实例存活 → 用令牌换会话密钥。
 //! 3. `request_shutdown`：用会话密钥请求停止，供 `close_action=stop_host` 使用。
+//!
+//! **本模块只做传输**（CR-003）：读请求、过 Host/Origin 关、分发、写响应。
+//! 路径匹配与鉴权声明在 `crate::http_router`，加端点只改 `ROUTES` 表，
+//! 不需要动 `handle`。
 //!
 //! 边界（如实记录，不假装是生产安全模型）：
 //! - 令牌与会话密钥都只是本机同用户凭据；P0 不做 TLS，`auth_required` 的 TLS 分支未实现。
@@ -18,9 +21,14 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::http_router::{
+    Auth, EndpointRequest, Method, Outcome, Reply, Request, Route, RouteError, token_eq,
+};
 
 /// 控制面协议标识：客户端必须原样确认，避免旧版壳连上新版宿主。
 pub const PROTOCOL: &str = "bod-host/v1";
@@ -121,20 +129,6 @@ fn random_token(label: &str) -> String {
     bod_core::artifact::sha256_hex(&material)
 }
 
-/// 定长比较：避免按字节提前返回泄漏令牌前缀。
-fn token_eq(left: &str, right: &str) -> bool {
-    let left = left.as_bytes();
-    let right = right.as_bytes();
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in left.iter().zip(right.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
-}
-
 /// 原子写描述文件：同目录临时文件 → 设权限 → fsync → rename。
 pub fn write_descriptor(path: &Path, descriptor: &HostDescriptor) -> Result<(), HostError> {
     if let Some(parent) = path.parent() {
@@ -185,6 +179,10 @@ pub struct HostServer {
     feed: std::sync::Arc<dyn crate::event_stream::EventFeed>,
     /// Host/Origin 白名单（CR-007）。每个请求进入 handler 前都要过这一关。
     policy: crate::host_guard::HostPolicy,
+    /// 是否已收到授权停止（CR-003）。由 `/_bod/shutdown` 的 handler 置位，
+    /// `run` 每轮检查。用原子而非 `handle` 返回值，是因为停服属于传输层的
+    /// 循环控制，不该由路由层的 `Reply` 表达。
+    stopping: AtomicBool,
 }
 
 impl HostServer {
@@ -229,6 +227,7 @@ impl HostServer {
             session_key: random_token("session"),
             feed,
             policy,
+            stopping: AtomicBool::new(false),
         };
         write_descriptor(descriptor_path, &server.descriptor)?;
         Ok(server)
@@ -260,13 +259,12 @@ impl HostServer {
             let Ok(stream) = incoming else {
                 continue;
             };
-            match self.handle(stream) {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(err) => {
-                    // 单个连接出错不影响宿主；错误里不含凭据。
-                    eprintln!("控制面连接失败：{err}");
-                }
+            if let Err(err) = self.handle(stream) {
+                // 单个连接出错不影响宿主；错误里不含凭据。
+                eprintln!("控制面连接失败：{err}");
+            }
+            if self.stopping.load(Ordering::SeqCst) {
+                break;
             }
         }
         let _ = std::fs::remove_file(&self.descriptor_path);
@@ -288,145 +286,129 @@ impl HostServer {
                 "reason": rejection.explain(),
             });
             respond(&mut stream, 403, &body.to_string())?;
-            return Ok(false);
+            return Ok(!self.stopping.load(Ordering::SeqCst));
         }
 
-        match (request.method.as_str(), request.path_only()) {
-            ("GET", "/_bod/events") => {
+        // CR-003：匹配与鉴权交给 http_router，本函数只剩读请求与写响应。
+        match crate::http_router::dispatch(ROUTES, self, &self.session_key, request) {
+            Outcome::Reply(Reply::Json { status, value }) => {
+                respond(&mut stream, status, &value.to_string())?;
+            }
+            Outcome::Reply(Reply::Upgrade { handle }) => {
                 // 订阅是长连接：放到独立线程，否则会把健康检查与停止请求堵在队列里。
-                let feed = std::sync::Arc::clone(&self.feed);
-                let key = self.session_key.clone();
-                std::thread::spawn(move || {
-                    if let Err(err) = stream_events(feed, &key, stream, &request) {
-                        // 客户端断开是正常结束，但其它错误要留痕；错误里不含凭据。
-                        eprintln!("订阅结束：{err}");
-                    }
-                });
-                Ok(false)
+                std::thread::spawn(move || handle(stream));
             }
-            ("GET", "/_bod/health") => {
-                let body = serde_json::json!({
-                    "ok": true,
-                    "protocol": PROTOCOL,
-                    "instance_id": self.descriptor.instance_id,
-                    "pid": self.descriptor.pid,
-                });
-                respond(&mut stream, 200, &body.to_string())?;
-                Ok(false)
+            Outcome::Failed(err) => {
+                respond(
+                    &mut stream,
+                    err.status,
+                    &serde_json::json!({ "error": err.code }).to_string(),
+                )?;
             }
-            ("POST", "/_bod/handshake") => {
-                let token = serde_json::from_str::<serde_json::Value>(&request.body)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("handshake_token")
-                            .and_then(|token| token.as_str())
-                            .map(str::to_string)
-                    });
-                match token {
-                    Some(token) if token_eq(&token, &self.descriptor.handshake_token) => {
-                        let body = serde_json::json!({
-                            "protocol": PROTOCOL,
-                            "instance_id": self.descriptor.instance_id,
-                            "pid": self.descriptor.pid,
-                            "session_key": self.session_key,
-                        });
-                        respond(&mut stream, 200, &body.to_string())?;
-                        Ok(false)
-                    }
-                    _ => {
-                        respond(
-                            &mut stream,
-                            401,
-                            &serde_json::json!({ "error": "BOD_HANDSHAKE_DENIED" }).to_string(),
-                        )?;
-                        Ok(false)
-                    }
-                }
+            Outcome::Unauthorized(code) => {
+                respond(
+                    &mut stream,
+                    401,
+                    &serde_json::json!({ "error": code }).to_string(),
+                )?;
             }
-            ("POST", "/_bod/shutdown") => {
-                let presented = request
-                    .header("authorization")
-                    .and_then(|value| value.strip_prefix("Bearer "))
-                    .unwrap_or_default();
-                if token_eq(presented, &self.session_key) {
-                    respond(
-                        &mut stream,
-                        200,
-                        &serde_json::json!({ "stopping": true }).to_string(),
-                    )?;
-                    Ok(true)
-                } else {
-                    respond(
-                        &mut stream,
-                        401,
-                        &serde_json::json!({ "error": "BOD_SHUTDOWN_DENIED" }).to_string(),
-                    )?;
-                    Ok(false)
-                }
-            }
-            _ => {
+            // 方法不对与路径不存在对外同答 404：既有客户端按 404 处理，
+            // 本次不引入 405，以免改变可观测行为（理由见 spec-note）。
+            Outcome::MethodNotAllowed | Outcome::NotFound => {
                 respond(
                     &mut stream,
                     404,
                     &serde_json::json!({ "error": "BOD_NOT_FOUND" }).to_string(),
                 )?;
-                Ok(false)
             }
         }
+        Ok(!self.stopping.load(Ordering::SeqCst))
     }
 }
 
-struct Request {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: String,
+/// 控制面路由表。**加端点只改这里**，不需要动 `handle`。
+///
+/// 顺序不敏感：`http_router::match_route` 先扫静态模式再扫参数模式，
+/// 所以将来 `/api/v1/feedback-receipts/summary` 不会被 `{id}` 吃掉。
+///
+/// 每条都必须声明 `auth` 与 `note`：声明缺失编译不过，理由为空则测试不过。
+static ROUTES: &[Route<HostServer>] = &[
+    Route {
+        method: Method::Get,
+        pattern: "/_bod/health",
+        auth: Auth::Public,
+        note: "存活探测只回协议名、实例 ID 与 pid，不含令牌与业务事实",
+        handler: route_health,
+    },
+    Route {
+        method: Method::Get,
+        pattern: "/_bod/events",
+        auth: Auth::InHandler("BOD_STREAM_DENIED"),
+        note: "令牌在 Authorization 头；额外拒绝查询串令牌与非法游标，需按原因分别说明",
+        handler: route_events,
+    },
+    Route {
+        method: Method::Post,
+        pattern: "/_bod/handshake",
+        auth: Auth::InHandler("BOD_HANDSHAKE_DENIED"),
+        note: "客户端此刻还没有会话密钥，令牌在请求体 handshake_token 字段",
+        handler: route_handshake,
+    },
+    Route {
+        method: Method::Post,
+        pattern: "/_bod/shutdown",
+        auth: Auth::Bearer("BOD_SHUTDOWN_DENIED"),
+        note: "只认 Authorization: Bearer 会话密钥，分发前统一校验",
+        handler: route_shutdown,
+    },
+];
+
+fn route_health(state: &HostServer, _endpoint: EndpointRequest) -> Result<Reply, RouteError> {
+    Ok(Reply::ok(serde_json::json!({
+        "ok": true,
+        "protocol": PROTOCOL,
+        "instance_id": state.descriptor.instance_id,
+        "pid": state.descriptor.pid,
+    })))
 }
 
-impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
+fn route_events(state: &HostServer, endpoint: EndpointRequest) -> Result<Reply, RouteError> {
+    let feed = std::sync::Arc::clone(&state.feed);
+    let session_key = state.session_key.clone();
+    let request = endpoint.request;
+    Ok(Reply::upgrade(Box::new(move |stream| {
+        if let Err(err) = stream_events(feed, &session_key, stream, &request) {
+            // 客户端断开是正常结束，但其它错误要留痕；错误里不含凭据。
+            eprintln!("订阅结束：{err}");
+        }
+    })))
+}
 
-    /// 同名字段的**全部**取值。Host 校验需要知道「有几个」，
-    /// 重复 Host 是请求走私的信号，不能只看第一个。
-    fn header_values(&self, name: &str) -> Vec<&str> {
-        self.headers
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-            .collect()
+fn route_handshake(state: &HostServer, endpoint: EndpointRequest) -> Result<Reply, RouteError> {
+    let token = serde_json::from_str::<serde_json::Value>(&endpoint.request.body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("handshake_token")
+                .and_then(|token| token.as_str())
+                .map(str::to_string)
+        });
+    match token {
+        Some(token) if token_eq(&token, &state.descriptor.handshake_token) => {
+            Ok(Reply::ok(serde_json::json!({
+                "protocol": PROTOCOL,
+                "instance_id": state.descriptor.instance_id,
+                "pid": state.descriptor.pid,
+                "session_key": state.session_key,
+            })))
+        }
+        _ => Err(RouteError::new(401, "BOD_HANDSHAKE_DENIED")),
     }
+}
 
-    /// 不含查询串的路径：路由匹配一律用它，避免 `?cursor=3` 落到 404。
-    fn path_only(&self) -> &str {
-        self.path.split('?').next().unwrap_or("")
-    }
-
-    fn query(&self) -> Option<&str> {
-        self.path.split_once('?').map(|(_, query)| query)
-    }
-
-    fn query_param(&self, name: &str) -> Option<&str> {
-        self.query()?.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (key == name).then_some(value)
-        })
-    }
-
-    /// 凭据是否被塞进查询串。SSE 不接受这种传法：查询串会进日志与浏览器历史。
-    fn has_query_token(&self) -> bool {
-        self.query().is_some_and(|query| {
-            query.split('&').any(|pair| {
-                let key = pair.split_once('=').map(|(key, _)| key).unwrap_or(pair);
-                matches!(key, "token" | "session_key" | "access_token")
-            })
-        })
-    }
+fn route_shutdown(state: &HostServer, _endpoint: EndpointRequest) -> Result<Reply, RouteError> {
+    state.stopping.store(true, Ordering::SeqCst);
+    Ok(Reply::ok(serde_json::json!({ "stopping": true })))
 }
 
 /// `GET /_bod/events` 的实现：把补齐计划写成 SSE 帧，必要时保活并继续推送增量。
@@ -614,7 +596,11 @@ fn respond(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), HostEr
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
+        422 => "Unprocessable Entity",
+        500 => "Internal Server Error",
         _ => "Error",
     };
     let response = format!(

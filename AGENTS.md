@@ -524,6 +524,13 @@
     dev 来源需显式 `allow_origin`）。`null` Origin 一律拒。这条不是可选的加固：
     `POST /_bod/handshake` 走描述文件令牌而非 Bearer，Host 校验是那条路径上唯一的网络层防线
     （DNS rebinding 场景）。
+13. **禁止在 `handle` 里直接按路径分支**：新增 HTTP 端点一律加进 `host_handshake::ROUTES`
+    路由表，并**必须**声明 `auth` 与 `note`（`crates/bod-app/src/http_router.rs`）。
+    `auth` 无 `Default`，漏写编译不过；`note` 为空则 `route_table_is_well_formed` 测试不过。
+    理由：CR-003 之前是 `match (method, path)` 链，加到第 5 个分支时「谁能调、拒绝答什么码」
+    只能靠读每个分支的代码才知道，而 §6 还要再加 5 个业务接口。
+    拒绝码按端点保持稳定（`BOD_SHUTDOWN_DENIED` 不等于通用 `BOD_UNAUTHORIZED`），
+    客户端按码分支，改码等于改契约。
 
 ## 验证与完成规则
 
