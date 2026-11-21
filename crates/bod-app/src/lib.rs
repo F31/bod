@@ -64,6 +64,8 @@ pub mod rebuild_precheck;
 pub mod recovery_models;
 pub mod release_acceptance;
 pub mod release_governance;
+pub mod remote_delegation;
+pub mod remote_partition;
 pub mod resource_state;
 pub mod runtime_verification;
 pub mod scope_boundary;

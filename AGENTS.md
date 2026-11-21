@@ -360,8 +360,8 @@
   验收需要真实多主体（成员 + Agent + 客户 + 连接器）与真实网关，机器不能生成；
   P5 的 I/G 绑定（G-13/G-21/G-22/G-25、I-14/I-19/I-23/I-44）全部保持 planned。
   P4 的 I/G 绑定**全部保持 planned**。
-- **P6 进行中（2026-11-21）**：`openspec/changes/p6-open-extension` 任务 1.1—1.6 已勾选，
-  2.x—5.x 未开始（2.8 需双机真实环境、4.6 需真实 iOS/Android 设备）。
+- **P6 进行中（2026-11-21）**：`openspec/changes/p6-open-extension` 任务 1.1—1.6、2.1—2.7 已勾选，
+  2.8 未勾选（需双机真实环境），3.x—5.x 未开始（4.6 需真实 iOS/Android 设备）。
   `bod-app::extension_sdk` 承接第三方适配的接入边界：描述符带版本/平台/schema 版本/能力分项与
   限制，握手先判协议版本再逐项判必需能力与证据门槛，**拒绝只作用于新扩展任务**（缺 `Delegation`
   的旧适配器仍走原本地路径）；安装按「版本 → digest → 来源 → 许可证 → 协议 → schema → fixture →
@@ -374,6 +374,20 @@
   四项比对，无决定即 `ZeroDelivery`，扩大范围必走 `NeedsDecision`，审计只留引用与摘要（SB06）；
   `support_claim` 让"支持声明"成为机器可检结构——确定版本 + 具体平台 + 对应报告，自报级只能说
   自己是自报级。11 条命名用例 + 6 条漂移检查，说明见 `docs/spec-notes/p6-sdk.md`。
+  `bod-app::remote_delegation` 承接远端链路：节点与 webhook 共用一份启动结构，参数摘要不含重试与
+  时间，同 ID 同摘要重放回原实例、异摘要拒并保留原记录（RM01），管理动作的 Appointment 与
+  authority_epoch 各自独立成拒绝理由；批次带密钥版本与起止 sequence，验签 + 去重 + 连续推进一次做完，
+  缺口只要求补传不跳序，`requires_acceptance_evidence()` 恒真、`accepted_artifact()` 恒假（RM07）；
+  设备有效动作是「设备能力 ∩ 用户项目权限 ∩ 已启用通道」，配对与在线都不放宽，新通道默认关闭，
+  关闭即终止控制会话、拒绝排队命令、在途外部操作转对账（SB05）；慢订阅超限整段释放缓冲、按最后
+  持久游标补拉、游标过期读快照基准，没有权威回执一律显示待核实（RM06）；信箱满额与过期明确反馈，
+  同一 decision_key 至多一次有效业务决定，冲突方记名而首个保持权威（RM09）。
+  `bod-app::remote_partition`（G-19）承接分区与对账：失联暂停新外部动作、连接显示"未知"、未上传
+  事件不丢弃、查看继续；恢复前核对 epoch/租约/尝试/游标/外部动作五项，一项不符即列出全部原因；
+  过期 token 不得改宿主状态，旧尝试迟到只进历史、不产生接受、预算按实际用量对账（RM03）；
+  外部动作按稳定业务键查询，已生效只补记一次、确认不存在才一次补写、不可查询显示待核实且
+  零盲写，目标不能隔离旧写入即阻塞并点名责任人（RM02）。16 条命名用例 + 6 条漂移检查，
+  说明见 `docs/spec-notes/p6-remote.md`。
   **P6 的 I/G 绑定（G-19/G-23/G-34/G-46/G-47、`invariant_i_15`/`invariant_i_57`）保持 planned**：
   `Supported` 只表示该适配器自己的闸门用例全绿，Fake Executor 即使跑通自己的套件也照样
   `is_production_capable() == false`，自测报告不是生产能力，支持矩阵不因此升 Supported。
