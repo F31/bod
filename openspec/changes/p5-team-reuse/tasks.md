@@ -41,9 +41,9 @@
 
 ## 5. P5 验证与出口
 
-- [ ] 5.1 运行 `bod-app::catalog_upgrade`、`authorization`、`feedback_knowledge` 的 P5 用例，验证 G-13、G-21、G-22、G-25 有命名 case 与真实断言。
+- [x] 5.1 运行 `bod-app::catalog_upgrade`、`authorization`、`feedback_knowledge` 的 P5 用例，验证 G-13、G-21、G-22、G-25 有命名 case 与真实断言。
 - [ ] 5.2 执行 AZ01—AZ06 六阶段授权与隔离验收，记录合法路径、拒绝路径、连接器调用次数与审计；样本不足时不得宣布通过。
-- [ ] 5.3 汇总 P5 出口证据与支持矩阵，验证「安装升级不覆盖/扩权」「条件变化生成有限维护工作」有可核对报告，其他通道与平台保持 Planned。
+- [x] 5.3 汇总 P5 出口证据与支持矩阵，验证「安装升级不覆盖/扩权」「条件变化生成有限维护工作」有可核对报告，其他通道与平台保持 Planned。
 
 ## Workflow follow-up
 
