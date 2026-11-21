@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod cross_check;
 mod impact_sample;
 mod revalidate;
 
@@ -812,6 +813,92 @@ fn evidence(flags: &[String]) -> bool {
     }
 }
 
+/// 跨平台验证触发判定。退出码直接编码结论，供脚本组合：
+/// 0 可只跑单平台 / 1 必须跨平台 / 2 无法判定（按必须处理）。
+fn cross(args: &[String]) -> ExitCode {
+    use cross_check::DiffSpec;
+
+    let mut from: Option<String> = None;
+    let mut to: Option<String> = None;
+    let mut staged = false;
+    let mut worktree = false;
+    let mut explain = false;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--from" => match args.get(index + 1) {
+                Some(value) => {
+                    from = Some(value.clone());
+                    index += 2;
+                }
+                None => {
+                    println!("[cross] FAIL --from 缺少参数");
+                    return ExitCode::from(2);
+                }
+            },
+            "--to" => match args.get(index + 1) {
+                Some(value) => {
+                    to = Some(value.clone());
+                    index += 2;
+                }
+                None => {
+                    println!("[cross] FAIL --to 缺少参数");
+                    return ExitCode::from(2);
+                }
+            },
+            "--staged" => {
+                staged = true;
+                index += 1;
+            }
+            "--worktree" => {
+                worktree = true;
+                index += 1;
+            }
+            "--explain" => {
+                explain = true;
+                index += 1;
+            }
+            other => {
+                println!("[cross] FAIL 未知参数 {other}");
+                println!(
+                    "[cross] 用法：cross [--from REV] [--to REV] | --staged | --worktree [--explain]"
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    // 三种 diff 基准互斥：混着给会让人以为比较了某两处，实际只用了其中一个。
+    let modes = [staged, worktree, from.is_some() || to.is_some()]
+        .iter()
+        .filter(|flag| **flag)
+        .count();
+    if modes > 1 {
+        println!("[cross] FAIL --from/--to、--staged、--worktree 只能选一种");
+        return ExitCode::from(2);
+    }
+
+    let spec = if staged {
+        DiffSpec::Staged
+    } else if worktree {
+        DiffSpec::Worktree
+    } else {
+        DiffSpec::Range {
+            from: from.unwrap_or_else(|| "HEAD~1".to_string()),
+            to: to.unwrap_or_else(|| "HEAD".to_string()),
+        }
+    };
+
+    let root = workspace_root();
+    let result = cross_check::run(&root, &spec);
+    print!(
+        "{}",
+        cross_check::render(&result.verdict, &result.scan, &spec, explain)
+    );
+    ExitCode::from(result.verdict.exit_code())
+}
+
 fn print_help() {
     println!("usage: xtask <command> [options]");
     println!("  verify --stage P0   G-1 依赖方向与 AGENTS.md 声明校验");
@@ -827,6 +914,8 @@ fn print_help() {
     println!("  impact [--from REV] [--to REV] [--out PATH]  P3 G-31：用真实提交跑影响评估");
     println!("  revalidate [--from REV] [--to REV] [--out PATH] [--budget N] [--cargo PATH]");
     println!("               P3 5.2：真跑重验 + rustc 真值核对漏项 + 走一遍再次接受");
+    println!("  cross [--from REV] [--to REV] | --staged | --worktree [--explain]");
+    println!("               跨平台验证触发判定：退出码 0 可单平台 / 1 必须跨平台 / 2 无法判定");
     println!("  --self-test         违例注入自测");
 }
 
@@ -1219,6 +1308,8 @@ fn main() -> ExitCode {
         [cmd, flag, path] if cmd == "drill" && flag == "--check" => drill_check(path),
         [cmd, flag, path] if cmd == "drill" && flag == "--render" => drill_render(path),
         [cmd, rest @ ..] if cmd == "evidence" => evidence(rest),
+        // cross 的退出码 2 表示「无法判定」，不能折叠成 false/FAILURE 的 1。
+        [cmd, rest @ ..] if cmd == "cross" => return cross(rest),
         [cmd, rest @ ..] if cmd == "impact" => impact(rest),
         [cmd, rest @ ..] if cmd == "revalidate" => revalidate(rest),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {

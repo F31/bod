@@ -507,6 +507,11 @@
    `bod-app` 不反向依赖 CLI/桌面壳。
 8. **禁止无证据引入重依赖**：新增默认依赖或一级对象须记录复杂度准入理由（§2.4）并锁定版本。当前新增依赖是 `serde`/`toml`（任务 1.2 配置 schema）、`rusqlite`（任务 2.6 单写事务，bundled 避免系统 SQLite）与 `serde_json`（任务 5.1 执行协议 JSON 契约，需未知字段拒绝），理由与锁定版本见 `docs/spec-notes/p0-d0-config.md`、`docs/spec-notes/p0-execution-protocol.md`、`docs/compat/toolchain.md`；`bod-core` 仍保持零外部依赖。
 9. **禁止把 Fake Executor 当生产能力**：它只用于故障 conformance，不写入支持矩阵 Supported。
+10. **禁止以单平台绿灯代替跨平台通过**：`#[cfg(unix)]` / `#[cfg(windows)]` 分支，以及只在这些分支下
+    编译的测试（如 `descriptor_file_is_owner_only`、`diff_gate_detects_real_symlink_escape`），
+    在另一平台上是**空白**，不是通过。P2 僵尸缺陷即此例：`kill -0` 把僵尸判为存活，
+    Windows 走 `OpenProcess` 永远测不出来。是否必须跑第二个平台由
+    `cargo run -p xtask -- cross` 机械判定，不得目测、凭印象或为省事放宽。
 
 ## 验证与完成规则
 
@@ -515,3 +520,12 @@
 - 编译检查：`cargo check --workspace --all-targets`，测试：`cargo test --workspace`。
 - 里程碑出口：相关 I/G 门禁有真实证据后才勾选 tasks.md；每个阶段 Change 在自己出口证据齐全后归档，P0 已于 2026-11-19 归档，后续阶段不回溯修改 P0 历史约定。
 - 工具链调用前先 `export PATH="$CARGO_HOME/bin:$PATH"`（详见 `docs/compat/toolchain.md`）。
+- **跨平台验证触发条件**：改完代码跑 `cargo run -p xtask -- cross`（默认比较 `HEAD~1..HEAD`；
+  提交前用 `--worktree` 或 `--staged`）。退出码即结论：
+  `0` 可以只跑单平台，`1` 必须跨平台，`2` 无法判定——**2 按必须跨平台处理，不得当作放行**。
+  判据不硬编码文件清单，而是每次扫描源码里的 `cfg(unix)` / `cfg(windows)` / `cfg(target_os...)`
+  等属性的实际位置，并额外把构建配置（`Cargo.toml`、`Cargo.lock`、`build.rs`、`rust-toolchain.toml`）
+  与新增/删除的文件计入。它只回答「这次改动要不要在 Linux 再跑一遍全量」，
+  不改变 `verify --stage P0` 的结论。
+  注意 WSL 的边界：内核语义可信（`kill`、文件权限、symlink），但 `/mnt/e` 的文件系统与网络都是
+  虚拟化的，不能当真实 Linux 服务器或 P6 2.8 双机证据。
