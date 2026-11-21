@@ -439,6 +439,12 @@
   22 条命名用例 + 16 条漂移检查，手册见 `docs/spec-notes/p7-measurement.md`（§4 归因口径），
   台账见 `docs/reports/p7-baseline-<platform>.md`。
   **仍未取得**：`agent_slot_occupancy`（bench 内无真实 Agent 进程）、多机写入需求（需双机/容灾演练）。
+  §3 决定记录在 `docs/reports/p7-decision.md`（含机器可读 JSON 块，由 `tests/p7_decision.rs` 解析成
+  `GraduationDecision` 校验）：四类候选必须齐备且代价/负担/故障语义/恢复证据不留空，DAO 替换一律
+  不算语义兼容，`record` 拒覆盖、`revise` 追加保留历史；决定里引用的每个小数与三位以上整数都必须
+  在两份基线报告里逐字命中，报告表格值与详情段必须自洽——防手写估数与单点篡改。结论是**不迁移引擎**：
+  只有单写争用在 Linux 越界（Busy 5），RTO 80 ms、体积 14.4 MiB、重建 229—390 ms 均无压力，
+  多写者吞吐收益为负，故选「写入路径优化」方向，且本 Change 内不落地任何代码/数据变更。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

@@ -31,11 +31,16 @@
 
 ## 3. 方案对比与决定
 
-- [ ] 3.1 对比索引/批处理/存储优化、执行节点扩展、PostgreSQL、外部持久执行服务，验证每项有迁移代价、运维负担、故障语义与恢复证据。
-- [ ] 3.2 验证 DAO 替换不被当作语义兼容，验证候选迁移方案保留单写次序、真实并发测试与备份恢复演练要求（§11.7）。
-- [ ] 3.3 形成 GraduationDecision 记录（瓶颈、样本、环境、对比、主体、回滚路径、未覆盖条件、复测触发），验证可审计且历史依据不随人员变化改写。
-- [ ] 3.4 验证容量评估未改变业务语义或数据；任何引擎变更被阻断并要求独立 Change 与迁移门禁。
-- [ ] 3.5 验证支持矩阵未被性能结论自动扩大，未测平台/协议/能力保持 Planned/Experimental/Unsupported（G-26 回归）。
+- [x] 3.1 对比索引/批处理/存储优化、执行节点扩展、PostgreSQL、外部持久执行服务，验证每项有迁移代价、运维负担、故障语义与恢复证据。
+      → `docs/reports/p7-decision.md` §2 四类候选表 + `§3` 机器可读记录；`compare_candidates` 要求四类齐备且四项字段非空（缺项或留空即 `Incomplete`）；用例 `task_3_1_all_four_candidates_have_cost_burden_semantics_and_evidence`、`task_3_1_all_four_candidates_must_be_compared`。
+- [x] 3.2 验证 DAO 替换不被当作语义兼容，验证候选迁移方案保留单写次序、真实并发测试与备份恢复演练要求（§11.7）。
+      → `dao_swap_is_not_semantic_compat()` 恒拒绝；四类候选的 `failure_semantics` 均须交代单写次序；决定记录写明「真实并发测试 + 备份恢复演练」三条硬要求；用例 `task_3_2_candidates_keep_single_writer_order_and_real_drills`、`task_3_2_dao_swap_is_not_semantic_compat`。
+- [x] 3.3 形成 GraduationDecision 记录（瓶颈、样本、环境、对比、主体、回滚路径、未覆盖条件、复测触发），验证可审计且历史依据不随人员变化改写。
+      → `p7-decision.md` 的 JSON 块由 `tests/p7_decision.rs` 解析成 `GraduationDecision`；`audit_gaps()` 必须为空，`record` 拒绝覆盖、`revise` 追加并保留 `earliest`；引用的数字须在真实报告里逐字命中（防手写估数）；用例 `task_3_3_decision_is_auditable_and_append_only`、`task_3_3_decision_cites_real_reports_and_real_numbers`。
+- [x] 3.4 验证容量评估未改变业务语义或数据；任何引擎变更被阻断并要求独立 Change 与迁移门禁。
+      → `guard_change_in_capacity_stage` 阻断换引擎/降同步/放宽事务/跳门禁；`guard_replicate_side_effect_package` 阻断复制副作用工作包；决定记录声明「未改变业务语义或数据」且要求独立 Change；用例 `task_3_4_no_engine_change_inside_the_capacity_stage`、`task_3_4_engine_changes_are_blocked_inside_capacity_stage`。
+- [x] 3.5 验证支持矩阵未被性能结论自动扩大，未测平台/协议/能力保持 Planned/Experimental/Unsupported（G-26 回归）。
+      → `guard_support_promotion` 无 conformance/真机证据即拒绝；支持矩阵仍为 0 Supported；用例 `task_3_5_support_matrix_is_not_promoted_by_performance`、`task_3_5_performance_never_promotes_support_matrix`。
 
 ## 4. 预算冻结与出口
 
