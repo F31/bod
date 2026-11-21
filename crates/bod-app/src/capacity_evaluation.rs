@@ -66,7 +66,7 @@ impl FormFactor {
 }
 
 /// 一条测量项：**没有样本数或命令就不算测到**。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MeasureItem {
     pub name: &'static str,
     pub form_factor: FormFactor,
@@ -82,6 +82,8 @@ pub struct MeasureItem {
     pub note: String,
     /// 能否与目标比较：`None` 表示目标不是可比较数值（或未测）。
     pub meets_target: Option<bool>,
+    /// 用于跨阶段比较的标量（p99 毫秒、events/s、MiB 等）；无标量则无法参与两阶段对比。
+    pub numeric: Option<f64>,
     pub failure_reason: Option<String>,
     pub status: MeasureStatus,
 }
@@ -98,6 +100,7 @@ impl MeasureItem {
             method: String::new(),
             note: String::new(),
             meets_target: None,
+            numeric: None,
             failure_reason: None,
             status: MeasureStatus::Target,
         }
@@ -105,6 +108,12 @@ impl MeasureItem {
 
     pub fn with_method(mut self, method: impl Into<String>) -> Self {
         self.method = method.into();
+        self
+    }
+
+    /// 标注用于跨阶段比较的标量。没有标量的项只能各自成条，不参与漂移判定。
+    pub fn with_numeric(mut self, value: f64) -> Self {
+        self.numeric = Some(value);
         self
     }
 
@@ -199,7 +208,7 @@ impl EnvironmentRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BaselineReport {
     pub environment: EnvironmentRecord,
     pub commit: String,
@@ -670,6 +679,511 @@ pub fn freeze_budget(stage: &BudgetStage) -> Result<&'static str, String> {
         }
         BudgetStage::SinglePhase => Err("只有一轮实测：预算保持 Target/Unverified".to_string()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 4.1 两阶段对比
+// ---------------------------------------------------------------------------
+
+/// 两阶段漂移容差：超过即视为不稳定，不得从 Target 转 Measured。
+pub const PHASE_TOLERANCE_PCT: f64 = 25.0;
+
+/// 两阶段之间单项的漂移。`within_tolerance` 为 `false` 时该项不得从 Target 转 Measured。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemDrift {
+    pub name: &'static str,
+    pub first: f64,
+    pub second: f64,
+    /// `(second - first) / first`，`first` 为 0 时记 `f64::INFINITY`。
+    pub delta_pct: f64,
+    pub within_tolerance: bool,
+    /// 两阶段都测到（都是 `Measured`）才有资格转 Measured。
+    pub both_measured: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PhaseComparison {
+    /// 环境或数据规模不同：两轮不可比，不允许冻结。
+    Incomparable { diff: Vec<&'static str> },
+    Comparable {
+        drifts: Vec<ItemDrift>,
+        tolerance_pct: f64,
+        /// 只在某一阶段出现的项：无法判断稳定性，不得转 Measured。
+        single_phase: Vec<&'static str>,
+    },
+}
+
+impl PhaseComparison {
+    /// 可以转成 `Measured` 的项：两阶段都测到且在容差内。
+    pub fn promotable(&self) -> Vec<&'static str> {
+        match self {
+            Self::Incomparable { .. } => Vec::new(),
+            Self::Comparable { drifts, .. } => drifts
+                .iter()
+                .filter(|drift| drift.both_measured && drift.within_tolerance)
+                .map(|drift| drift.name)
+                .collect(),
+        }
+    }
+
+    /// 漂移超容差或只测到一次的项：保留 Target/Unverified 并写进复测条件。
+    pub fn unresolved(&self) -> Vec<&'static str> {
+        match self {
+            Self::Incomparable { .. } => Vec::new(),
+            Self::Comparable {
+                drifts,
+                single_phase,
+                ..
+            } => {
+                let mut names: Vec<&'static str> = drifts
+                    .iter()
+                    .filter(|drift| !(drift.both_measured && drift.within_tolerance))
+                    .map(|drift| drift.name)
+                    .collect();
+                names.extend(single_phase.iter().copied());
+                names
+            }
+        }
+    }
+
+    /// 冻结预算的前提：两轮可比、且没有超出容差的项。
+    pub fn stage(&self) -> BudgetStage {
+        match self {
+            Self::Incomparable { diff } => BudgetStage::Incomparable { diff: diff.clone() },
+            Self::Comparable { drifts, .. } => {
+                let drifted: Vec<&'static str> = drifts
+                    .iter()
+                    .filter(|drift| !drift.within_tolerance)
+                    .map(|drift| drift.name)
+                    .collect();
+                BudgetStage::TwoComparablePhases { diff: drifted }
+            }
+        }
+    }
+}
+
+/// 连续两个阶段跑同一测量集后对比。环境差异或数据规模差异会让整轮判为不可比。
+pub fn compare_phases(
+    first: &BaselineReport,
+    second: &BaselineReport,
+    tolerance_pct: f64,
+) -> PhaseComparison {
+    let diff = first.environment.diff(&second.environment);
+    if !diff.is_empty() {
+        return PhaseComparison::Incomparable { diff };
+    }
+
+    let mut drifts = Vec::new();
+    let mut single_phase = Vec::new();
+    for item in &first.items {
+        let Some(other) = second.item(item.name) else {
+            single_phase.push(item.name);
+            continue;
+        };
+        let (Some(left), Some(right)) = (item.numeric, other.numeric) else {
+            // 没有标量的项各自成条，不参与漂移判定。
+            single_phase.push(item.name);
+            continue;
+        };
+        let delta_pct = if left == 0.0 {
+            if right == 0.0 { 0.0 } else { f64::INFINITY }
+        } else {
+            (right - left) / left
+        };
+        drifts.push(ItemDrift {
+            name: item.name,
+            first: left,
+            second: right,
+            delta_pct,
+            within_tolerance: delta_pct.abs() * 100.0 <= tolerance_pct,
+            both_measured: item.status == MeasureStatus::Measured
+                && other.status == MeasureStatus::Measured,
+        });
+    }
+    for item in &second.items {
+        if first.item(item.name).is_none() {
+            single_phase.push(item.name);
+        }
+    }
+
+    PhaseComparison::Comparable {
+        drifts,
+        tolerance_pct,
+        single_phase,
+    }
+}
+
+/// 两阶段对比报告（4.1 / 4.2）。
+pub fn render_phase_comparison(
+    comparison: &PhaseComparison,
+    first: &BaselineReport,
+    second: &BaselineReport,
+    tolerance_pct: f64,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# P7 两阶段预算冻结\n\n");
+    let _ = writeln!(out, "- 阶段一 commit：{}", first.commit);
+    let _ = writeln!(out, "- 阶段二 commit：{}", second.commit);
+    let _ = writeln!(out, "- 阶段一环境：{}", first.environment.note);
+    let _ = writeln!(out, "- 阶段二环境：{}", second.environment.note);
+    let _ = writeln!(out, "- 数据规模：{}", first.environment.data_scale);
+    let _ = writeln!(out, "- 漂移容差：±{tolerance_pct:.0}%");
+    let (first_measured, second_measured) = (first.measured_count(), second.measured_count());
+    let _ = writeln!(
+        out,
+        "- 已测项：阶段一 {first_measured} / 阶段二 {second_measured}"
+    );
+    out.push('\n');
+
+    match comparison {
+        PhaseComparison::Incomparable { diff } => {
+            let _ = writeln!(
+                out,
+                "## 结论：不可比，不得冻结（差异项：{}）\n",
+                diff.join("、")
+            );
+            out.push_str("两轮的环境或数据规模不同，数字不能相减；先对齐条件再重跑。\n");
+            return out;
+        }
+        PhaseComparison::Comparable {
+            drifts,
+            single_phase,
+            ..
+        } => {
+            out.push_str("## 单项漂移\n\n");
+            out.push_str("| 指标 | 阶段一 | 阶段二 | 漂移 | 两阶段都测到 | 判定 |\n");
+            out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+            for drift in drifts {
+                let verdict = if !drift.both_measured {
+                    "未两阶段都测到：保留 Target/Unverified"
+                } else if drift.within_tolerance {
+                    "可转 Measured"
+                } else {
+                    "超出容差：不转 Measured"
+                };
+                let _ = writeln!(
+                    out,
+                    "| `{}` | {:.3} | {:.3} | {:+.1}% | {} | {} |",
+                    drift.name,
+                    drift.first,
+                    drift.second,
+                    drift.delta_pct * 100.0,
+                    if drift.both_measured { "是" } else { "否" },
+                    verdict
+                );
+            }
+            if !single_phase.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "\n只在单一阶段出现的项（无标量或不参与对比）：{}\n",
+                    single_phase.join("、")
+                );
+            }
+
+            let promotable = comparison.promotable();
+            let unresolved = comparison.unresolved();
+            let _ = writeln!(
+                out,
+                "## 结论：可转 Measured {} 项，保留 Target/Unverified {} 项\n",
+                promotable.len(),
+                unresolved.len()
+            );
+            if !promotable.is_empty() {
+                let _ = writeln!(out, "- 可转 Measured：{}", promotable.join("、"));
+            }
+            if !unresolved.is_empty() {
+                let _ = writeln!(out, "- 保留原状态：{}", unresolved.join("、"));
+            }
+            match freeze_budget(&comparison.stage()) {
+                Ok(label) => {
+                    let _ = writeln!(out, "- 预算冻结：**{label}**（两轮可比且无超容差项）");
+                }
+                Err(reason) => {
+                    let _ = writeln!(out, "- 预算冻结：**未冻结**（{reason}）");
+                }
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// 4.2 预算冻结、适用范围与超标项归因
+// ---------------------------------------------------------------------------
+
+/// 超标项的成因。冻结预算前必须先定位到「默认依赖」或「结构」，不允许直接调目标或降同步。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriftCause {
+    /// 默认依赖：取的是某个库/配置的默认值（如 `busy_timeout` 默认 500 ms）。
+    DefaultDependency {
+        dependency: String,
+        evidence: String,
+    },
+    /// 结构：写法/结构决定的成本（单写锁、逐条 fsync、全表扫）。
+    Structure { name: String, evidence: String },
+    /// 尚未定位：既不能据此冻结，也不能据此调目标。
+    Unknown,
+}
+
+impl DriftCause {
+    pub fn is_located(&self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Self::DefaultDependency {
+                dependency,
+                evidence,
+            } => format!("默认依赖 `{dependency}`（{evidence}）"),
+            Self::Structure { name, evidence } => format!("结构「{name}」（{evidence}）"),
+            Self::Unknown => "未定位".to_string(),
+        }
+    }
+}
+
+/// 单项超标的归因记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftAttribution {
+    pub item: &'static str,
+    pub causes: Vec<DriftCause>,
+}
+
+impl DriftAttribution {
+    pub fn new(item: &'static str, causes: Vec<DriftCause>) -> Self {
+        Self { item, causes }
+    }
+
+    /// 至少要有一条非 `Unknown` 的成因才算「定位过」。
+    pub fn located(&self) -> bool {
+        self.causes.iter().any(DriftCause::is_located)
+    }
+
+    pub fn describe(&self) -> String {
+        if self.causes.is_empty() {
+            return "未定位".to_string();
+        }
+        self.causes
+            .iter()
+            .map(DriftCause::describe)
+            .collect::<Vec<_>>()
+            .join("；")
+    }
+}
+
+/// 冻结预算的适用范围。数字只在「同形态 + 同环境 + 同数据规模」下有效。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetScope {
+    /// 预算版本号，写进报告与复测触发条件。
+    pub version: String,
+    pub form_factor: FormFactor,
+    /// 环境摘要（OS / CPU / rustc / 构建参数）。
+    pub environment_note: String,
+    /// 数据规模（事件数、事务数、写者数）。
+    pub data_scale: String,
+    pub tolerance_pct: f64,
+}
+
+impl BudgetScope {
+    pub fn new(
+        version: impl Into<String>,
+        form_factor: FormFactor,
+        environment_note: impl Into<String>,
+        data_scale: impl Into<String>,
+        tolerance_pct: f64,
+    ) -> Self {
+        Self {
+            version: version.into(),
+            form_factor,
+            environment_note: environment_note.into(),
+            data_scale: data_scale.into(),
+            tolerance_pct,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "{} / {} + 环境「{}」+ 规模「{}」+ 容差 ±{:.0}%",
+            self.version,
+            self.form_factor.as_str(),
+            self.environment_note,
+            self.data_scale,
+            self.tolerance_pct
+        )
+    }
+}
+
+/// 一条被冻结的预算项。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrozenItem {
+    pub name: &'static str,
+    pub form_factor: FormFactor,
+    pub target: String,
+    pub value: f64,
+    pub meets_target: Option<bool>,
+}
+
+/// 冻结后的预算：只包含「两阶段都测到且在容差内」的项，其余进 `excluded` 并附复测条件。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrozenBudget {
+    pub scope: BudgetScope,
+    pub items: Vec<FrozenItem>,
+    /// 未进预算的项：超容差、只测到一次或没有标量。
+    pub excluded: Vec<&'static str>,
+    /// 被排除项的定位结论，作为复测触发条件。
+    pub attributions: Vec<DriftAttribution>,
+}
+
+impl FrozenBudget {
+    pub fn item(&self, name: &str) -> Option<&FrozenItem> {
+        self.items.iter().find(|item| item.name == name)
+    }
+
+    /// 预算里没有任何达标项时不许对外宣称「已冻结」。
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+/// 冻结正式预算。
+///
+/// 三条硬规则：
+/// 1. 两轮必须可比（环境与数据规模一致），否则冻结无效。
+/// 2. 没有任何「靠降低 SQLite 同步 / 放宽事务 / 跳授权或门禁」换来的达标——这类变更一律阻断。
+/// 3. 每个未进预算的项都必须**先**定位到默认依赖或结构，否则不许冻结（避免用调目标的方式"解决"超标）。
+pub fn freeze_with_attribution(
+    comparison: &PhaseComparison,
+    report: &BaselineReport,
+    scope: BudgetScope,
+    attributions: &[DriftAttribution],
+    relaxations: &[EngineChange],
+) -> Result<FrozenBudget, String> {
+    if let Some(change) = relaxations.first() {
+        guard_change_in_capacity_stage(change)?;
+    }
+
+    let PhaseComparison::Comparable {
+        drifts,
+        tolerance_pct,
+        ..
+    } = comparison
+    else {
+        let diff = match comparison {
+            PhaseComparison::Incomparable { diff } => diff.join("、"),
+            PhaseComparison::Comparable { .. } => String::new(),
+        };
+        return Err(format!("两轮不可比（{diff}），冻结无效"));
+    };
+
+    let promotable = comparison.promotable();
+    if promotable.is_empty() {
+        return Err("两轮没有一项同时满足「都测到 + 在容差内」，无预算可冻结".to_string());
+    }
+
+    let excluded = comparison.unresolved();
+    let mut missing: Vec<&'static str> = Vec::new();
+    for name in &excluded {
+        match attributions.iter().find(|entry| entry.item == *name) {
+            Some(entry) if entry.located() => {}
+            _ => missing.push(name),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "阻断：超标/未定项尚未定位默认依赖与结构（{}），先定位再冻结",
+            missing.join("、")
+        ));
+    }
+
+    let mut items = Vec::new();
+    for drift in drifts {
+        if !promotable.contains(&drift.name) {
+            continue;
+        }
+        let Some(source) = report.item(drift.name) else {
+            continue;
+        };
+        items.push(FrozenItem {
+            name: drift.name,
+            form_factor: source.form_factor,
+            target: source.target.clone(),
+            value: drift.second,
+            meets_target: source.meets_target,
+        });
+    }
+
+    let mut scope = scope;
+    scope.tolerance_pct = *tolerance_pct;
+
+    Ok(FrozenBudget {
+        scope,
+        items,
+        attributions: attributions
+            .iter()
+            .filter(|entry| excluded.contains(&entry.item))
+            .cloned()
+            .collect(),
+        excluded,
+    })
+}
+
+/// 冻结预算的 Markdown 记录（版本 / 适用范围 / 冻结项 / 排除项与复测条件）。
+pub fn render_frozen_budget(budget: &FrozenBudget) -> String {
+    let mut out = String::new();
+    out.push_str("# P7 正式容量预算（冻结记录）\n\n");
+    let _ = writeln!(out, "- 预算版本：{}", budget.scope.version);
+    let _ = writeln!(out, "- 适用形态：{}", budget.scope.form_factor.as_str());
+    let _ = writeln!(out, "- 适用环境：{}", budget.scope.environment_note);
+    let _ = writeln!(out, "- 适用规模：{}", budget.scope.data_scale);
+    let _ = writeln!(out, "- 漂移容差：±{:.0}%", budget.scope.tolerance_pct);
+    let _ = writeln!(
+        out,
+        "- 冻结项：{} / 排除项：{}",
+        budget.items.len(),
+        budget.excluded.len()
+    );
+    out.push('\n');
+    out.push_str("## 冻结项\n\n");
+    out.push_str("| 指标 | 形态 | 目标 | 冻结值 | 达标 |\n");
+    out.push_str("| --- | --- | --- | --- | --- |\n");
+    for item in &budget.items {
+        let meets = match item.meets_target {
+            Some(true) => "是",
+            Some(false) => "否",
+            None => "无可比目标",
+        };
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | {:.3} | {} |",
+            item.name,
+            item.form_factor.as_str(),
+            item.target,
+            item.value,
+            meets
+        );
+    }
+
+    out.push_str("\n## 排除项与复测条件\n\n");
+    if budget.excluded.is_empty() {
+        out.push_str("无：全部项都两阶段可复现。\n");
+    } else {
+        out.push_str("| 指标 | 定位结论 | 复测条件 |\n");
+        out.push_str("| --- | --- | --- |\n");
+        for name in &budget.excluded {
+            let located = budget
+                .attributions
+                .iter()
+                .find(|entry| entry.item == *name)
+                .map(DriftAttribution::describe)
+                .unwrap_or_else(|| "未定位".to_string());
+            let _ = writeln!(
+                out,
+                "| `{}` | {} | 同形态同规模连跑两轮、漂移回到 ±{:.0}% 内再纳入 |",
+                name, located, budget.scope.tolerance_pct
+            );
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

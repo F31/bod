@@ -90,6 +90,7 @@ fn cold_start(root: &Path) -> Result<MeasureItem, String> {
     )
     .with_method("新建空库 + 应用全部迁移，重复 5 次取 p50/p99；文件在本地临时目录，冷缓存不可控")
     .with_note("只覆盖到存储就绪，未包含 HTTP 监听与握手，故不能直接宣称 API ready 达标")
+    .with_numeric(ms(p99))
     .measured(
         format!("p50 {:.1} ms / p99 {:.1} ms", ms(p50), ms(p99)),
         samples.len(),
@@ -143,6 +144,7 @@ fn transaction_latency(root: &Path) -> Result<MeasureItem, String> {
     )
     .with_method("200 次单条写事务（BEGIN IMMEDIATE + 一次 INSERT + COMMIT），WAL/synchronous=FULL；单连接串行，无并发争用")
     .with_note("串行单写线程口径；多进程争用下的排队等待未覆盖")
+    .with_numeric(ms(p99))
     .measured(
         format!(
             "p50 {:.2} ms / p95 {:.2} ms / p99 {:.2} ms",
@@ -187,6 +189,7 @@ fn event_throughput(root: &Path, entries: usize) -> Result<MeasureItem, String> 
     .with_note(
         "批量提交口径（每批一次 fsync）；逐条持久化的速率见 event_throughput_durable，两者不可互换",
     )
+    .with_numeric(per_sec)
     .measured(
         format!("{per_sec:.0} events/s"),
         entries,
@@ -224,6 +227,7 @@ fn durable_event_throughput(root: &Path, entries: usize) -> Result<MeasureItem, 
         "逐条 insert_event + commit（每次一次 fsync），共 {entries} 条"
     ))
     .with_note("与 event_throughput_batched 是两个口径：不得用批量数字替代逐条持久化承诺")
+    .with_numeric(per_sec)
     .measured(
         format!("{per_sec:.0} events/s"),
         entries,
@@ -272,6 +276,7 @@ fn queue_selection(root: &Path, entries: usize) -> Result<MeasureItem, String> {
         "{entries} 条 work_queue 全量读取（含 50 次重复），页缓存热态，单连接"
     ))
     .with_note("全量扫描而非分页；超过 1000 条后的线性增长需要另行测量")
+    .with_numeric(ms(p99))
     .measured(
         format!(
             "{entries} 条 p50 {:.2} ms / p95 {:.2} ms / p99 {:.2} ms",
@@ -323,6 +328,7 @@ fn restart_after_events(root: &Path, events: usize) -> Result<MeasureItem, Strin
         counts.issues
     ))
     .with_note("当前无事件回放投影，重开只应用幂等迁移；接入投影后必须重测")
+    .with_numeric(ms(ready))
     .measured(
         format!(
             "{events} 事件写入 {:.0} ms；重开就绪 {:.0} ms",
@@ -362,6 +368,7 @@ fn idle_tick(root: &Path) -> Result<MeasureItem, String> {
     )
     .with_method("空库上空转 100 次：队列读取 + outbox Prepared 查询 + open 对账案件查询")
     .with_note("单次成本低不等于空闲 CPU 占比达标；轮询周期与唤醒机制需另行测量")
+    .with_numeric(ms(p99))
     .measured(
         format!("p50 {:.3} ms / p99 {:.3} ms", ms(p50), ms(p99)),
         samples.len(),
@@ -390,6 +397,7 @@ fn storage_volume(root: &Path, events: usize) -> Result<MeasureItem, String> {
         "{events} 条 events 后的库文件体积：主库 {main_bytes} 字节 + WAL {wal_bytes} 字节"
     ))
     .with_note("只记文件体积；表/索引分别占用与重建成本需要 SQLite 统计视图，见 §2.3")
+    .with_numeric(bytes as f64 / 1_048_576.0)
     .measured(
         format!("{:.1} MiB（{bytes} 字节）", bytes as f64 / 1_048_576.0),
         1,
@@ -643,6 +651,7 @@ fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
         reading.external_share() * 100.0,
         reading.internal_ms()
     ))
+    .with_numeric(reading.total_ms())
     .measured(
         format!(
             "总 {:.0} ms（外部复制 {:.0} ms + 重开 {:.0} ms + 校验 {:.0} ms）",
@@ -793,6 +802,11 @@ fn write_contention(root: &Path) -> Result<(MeasureItem, ContentionRun), String>
     }
 
     let verdict = classify_contention(&samples);
+    let worst_p99_ms = samples
+        .iter()
+        .max_by_key(|sample| sample.writers)
+        .map(|sample| sample.p99_us as f64 / 1_000.0)
+        .unwrap_or(0.0);
     let detail = samples
         .iter()
         .map(|sample| {
@@ -820,6 +834,7 @@ fn write_contention(root: &Path) -> Result<(MeasureItem, ContentionRun), String>
             .join("/")
     ))
     .with_note(format!("{detail}；归因：{}", contention_label(&verdict)))
+    .with_numeric(worst_p99_ms)
     .measured(
         detail,
         total_transactions,
@@ -956,6 +971,7 @@ fn volume_and_rebuild(
         "体积压力：{:?}；重建压力：{:?}；索引优化空间：{:?}",
         assessment.size, assessment.rebuild, assessment.index_space
     ))
+    .with_numeric(db_bytes as f64 / 1_048_576.0)
     .measured(volume_value, 1, BENCH_COMMAND, None);
 
     let rebuild_item = MeasureItem::new(
@@ -965,6 +981,7 @@ fn volume_and_rebuild(
     )
     .with_method("对 10 万事件库执行 REINDEX（全索引重建）一次并计时")
     .with_note("重建成本随行数与索引数线性增长；跨机器比较必须同数据规模")
+    .with_numeric(rebuild_ms)
     .measured(
         format!("{rebuild_ms:.0} ms"),
         1,
@@ -989,6 +1006,7 @@ fn volume_and_rebuild(
         "两者差 {factor:.1} 倍：{:?}；events 的 aggregate_id 已有 UNIQUE 自动索引，不能拿它当「未索引」对照",
         assessment.index_space
     ))
+    .with_numeric(factor)
     .measured(
         format!(
             "全表扫描 {:.2} ms / 索引等值 {:.3} ms（{factor:.0}×）",
@@ -1061,6 +1079,7 @@ fn executor_slots(run: &ContentionRun) -> (Vec<MeasureItem>, SlotReading, SlotVe
         run.transactions
     ))
     .with_note(format!("{label}；样本来自 {}", run.samples.len()))
+    .with_numeric(gain * 100.0)
     .measured(
         format!(
             "单写 {single:.0} txn/s → {widest} 写者 {saturated:.0} txn/s（收益 {:.0}%）",

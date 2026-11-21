@@ -44,9 +44,12 @@
 
 ## 4. 预算冻结与出口
 
-- [ ] 4.1 连续两个可比较阶段执行同一测量集，验证差异在记录范围内，达标项才从 Target 转 Measured。
-- [ ] 4.2 冻结正式预算并记录版本/适用范围，验证超标项先定位默认依赖与结构，且没有通过降低 SQLite 同步、事务、授权或接受门禁达标。
-- [ ] 4.3 汇总 P7 出口证据，验证「明确瓶颈及方案对比」「不按日事件数机械迁移」有可核对报告，未测项保留 Target/Unverified 与复测条件。
+- [x] 4.1 连续两个可比较阶段执行同一测量集，验证差异在记录范围内，达标项才从 Target 转 Measured。
+      → `xtask freeze [--out-dir DIR]` 连跑两轮同一测量集 → `capacity_evaluation::compare_phases`/`ItemDrift`/`PhaseComparison`（容差 `PHASE_TOLERANCE_PCT=25.0`，只有「两阶段都测到 + 在容差内」才进 `promotable()`）；真实结果：两平台两轮均可比（环境与规模一致），Windows 可转 10 项 / 超差 4 项，Linux 可转 7 项 / 超差 7 项，两平台都超差的 3 项为 `queue_selection_1000`、`recovery_rto_100k_events`、`idle_tick_cost`；报告 `docs/reports/p7-phase{1,2}-{windows,linux}.md` 与 `p7-two-phase-{windows,linux}.md`；用例 `tests/p7_freeze.rs` 六条（含容差闭区间、不可比两轮不转、无标量项不转、零基线不判稳）与 `tests/p7_exit.rs::task_4_1_*` 四条（表格判定与结论行一致、计数加总等于清单、每个数字能在阶段报告里找到）。
+- [x] 4.2 冻结正式预算并记录版本/适用范围，验证超标项先定位默认依赖与结构，且没有通过降低 SQLite 同步、事务、授权或接受门禁达标。
+      → `BudgetScope`（版本/形态/环境/规模/容差）、`DriftCause`（`DefaultDependency`/`Structure`/`Unknown`）、`DriftAttribution`、`freeze_with_attribution`（未定位即拒绝冻结、`relaxations` 非空即阻断）、`FrozenBudget`/`render_frozen_budget`；产出 `docs/reports/p7-budget.md`：**判定未冻结**（8 项排除，逐项给出默认依赖/结构定位 + 证据 + 复测条件），两平台都稳定的 6 项只记「可转 Measured / 可作预算输入」而不记「已生效」；未改任何正确性参数（`synchronous=Full`、`BEGIN IMMEDIATE`、`busy_timeout_ms=500` 均保持默认，`relaxations: []`）；用例 `tests/p7_freeze.rs::task_4_2_*` 五条 + `tests/p7_exit.rs::task_4_2_*` 两条。
+- [x] 4.3 汇总 P7 出口证据，验证「明确瓶颈及方案对比」「不按日事件数机械迁移」有可核对报告，未测项保留 Target/Unverified 与复测条件。
+      → `docs/reports/p7-exit-evidence.md`：结论 `done-with-unverified-items`；瓶颈表（单写 p99 5.31/1.68 ms、8 写者 182.37/338.57 ms、批量 58359—60619 events/s vs 逐条 377—1100 events/s、RTO 80 ms、库 14.4 MiB、重建 229—390 ms、多写者收益 −19%/−50%）逐行标注报告来源；四类候选对比指向 `p7-decision.md`；`graduation(&[], Some(n))` → `RejectedByEventCount` 与多机信号恒 `unknown` 写进 §2；9 项 `Unverified` 逐条给复测条件；并写明决定记录的 80 ms 出自基线轮、两阶段该项不稳定（57.669—125.842 ms），故只作结论依据不作预算数字；用例 `tests/p7_exit.rs::task_4_3_*` 四条。
 
 ## Workflow follow-up
 

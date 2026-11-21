@@ -594,11 +594,90 @@ fn bench(out_path: Option<&str>) -> bool {
     report.usable_for_decision()
 }
 
+/// 4.1：同一台机器连跑两轮同一测量集，输出两份报告 + 对比结论。
+fn freeze(out_dir: Option<&str>) -> bool {
+    let mut outputs = Vec::new();
+    for phase in 1..=2 {
+        match bod_app::perf_probe::run_detailed(&environment_note(), &commit_note()) {
+            Ok(output) => outputs.push(output),
+            Err(err) => {
+                println!("[freeze] FAIL 第 {phase} 轮测量未完成：{err}");
+                return false;
+            }
+        }
+    }
+    let (first, second) = (&outputs[0], &outputs[1]);
+    if !first.baseline.usable_for_decision() || !second.baseline.usable_for_decision() {
+        println!("[freeze] FAIL 有报告不可作为决策输入（存在 Target 项或缺命令/样本）");
+        return false;
+    }
+
+    let tolerance = bod_app::capacity_evaluation::PHASE_TOLERANCE_PCT;
+    let comparison =
+        bod_app::capacity_evaluation::compare_phases(&first.baseline, &second.baseline, tolerance);
+    let os = env::consts::OS;
+
+    if let Some(dir) = out_dir {
+        let phase1 = format!("{dir}/p7-phase1-{os}.md");
+        let phase2 = format!("{dir}/p7-phase2-{os}.md");
+        let summary = format!("{dir}/p7-two-phase-{os}.md");
+        for (path, text) in [
+            (
+                phase1.as_str(),
+                bod_app::capacity_evaluation::render_markdown(&first.baseline, &[]),
+            ),
+            (
+                phase2.as_str(),
+                bod_app::capacity_evaluation::render_markdown(&second.baseline, &[]),
+            ),
+            (
+                summary.as_str(),
+                bod_app::capacity_evaluation::render_phase_comparison(
+                    &comparison,
+                    &first.baseline,
+                    &second.baseline,
+                    tolerance,
+                ),
+            ),
+        ] {
+            if let Err(err) = fs::write(path, text) {
+                println!("[freeze] FAIL 报告写入 {path} 失败：{err}");
+                return false;
+            }
+            println!("[freeze] 已写入 {path}");
+        }
+    } else {
+        println!(
+            "{}",
+            bod_app::capacity_evaluation::render_phase_comparison(
+                &comparison,
+                &first.baseline,
+                &second.baseline,
+                tolerance,
+            )
+        );
+    }
+
+    let promotable = comparison.promotable();
+    let unresolved = comparison.unresolved();
+    println!(
+        "[freeze] 容差 ±{tolerance:.0}%：可转 Measured {} 项，保留原状态 {} 项",
+        promotable.len(),
+        unresolved.len()
+    );
+    match bod_app::capacity_evaluation::freeze_budget(&comparison.stage()) {
+        Ok(label) => println!("[freeze] 预算冻结：{label}"),
+        Err(reason) => println!("[freeze] 预算未冻结：{reason}"),
+    }
+    true
+}
+
 fn print_help() {
     println!("usage: xtask <command> [options]");
     println!("  verify --stage P0   G-1 依赖方向与 AGENTS.md 声明校验");
     println!("  migration-check     全部迁移表覆盖与破坏性 DDL 检查");
     println!("  bench [--out PATH]  P7 容量基线实测（Markdown 报告）");
+    println!("  freeze [--out-dir DIR] 连跑两轮同一测量集并对比（4.1 预算冻结）");
     println!("  --self-test         违例注入自测");
 }
 
@@ -611,6 +690,8 @@ fn main() -> ExitCode {
         [cmd] if cmd == "migration-check" => migration_check(&root),
         [cmd] if cmd == "bench" => bench(None),
         [cmd, flag, path] if cmd == "bench" && flag == "--out" => bench(Some(path.as_str())),
+        [cmd] if cmd == "freeze" => freeze(None),
+        [cmd, flag, path] if cmd == "freeze" && flag == "--out-dir" => freeze(Some(path.as_str())),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {
             verify_stage_p0(&root)
         }
