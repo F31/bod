@@ -987,8 +987,19 @@ fn serve(flags: &[String]) -> Result<String, String> {
     let config = BodConfig::default();
     let listen = listen.unwrap_or_else(|| config.server.listen.clone());
     let descriptor_path = descriptor_path.unwrap_or_else(default_descriptor_path);
-    let server = HostServer::bind(&listen, &descriptor_path, now_ms())
+    // 事件源就是 `GET /_bod/events` 的 SSE 基线订阅来源；宿主自己发布的事件也走同一条序列。
+    let feed = std::sync::Arc::new(bod_app::event_stream::MemoryFeed::with_capacity(1024));
+    let server = HostServer::bind_with_feed(&listen, &descriptor_path, now_ms(), feed.clone())
         .map_err(|err| format!("宿主启动失败：{err}"))?;
+    let ready_sequence = feed.publish(
+        "host.ready",
+        serde_json::json!({
+            "address": server.descriptor().address,
+            "instance_id": server.descriptor().instance_id,
+            "protocol": bod_app::host_handshake::PROTOCOL,
+        })
+        .to_string(),
+    );
     let summary = server.descriptor().public_summary();
     if json {
         let line = serde_json::json!({
@@ -997,6 +1008,7 @@ fn serve(flags: &[String]) -> Result<String, String> {
             "pid": server.descriptor().pid,
             "instance_id": server.descriptor().instance_id,
             "descriptor": descriptor_path.display().to_string(),
+            "events_sequence": ready_sequence,
         });
         println!("{line}");
     } else {
@@ -1005,6 +1017,7 @@ fn serve(flags: &[String]) -> Result<String, String> {
             "描述文件：{}（含握手令牌，权限 0600；不写入日志）",
             descriptor_path.display()
         );
+        println!("订阅端点：GET /_bod/events（Bearer 会话密钥，SSE，游标持久）");
     }
     // spawner 依赖这一行判断就绪，必须立即刷出。
     use std::io::Write as _;

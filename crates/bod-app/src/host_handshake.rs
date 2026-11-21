@@ -5,7 +5,8 @@
 //! 本模块提供三件事：
 //!
 //! 1. `HostServer`：绑定回环地址，把 `协议/地址/pid/实例 ID/握手令牌` 原子写成描述文件
-//!    （Unix 下 0600），并只回应 `/_bod/health`、`/_bod/handshake`、`/_bod/shutdown`。
+//!    （Unix 下 0600），并只回应 `/_bod/health`、`/_bod/handshake`、`/_bod/shutdown`
+//!    与 `/_bod/events`（SSE 基线订阅，语义见 `crate::event_stream`）。
 //! 2. `probe`：客户端读描述文件 → 确认实例存活 → 用令牌换会话密钥。
 //! 3. `request_shutdown`：用会话密钥请求停止，供 `close_action=stop_host` 使用。
 //!
@@ -180,10 +181,27 @@ pub struct HostServer {
     descriptor: HostDescriptor,
     descriptor_path: PathBuf,
     session_key: String,
+    /// 事件源：`GET /_bod/events` 的 SSE 基线订阅从这里读（P6 2.6 / RM06）。
+    feed: std::sync::Arc<dyn crate::event_stream::EventFeed>,
 }
 
 impl HostServer {
     pub fn bind(listen: &str, descriptor_path: &Path, now_ms: i64) -> Result<Self, HostError> {
+        Self::bind_with_feed(
+            listen,
+            descriptor_path,
+            now_ms,
+            std::sync::Arc::new(crate::event_stream::MemoryFeed::with_capacity(1024)),
+        )
+    }
+
+    /// 用调用方给的事件源绑定。宿主自身发布的事件也走同一个源，避免两条序列。
+    pub fn bind_with_feed(
+        listen: &str,
+        descriptor_path: &Path,
+        now_ms: i64,
+        feed: std::sync::Arc<dyn crate::event_stream::EventFeed>,
+    ) -> Result<Self, HostError> {
         let listener = TcpListener::bind(listen)
             .map_err(|err| HostError::Io(format!("无法监听 {listen}: {err}")))?;
         let address = listener
@@ -203,6 +221,7 @@ impl HostServer {
             descriptor,
             descriptor_path: descriptor_path.to_path_buf(),
             session_key: random_token("session"),
+            feed,
         };
         write_descriptor(descriptor_path, &server.descriptor)?;
         Ok(server)
@@ -239,7 +258,19 @@ impl HostServer {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         let request = read_request(&mut stream)?;
-        match (request.method.as_str(), request.path.as_str()) {
+        match (request.method.as_str(), request.path_only()) {
+            ("GET", "/_bod/events") => {
+                // 订阅是长连接：放到独立线程，否则会把健康检查与停止请求堵在队列里。
+                let feed = std::sync::Arc::clone(&self.feed);
+                let key = self.session_key.clone();
+                std::thread::spawn(move || {
+                    if let Err(err) = stream_events(feed, &key, stream, &request) {
+                        // 客户端断开是正常结束，但其它错误要留痕；错误里不含凭据。
+                        eprintln!("订阅结束：{err}");
+                    }
+                });
+                Ok(false)
+            }
             ("GET", "/_bod/health") => {
                 let body = serde_json::json!({
                     "ok": true,
@@ -327,6 +358,154 @@ impl Request {
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
+
+    /// 不含查询串的路径：路由匹配一律用它，避免 `?cursor=3` 落到 404。
+    fn path_only(&self) -> &str {
+        self.path.split('?').next().unwrap_or("")
+    }
+
+    fn query(&self) -> Option<&str> {
+        self.path.split_once('?').map(|(_, query)| query)
+    }
+
+    fn query_param(&self, name: &str) -> Option<&str> {
+        self.query()?.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (key == name).then_some(value)
+        })
+    }
+
+    /// 凭据是否被塞进查询串。SSE 不接受这种传法：查询串会进日志与浏览器历史。
+    fn has_query_token(&self) -> bool {
+        self.query().is_some_and(|query| {
+            query.split('&').any(|pair| {
+                let key = pair.split_once('=').map(|(key, _)| key).unwrap_or(pair);
+                matches!(key, "token" | "session_key" | "access_token")
+            })
+        })
+    }
+}
+
+/// `GET /_bod/events` 的实现：把补齐计划写成 SSE 帧，必要时保活并继续推送增量。
+///
+/// 三条如实边界：
+/// - 鉴权只认 `Authorization: Bearer`，不接受查询串令牌；
+/// - 需要整体重订阅时**立刻结束**，不发心跳伪装成正常订阅；
+/// - 写失败（客户端慢/断）就结束，游标由客户端下次带 `Last-Event-ID` 回来补。
+fn stream_events(
+    feed: std::sync::Arc<dyn crate::event_stream::EventFeed>,
+    session_key: &str,
+    mut stream: TcpStream,
+    request: &Request,
+) -> Result<(), HostError> {
+    use crate::event_stream::{
+        CursorRequest, DEFAULT_BACKLOG_LIMIT, DEFAULT_RETRY_MS, StreamFrame, StreamStats,
+        authorize_stream, plan_stream, render_plan,
+    };
+
+    let auth = authorize_stream(
+        request.header("authorization"),
+        request.has_query_token(),
+        session_key,
+        token_eq,
+    );
+    if !auth.is_authorized() {
+        let body = serde_json::json!({
+            "error": "BOD_STREAM_DENIED",
+            "reason": auth.explain(),
+        });
+        respond(&mut stream, 401, &body.to_string())?;
+        return Ok(());
+    }
+
+    let cursor = CursorRequest::resolve(
+        request.header("last-event-id"),
+        request.query_param("cursor"),
+        None,
+    );
+    let plan = plan_stream(&*feed, &cursor, false, DEFAULT_BACKLOG_LIMIT);
+    let follow = request.query_param("follow") != Some("0");
+    let max_ms = request
+        .query_param("max_ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000)
+        .clamp(100, 60_000);
+    let heartbeat_ms = request
+        .query_param("heartbeat_ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1_000)
+        .clamp(20, 10_000);
+
+    begin_stream(&mut stream)?;
+    let mut stats = StreamStats::default();
+    for frame in render_plan(&plan, DEFAULT_RETRY_MS) {
+        write_frame(&mut stream, &frame)?;
+        stats.record_frame(&frame);
+    }
+    if plan.is_resync() || !follow {
+        return Ok(());
+    }
+
+    // 继续跟随：有新事件就推增量，没有就心跳。中途出现空洞要立刻 resync 并停止，
+    // 否则客户端会拿着一个"看起来连续"的游标继续跑。
+    let mut cursor_now = plan.next_cursor().unwrap_or(0);
+    let deadline = std::time::Instant::now() + Duration::from_millis(max_ms);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(heartbeat_ms));
+        let head = feed.head();
+        if head > cursor_now {
+            let events = feed.read_from(cursor_now + 1, DEFAULT_BACKLOG_LIMIT);
+            let continuous = events
+                .first()
+                .map(|event| event.sequence == cursor_now + 1)
+                .unwrap_or(false);
+            if !continuous {
+                let frame = StreamFrame::Resync {
+                    reason: "跟随期间增量出现空洞",
+                    retry_ms: DEFAULT_RETRY_MS,
+                };
+                let _ = write_frame(&mut stream, &frame);
+                stats.record_frame(&frame);
+                return Ok(());
+            }
+            for event in events {
+                let frame = StreamFrame::Event(event);
+                if write_frame(&mut stream, &frame).is_err() {
+                    return Ok(());
+                }
+                stats.record_frame(&frame);
+            }
+            cursor_now = stats.last_cursor.unwrap_or(cursor_now);
+            continue;
+        }
+        if write_frame(&mut stream, &StreamFrame::Heartbeat).is_err() {
+            return Ok(());
+        }
+        stats.record_frame(&StreamFrame::Heartbeat);
+    }
+    Ok(())
+}
+
+/// 写 SSE 响应头：没有 `Content-Length`，也不复用连接。
+fn begin_stream(stream: &mut TcpStream) -> Result<(), HostError> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        crate::event_stream::SSE_CONTENT_TYPE
+    );
+    stream
+        .write_all(head.as_bytes())
+        .map_err(|err| HostError::Io(err.to_string()))?;
+    stream.flush().map_err(|err| HostError::Io(err.to_string()))
+}
+
+fn write_frame(
+    stream: &mut TcpStream,
+    frame: &crate::event_stream::StreamFrame,
+) -> Result<(), HostError> {
+    stream
+        .write_all(frame.encode().as_bytes())
+        .map_err(|err| HostError::Io(err.to_string()))?;
+    stream.flush().map_err(|err| HostError::Io(err.to_string()))
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<Request, HostError> {
