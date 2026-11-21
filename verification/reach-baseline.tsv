@@ -1,6 +1,6 @@
-# bod-reach-baseline v1 crate=bod-app modules=92 lines=102807
+# bod-reach-baseline v1 crate=bod-app modules=93 lines=104095
 # name	lines	reach
-store	7083	live
+store	7744	live
 manager_transfer	2678	live
 rebuild_precheck	2418	live
 context_handoff	2360	live
@@ -43,8 +43,9 @@ handoff_manifest	1149	live
 mobile_control	1137	test_only
 workbench_projection	1126	live
 handoff_drill	1064	live
-delivery_tracking	1059	live
+delivery_tracking	1063	live
 budget_admission	1034	live
+delivery_source	967	live
 handoff_facts	950	live
 http_router	946	live
 conformance_report	916	live
@@ -61,7 +62,6 @@ capability_dispatch	785	live
 event_stream	765	live
 invocation	760	live
 canonical_json	757	live
-delivery_source	757	live
 migration_safety	747	live
 config	731	live
 delivery_api	684	live
@@ -79,6 +79,7 @@ observability	500	live
 maintenance	477	orphan
 fake_executor	467	live
 descriptor_schema	457	live
+delivery_idempotency	412	live
 claim_concurrency	355	live
 protocol_reliability	353	live
 host_guard	352	live

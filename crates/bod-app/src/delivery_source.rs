@@ -64,6 +64,17 @@ pub enum SourceError {
         source_project: String,
         tracking_project: String,
     },
+    /// 这个来源身份已经承载了另一条跟踪关系（3.3）。
+    ///
+    /// 不「改挂」也不「再挂一条」：前者的意思是悄悄挪走一条已承诺的交付，
+    /// 后者会让「重复导入返回已有关系」失去唯一对象可返回。
+    SourceAlreadyLinked {
+        source_id: String,
+        tracking_id: String,
+        linked_tracking_id: String,
+    },
+    /// 挂来源到跟踪项时没有记录操作者：这也是责任归属，不能为空。
+    MissingLinker,
 }
 
 impl SourceError {
@@ -86,6 +97,8 @@ impl SourceError {
             Self::SourceNotFound(_) => "SOURCE_NOT_FOUND",
             Self::SourceRevisionNotFound(_) => "SOURCE_REVISION_NOT_FOUND",
             Self::SourceProjectMismatch { .. } => "SOURCE_PROJECT_MISMATCH",
+            Self::SourceAlreadyLinked { .. } => "SOURCE_ALREADY_LINKED",
+            Self::MissingLinker => "SOURCE_MISSING_LINKER",
         }
     }
 
@@ -137,6 +150,17 @@ impl SourceError {
                 "来源属于项目 {source_project}，跟踪项属于项目 {tracking_project}：\
                  跨项目来源不得挂到本项目交付上"
             ),
+            Self::SourceAlreadyLinked {
+                source_id,
+                tracking_id,
+                linked_tracking_id,
+            } => format!(
+                "来源 {source_id} 已承载跟踪项 {linked_tracking_id}，不能再挂到 {tracking_id}：\
+                 一个来源身份只承载一条跟踪关系（同一对象导入两次应返回已有关系）"
+            ),
+            Self::MissingLinker => {
+                "把来源挂到跟踪项必须记录操作者（linked_by 不能为空）".to_string()
+            }
         }
     }
 }
@@ -474,6 +498,137 @@ pub fn digest_history(revisions: &[SourceRevisionRow]) -> Vec<(String, String)> 
 }
 
 // ---------------------------------------------------------------------------
+// 导入命令（3.3：命令重放 vs 对象重复的分界处）
+// ---------------------------------------------------------------------------
+
+/// 导入来源的命令域。写进回执，**不参与**载荷指纹——两者分开比对，
+/// 调用方才能分清自己是「换了命令」还是「换了载荷」。
+pub const COMMAND_IMPORT_SOURCE: &str = "import-delivery-source";
+
+/// 导入一次外部来源。这是本仓里唯一同时踩到两种去重的地方：
+///
+/// - `idempotency_key` 管**命令重放**：同键同载荷 → 返回首次结果，不再写入。
+/// - 五元组身份管**对象重复**：换个键再导同一个 PR → 返回已有跟踪关系，不建第二项。
+///
+/// `new_*_id` 三个字段只在**新建**时使用（与 `register_source` 同口径），
+/// 命中已有对象时被忽略。它们参与载荷指纹：改 ID 重试是另一条命令。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSourceCommand {
+    pub idempotency_key: String,
+    pub company_id: String,
+    pub project_id: String,
+    /// 连接实例。空串表示无连接器（人工录入）。
+    pub connection_id: String,
+    pub object_type: Option<String>,
+    pub provider_object_id: Option<String>,
+    pub locator: String,
+    /// 跟踪项标题。只有真的要建跟踪项时才用到。
+    pub title: String,
+    pub requirement: String,
+    pub owner_id: String,
+    pub new_tracking_id: String,
+    pub new_source_id: String,
+    pub new_candidate_id: String,
+    /// 谁导入的。登记主体（§11 验收表要求可追溯），也进载荷指纹。
+    pub imported_by: String,
+}
+
+impl ImportSourceCommand {
+    /// 载荷指纹的输入：**所有影响结果或影响责任归属的字段**。
+    ///
+    /// 刻意不含 `idempotency_key`：含了的话换一个键就等于换一份载荷，
+    /// 「同键异载荷」永远撞不上——那正好把本模块要拦的事放过去了。
+    pub fn payload_fields(&self) -> Vec<(&'static str, &str)> {
+        vec![
+            ("project_id", self.project_id.as_str()),
+            ("connection_id", self.connection_id.as_str()),
+            ("object_type", self.object_type.as_deref().unwrap_or("")),
+            (
+                "provider_object_id",
+                self.provider_object_id.as_deref().unwrap_or(""),
+            ),
+            ("locator", self.locator.as_str()),
+            ("title", self.title.as_str()),
+            ("requirement", self.requirement.as_str()),
+            ("owner_id", self.owner_id.as_str()),
+            ("tracking_id", self.new_tracking_id.as_str()),
+            ("source_id", self.new_source_id.as_str()),
+            ("candidate_id", self.new_candidate_id.as_str()),
+            ("imported_by", self.imported_by.as_str()),
+        ]
+    }
+}
+
+/// 导入结果。`created_*` 描述**这条命令首次执行时**建了什么；
+/// `replayed=true` 说明本次是重放，没有再次写入——两者不矛盾，别混。
+///
+/// 落进回执的 `result_detail` 就是它的 JSON，重放时原样返回：
+/// 重放要回答「那条命令当时做了什么」，不是「现在是什么样」。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportOutcome {
+    /// 落到跟踪项时才有。
+    pub tracking_id: Option<String>,
+    /// 来源成为身份时才有。
+    pub source_id: Option<String>,
+    /// 只有定位、进了候选时才有。
+    pub candidate_id: Option<String>,
+    pub created_tracking: bool,
+    pub created_source: bool,
+    pub created_candidate: bool,
+    /// 本次是重放（没有写入）。**唯一**能区分「刚建好」与「早就有了」的字段。
+    pub replayed: bool,
+}
+
+impl ImportOutcome {
+    pub fn tracked(
+        tracking_id: String,
+        source_id: String,
+        created_tracking: bool,
+        created_source: bool,
+    ) -> Self {
+        Self {
+            tracking_id: Some(tracking_id),
+            source_id: Some(source_id),
+            candidate_id: None,
+            created_tracking,
+            created_source,
+            created_candidate: false,
+            replayed: false,
+        }
+    }
+
+    pub fn candidate(candidate_id: String, created_candidate: bool) -> Self {
+        Self {
+            tracking_id: None,
+            source_id: None,
+            candidate_id: Some(candidate_id),
+            created_tracking: false,
+            created_source: false,
+            created_candidate,
+            replayed: false,
+        }
+    }
+
+    /// 从回执结果体还原一次重放。`replayed` 由调用方此刻的事实决定，不信存档里的值。
+    ///
+    /// 读不回来时返回原因而不是 `None`：调用方要把它报成「回执不可读」，
+    /// 而不是悄悄当作首次执行。
+    pub fn replayed_from(detail: &str) -> Result<Self, String> {
+        let mut outcome: Self =
+            serde_json::from_str(detail).map_err(|err| format!("结果体不是合法 JSON：{err}"))?;
+        outcome.replayed = true;
+        Ok(outcome)
+    }
+}
+
+/// 关联结果。`created=false` 表示两边早就挂着，本次没动。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedSource {
+    pub tracking_id: String,
+    pub created: bool,
+}
+
+// ---------------------------------------------------------------------------
 // 渲染（`bod sources` 的文本输出）
 // ---------------------------------------------------------------------------
 
@@ -753,5 +908,60 @@ mod tests {
                 ("2026-11-21T10:00:20Z".to_string(), "sha256:bbb".to_string()),
             ]
         );
+    }
+
+    fn import_command() -> ImportSourceCommand {
+        ImportSourceCommand {
+            idempotency_key: "key-1".to_string(),
+            company_id: "c1".to_string(),
+            project_id: "p1".to_string(),
+            connection_id: "gh-1".to_string(),
+            object_type: Some("pull-request".to_string()),
+            provider_object_id: Some("PR_kw318".to_string()),
+            locator: "acme/web#318".to_string(),
+            title: "登录偶发 500".to_string(),
+            requirement: String::new(),
+            owner_id: "alice".to_string(),
+            new_tracking_id: "dt-1".to_string(),
+            new_source_id: "src-1".to_string(),
+            new_candidate_id: "cand-1".to_string(),
+            imported_by: "alice".to_string(),
+        }
+    }
+
+    /// 幂等键不进载荷指纹：进去了就等于「换键即换载荷」，同键异载荷永远撞不上。
+    #[test]
+    fn idempotency_key_is_not_part_of_the_payload() {
+        let command = import_command();
+        let baseline =
+            crate::delivery_idempotency::payload_fingerprint(&command.payload_fields()).unwrap();
+        let mut other = command.clone();
+        other.idempotency_key = "key-2".to_string();
+        assert_eq!(
+            crate::delivery_idempotency::payload_fingerprint(&other.payload_fields()).unwrap(),
+            baseline,
+            "换键不改变载荷指纹"
+        );
+        // 反过来：换标题必须改变指纹，否则「改了标题重试」会被当成重放。
+        let mut retitled = command.clone();
+        retitled.title = "登录 500（改）".to_string();
+        assert_ne!(
+            crate::delivery_idempotency::payload_fingerprint(&retitled.payload_fields()).unwrap(),
+            baseline
+        );
+    }
+
+    /// 结果体可原样往返，重放标志由调用方此刻决定，不信存档里的值。
+    #[test]
+    fn outcome_round_trips_and_replay_flag_is_recomputed() {
+        let outcome = ImportOutcome::tracked("dt-1".to_string(), "src-1".to_string(), true, true);
+        let text = serde_json::to_string(&outcome).expect("应可序列化");
+        let restored = ImportOutcome::replayed_from(&text).expect("应可反序列化");
+        assert_eq!(restored.tracking_id.as_deref(), Some("dt-1"));
+        assert_eq!(restored.source_id.as_deref(), Some("src-1"));
+        // created_* 保留首次执行的事实，replayed 反映本次。
+        assert!(restored.created_tracking && restored.created_source);
+        assert!(restored.replayed);
+        assert!(ImportOutcome::replayed_from("not json").is_err());
     }
 }

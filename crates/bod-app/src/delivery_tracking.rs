@@ -57,6 +57,8 @@ pub enum DeliveryError {
     },
     /// 人工补证没有写授权范围与复验依据：不构成证据。
     EmptyManualEvidenceNote,
+    /// 跟踪项不存在（关联来源、追加观察前的显式校验）。
+    TrackingNotFound(String),
     /// 资源版本无法表示为无符号版本号。
     InvalidVersion(i64),
 }
@@ -71,6 +73,7 @@ impl DeliveryError {
             Self::UnknownVerificationState(_) => "DELIVERY_UNKNOWN_VERIFICATION_STATE",
             Self::TargetNotInTracking { .. } => "DELIVERY_TARGET_NOT_IN_TRACKING",
             Self::EmptyManualEvidenceNote => "DELIVERY_MANUAL_EVIDENCE_WITHOUT_NOTE",
+            Self::TrackingNotFound(_) => "DELIVERY_TRACKING_NOT_FOUND",
             Self::InvalidVersion(_) => "DELIVERY_INVALID_VERSION",
         }
     }
@@ -99,6 +102,7 @@ impl DeliveryError {
             Self::EmptyManualEvidenceNote => {
                 "人工补证必须写清洗授权范围与复验依据（note 不能为空）".to_string()
             }
+            Self::TrackingNotFound(id) => format!("跟踪项 {id} 不存在"),
             Self::InvalidVersion(value) => format!("资源版本 {value} 不是正数"),
         }
     }

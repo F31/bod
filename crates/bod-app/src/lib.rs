@@ -31,6 +31,7 @@ pub mod continuation_card;
 pub mod control_api;
 pub mod coverage_receipt;
 pub mod delivery_api;
+pub mod delivery_idempotency;
 pub mod delivery_source;
 pub mod delivery_tracking;
 pub mod delivery_verification;

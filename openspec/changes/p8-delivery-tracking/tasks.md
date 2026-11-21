@@ -49,7 +49,17 @@
       [--candidates] [--json]`；候选确认写入口仍等 §34.12 主体判定。
       13 个模块单测 + 7 个 store 用例 + 3 个 CLI 端到端用例。
 
-- [ ] 3.3 去重语义分离：幂等键管命令重放，来源身份管对象重复；同键异载荷返回冲突。
+- [x] 3.3 去重语义分离：幂等键管命令重放，来源身份管对象重复；同键异载荷返回冲突。
+      **结果**：`018_delivery_idempotency.sql` 两张表（`delivery_command_receipts` 回执、
+      `delivery_tracking_sources` 来源关系）。键的作用域是 `(company_id, key)`、**不含命令**——
+      一个键换命令也是冲突；载荷指纹由内容派生（sha256 over 规范 JSON），同键异载荷拒绝；
+      回执只写一次（trigger），且与业务写入同事务（`UnitOfWork::import_delivery_source`
+      自带 `SAVEPOINT`，失败不污染键）。对象去重：五元组 + 来源关系，重复导入返回
+      **已有跟踪关系**（`created_tracking=false`），不建第二个跟踪项；一个来源身份只承载
+      一条跟踪关系，改挂明确拒绝。8 个 store 用例（含「两人两键导入同一 PR → 一个跟踪项」
+      与「失败不污染键」）+ 10 个 `delivery_idempotency` 单测 + 2 个来源模块单测。
+      **未做**：`POST /api/v1/delivery-sources/imports` 仍 `planned`，写入入口（含审计
+      `append_audit_event` 与 §34.12 主体判定）随 3.5 落地——本段只有库层入口与用例。
 - [ ] 3.4 目标关联与 `expected_version` 追加语义；共享来源不合并不同客户记录。
 - [ ] 3.5 关联与补证入现有 Company 单写事务；连接器与人工证据冲突保留两者并进待核实。
 

@@ -8,6 +8,11 @@ use crate::audit_log::{AuditDecision, AuditEvent, AuditRecord};
 use crate::authorization::StageAction;
 use crate::config::BodConfig;
 use crate::coverage_receipt::VerificationConclusion;
+use crate::delivery_idempotency::{IdempotencyError, Receipt, Replay, ResultKind, classify};
+use crate::delivery_source::{
+    COMMAND_IMPORT_SOURCE, ImportOutcome, ImportSourceCommand, LinkedSource, SourceError,
+    SourceIdentity, SourceResolution,
+};
 use crate::delivery_tracking::{
     DeliveryError, ObservationKind, ObservationRow, TargetRow, TrackingRow, TrackingView,
     evidence_stamps, project_target, verification_conclusion,
@@ -53,6 +58,9 @@ use std::path::Path;
 /// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据，
 /// 014 为 decisions 不可变 trigger（P2 3.4 加固），015 为业务审计事件（CR-002），
 /// 016 为 §11 交付跟踪（P8 3.1：跟踪项/目标/追加式观察）；
+/// 016 为 §11 交付跟踪（P8 3.1：跟踪项/目标/追加式观察）；
+/// 017 为来源身份（P8 3.2：五元组/候选/追加式修订）；
+/// 018 为去重语义（P8 3.3：命令回执/来源关系）。
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 /// P7 基准统一页缓存：负数按 KiB 解释，64 MiB；避免依赖 SQLite 默认 2 MiB。
 const BENCH_CACHE_SIZE_KIB: i64 = 65_536;
@@ -75,6 +83,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/015_audit.sql"),
     include_str!("../migrations/016_delivery_tracking.sql"),
     include_str!("../migrations/017_delivery_sources.sql"),
+    include_str!("../migrations/018_delivery_idempotency.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -96,6 +105,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "015_audit.sql",
     "016_delivery_tracking.sql",
     "017_delivery_sources.sql",
+    "018_delivery_idempotency.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -352,6 +362,67 @@ fn map_source_candidate_row(
     })
 }
 
+/// 回执读取列顺序。集中一处，读写两侧不会错位。
+const RECEIPT_SELECT: &str = "SELECT company_id, idempotency_key, command, payload_fingerprint,
+            result_kind, result_id, result_detail, recorded_at_ms
+     FROM delivery_command_receipts";
+
+/// 回执行映射。结果种类出现表外值一律报错：把它当成 tracking 会让重放返回一个
+/// 类型错误的结果，而调用方会照着用。
+fn map_receipt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Receipt> {
+    let kind_text: String = row.get(4)?;
+    let result_kind = ResultKind::parse(&kind_text).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("delivery_command_receipts.result_kind 出现表外值：{kind_text}"),
+            )),
+        )
+    })?;
+    Ok(Receipt {
+        company_id: row.get(0)?,
+        idempotency_key: row.get(1)?,
+        command: row.get(2)?,
+        payload_fingerprint: row.get(3)?,
+        result_kind,
+        result_id: row.get(5)?,
+        result_detail: row.get(6)?,
+        recorded_at_ms: row.get(7)?,
+    })
+}
+
+/// 按 (公司, 幂等键) 读回执。裸 `Connection` 版本，供 `SqliteStore` 与 `UnitOfWork` 共用——
+/// 两处各写一份 SQL 是列顺序漂移的老路。
+fn find_receipt(
+    conn: &rusqlite::Connection,
+    company_id: &str,
+    idempotency_key: &str,
+) -> rusqlite::Result<Option<Receipt>> {
+    conn.query_row(
+        &format!("{RECEIPT_SELECT} WHERE company_id = ?1 AND idempotency_key = ?2"),
+        params![company_id, idempotency_key.trim()],
+        map_receipt_row,
+    )
+    .optional()
+}
+
+/// 来源 → 跟踪项。返回 `None` 表示这个身份还没挂任何交付。
+fn lookup_tracking_for_source(
+    conn: &rusqlite::Connection,
+    company_id: &str,
+    source_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT tracking_id FROM delivery_tracking_sources
+         WHERE company_id = ?1 AND source_id = ?2",
+        params![company_id, source_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 /// 唯一约束冲突：并发下「先查后插」输的那一方，靠它改成返回已有行。
 fn is_unique_violation(err: &rusqlite::Error) -> bool {
     matches!(
@@ -525,6 +596,9 @@ pub enum StoreError {
     /// 来源身份/候选/修订的校验错误：五元组不成立、候选已裁决、跨项目引用。
     /// 与 `Delivery` 分开：它的错误信息要指向「身份」而不是「覆盖结论」。
     Source(crate::delivery_source::SourceError),
+    /// 幂等键冲突或回执不可读（3.3）。单独一档：它的处置方式是「换键」或「查回执」，
+    /// 不是重试——重试同一个键只会得到同一个答案。
+    Idempotency(IdempotencyError),
 }
 
 impl fmt::Display for StoreError {
@@ -542,6 +616,7 @@ impl fmt::Display for StoreError {
             Self::Audit(rejection) => write!(f, "审计事件被拒绝: {}", rejection.explain()),
             Self::Delivery(err) => write!(f, "交付跟踪失败: {}", err.explain()),
             Self::Source(err) => write!(f, "来源身份失败: {}", err.explain()),
+            Self::Idempotency(err) => write!(f, "幂等键冲突: {}", err.explain()),
         }
     }
 }
@@ -569,6 +644,12 @@ impl From<crate::delivery_tracking::DeliveryError> for StoreError {
 impl From<crate::delivery_source::SourceError> for StoreError {
     fn from(value: crate::delivery_source::SourceError) -> Self {
         Self::Source(value)
+    }
+}
+
+impl From<IdempotencyError> for StoreError {
+    fn from(value: IdempotencyError) -> Self {
+        Self::Idempotency(value)
     }
 }
 
@@ -822,6 +903,28 @@ impl SqliteStore {
     }
 
     // --- 来源身份与候选（P8 3.2，只读）--------------------------------------
+
+    /// 读一条命令回执（P8 3.3）。查不到返回 `None`，调用方据此判定「首次执行」。
+    ///
+    /// 只读：回执不可改写（库层触发器也拦），因为重放必须返回**当时**的结果。
+    pub fn find_command_receipt(
+        &self,
+        company_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<Receipt>, StoreError> {
+        find_receipt(&self.conn, company_id, idempotency_key).map_err(StoreError::Sql)
+    }
+
+    /// 读一条来源关系（P8 3.3）：这个身份承载哪一条跟踪项。
+    ///
+    /// 查不到返回 `None`：来源可能刚登记、还没被任何交付引用。
+    pub fn find_tracking_for_source(
+        &self,
+        company_id: &str,
+        source_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        lookup_tracking_for_source(&self.conn, company_id, source_id).map_err(StoreError::Sql)
+    }
 
     /// 读一个来源身份。查不到返回 `None`——「不知道」与「没有」要分开。
     pub fn get_source(
@@ -3719,6 +3822,274 @@ impl<'a> UnitOfWork<'a> {
             },
             Err(err) => Err(err.into()),
         }
+    }
+
+    // --- 去重语义（P8 3.3）--------------------------------------------------
+
+    /// 把来源身份挂到一条跟踪项上（§11「来源关系」）。
+    ///
+    /// 三条语义，逐条都有测试：
+    /// - 已经挂着**同一条** → `created=false`，不重复写。重复导入走的就是这条。
+    /// - 已经挂着**另一条** → `SourceAlreadyLinked`。不偷偷改挂：改挂是悄悄挪走一条
+    ///   已经承诺出去的交付，而且会让「重复导入返回已有关系」失去唯一对象可返回。
+    /// - 跨项目 → `SourceProjectMismatch`。复合外键只保证两边存在，读不出「项目不同」。
+    pub fn link_delivery_tracking_source(
+        &self,
+        company_id: &str,
+        source_id: &str,
+        tracking_id: &str,
+        linked_by: &str,
+        now_ms: i64,
+    ) -> Result<LinkedSource, StoreError> {
+        if linked_by.trim().is_empty() {
+            return Err(SourceError::MissingLinker.into());
+        }
+        let source_project: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT project_id FROM delivery_sources WHERE company_id = ?1 AND source_id = ?2",
+                params![company_id, source_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(source_project) = source_project else {
+            return Err(SourceError::SourceNotFound(source_id.to_string()).into());
+        };
+        let tracking_project: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT project_id FROM delivery_tracking WHERE company_id = ?1 AND tracking_id = ?2",
+                params![company_id, tracking_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(tracking_project) = tracking_project else {
+            return Err(DeliveryError::TrackingNotFound(tracking_id.to_string()).into());
+        };
+        if source_project != tracking_project {
+            return Err(SourceError::SourceProjectMismatch {
+                source_project,
+                tracking_project,
+            }
+            .into());
+        }
+        if let Some(existing) = lookup_tracking_for_source(self.conn, company_id, source_id)? {
+            if existing == tracking_id {
+                return Ok(LinkedSource {
+                    tracking_id: existing,
+                    created: false,
+                });
+            }
+            return Err(SourceError::SourceAlreadyLinked {
+                source_id: source_id.to_string(),
+                tracking_id: tracking_id.to_string(),
+                linked_tracking_id: existing,
+            }
+            .into());
+        }
+        let result = self.conn.execute(
+            "INSERT INTO delivery_tracking_sources (
+                company_id, source_id, tracking_id, linked_by, linked_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![company_id, source_id, tracking_id, linked_by, now_ms],
+        );
+        match result {
+            Ok(_) => Ok(LinkedSource {
+                tracking_id: tracking_id.to_string(),
+                created: true,
+            }),
+            // 并发下另一个写入者刚挂上：后到者拿已有关系，不报一个读不懂的唯一约束错误。
+            Err(err) if is_unique_violation(&err) => {
+                match lookup_tracking_for_source(self.conn, company_id, source_id)? {
+                    Some(existing) if existing == tracking_id => Ok(LinkedSource {
+                        tracking_id: existing,
+                        created: false,
+                    }),
+                    Some(existing) => Err(SourceError::SourceAlreadyLinked {
+                        source_id: source_id.to_string(),
+                        tracking_id: tracking_id.to_string(),
+                        linked_tracking_id: existing,
+                    }
+                    .into()),
+                    None => Err(err.into()),
+                }
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// 导入一次外部来源：**两种去重在这里分工**（§11 / design D2）。
+    ///
+    /// 1. 先读回执（幂等键，管命令重放）：有回执 → 同命令同载荷就原样返回首次结果，
+    ///    换命令或换载荷就报冲突。整段**不进入写入路径**。
+    /// 2. 没有回执 → 解析来源。成为身份时登记五元组并挂来源关系；已有关系就复用它。
+    ///    只有定位时进候选，**不建跟踪项**——候选没有稳定身份，支撑不了覆盖结论。
+    /// 3. 最后写回执。整段包在 `SAVEPOINT` 里：任何一步失败都不留下「这个键已执行」。
+    ///
+    /// 为什么回执与业务写入必须同事务：先写回执再干活，失败后重试会撞上自己伪造的
+    /// 冲突；先干活再写回执而不回滚，重试会重放出一个从未发生的成功。两种都错。
+    pub fn import_delivery_source(
+        &self,
+        command: &ImportSourceCommand,
+        now_ms: i64,
+    ) -> Result<ImportOutcome, StoreError> {
+        if command.company_id.trim().is_empty() {
+            return Err(IdempotencyError::EmptyCompanyId.into());
+        }
+        let key = crate::delivery_idempotency::validate_key(&command.idempotency_key)?;
+        let fingerprint =
+            crate::delivery_idempotency::payload_fingerprint(&command.payload_fields())?;
+
+        // 重放判定在读回执这一步就结束：命中的命令不再碰任何业务表。
+        let existing = find_receipt(self.conn, &command.company_id, key)?;
+        if let Replay::Replayed(receipt) = classify(existing, COMMAND_IMPORT_SOURCE, &fingerprint)?
+        {
+            return ImportOutcome::replayed_from(&receipt.result_detail).map_err(|detail| {
+                IdempotencyError::UnreadableReceipt {
+                    key: key.to_string(),
+                    detail,
+                }
+                .into()
+            });
+        }
+
+        self.conn
+            .execute_batch("SAVEPOINT import_delivery_source")?;
+        let outcome = (|| -> Result<ImportOutcome, StoreError> {
+            let imported = match crate::delivery_source::resolve(
+                &command.company_id,
+                &command.project_id,
+                &command.connection_id,
+                command.object_type.as_deref(),
+                command.provider_object_id.as_deref(),
+                &command.locator,
+            )? {
+                SourceResolution::Identity(identity) => {
+                    self.import_identity(command, &identity, now_ms)?
+                }
+                SourceResolution::Candidate(proposal) => {
+                    let proposed = self.propose_source_candidate(
+                        &command.new_candidate_id,
+                        &proposal,
+                        &command.imported_by,
+                        now_ms,
+                    )?;
+                    ImportOutcome::candidate(proposed.candidate_id, proposed.created)
+                }
+            };
+            let detail = serde_json::to_string(&imported).map_err(|err| {
+                IdempotencyError::ResultNotRecordable(format!("结果体无法编码为 JSON：{err}"))
+            })?;
+            let result_kind = if imported.candidate_id.is_some() {
+                ResultKind::Candidate
+            } else {
+                ResultKind::Tracking
+            };
+            let result_id = imported
+                .candidate_id
+                .as_deref()
+                .or(imported.tracking_id.as_deref())
+                .unwrap_or_default();
+            self.conn.execute(
+                "INSERT INTO delivery_command_receipts (
+                    company_id, idempotency_key, command, payload_fingerprint,
+                    result_kind, result_id, result_detail, recorded_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    command.company_id,
+                    key,
+                    COMMAND_IMPORT_SOURCE,
+                    fingerprint,
+                    result_kind.as_str(),
+                    result_id,
+                    detail,
+                    now_ms,
+                ],
+            )?;
+            Ok(imported)
+        })();
+        match outcome {
+            Ok(value) => {
+                self.conn.execute_batch("RELEASE import_delivery_source")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO import_delivery_source; RELEASE import_delivery_source",
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// 导入的身份分支：登记身份 → 找到或建跟踪项 → 挂关系。
+    ///
+    /// 三种情形，返回值只差 `created_*`：
+    /// - 身份已承载跟踪项 → 复用它（**重复导入返回已有关系**，不建第二个跟踪项）；
+    /// - 身份没有关系，但 `new_tracking_id` 已存在 → 挂到它上面（导入到指定跟踪项）；
+    /// - 都不存在 → 建跟踪项再挂。
+    fn import_identity(
+        &self,
+        command: &ImportSourceCommand,
+        identity: &SourceIdentity,
+        now_ms: i64,
+    ) -> Result<ImportOutcome, StoreError> {
+        let registered = self.register_source(
+            &command.new_source_id,
+            identity,
+            &command.locator,
+            &command.imported_by,
+            now_ms,
+        )?;
+        let (tracking_id, created_tracking) = match lookup_tracking_for_source(
+            self.conn,
+            &command.company_id,
+            &registered.source_id,
+        )? {
+            Some(existing) => (existing, false),
+            None => {
+                let exists: i64 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM delivery_tracking
+                         WHERE company_id = ?1 AND tracking_id = ?2",
+                    params![command.company_id, command.new_tracking_id],
+                    |row| row.get(0),
+                )?;
+                if exists > 0 {
+                    (command.new_tracking_id.clone(), false)
+                } else {
+                    self.insert_delivery_tracking(&TrackingRow {
+                        tracking_id: command.new_tracking_id.clone(),
+                        company_id: command.company_id.clone(),
+                        project_id: command.project_id.clone(),
+                        title: command.title.clone(),
+                        requirement: command.requirement.clone(),
+                        owner_id: command.owner_id.clone(),
+                        state: crate::delivery_tracking::TrackingState::Open,
+                        // 外部导入不伪造内部运行（D3）。
+                        issue_uid: None,
+                        run_uid: None,
+                        attempt_id: None,
+                        resource_version: 1,
+                        created_at_ms: now_ms,
+                        updated_at_ms: now_ms,
+                    })?;
+                    (command.new_tracking_id.clone(), true)
+                }
+            }
+        };
+        let linked = self.link_delivery_tracking_source(
+            &command.company_id,
+            &registered.source_id,
+            &tracking_id,
+            &command.imported_by,
+            now_ms,
+        )?;
+        Ok(ImportOutcome::tracked(
+            linked.tracking_id,
+            registered.source_id,
+            created_tracking,
+            registered.created,
+        ))
     }
 
     pub fn get_appointment(
@@ -6858,9 +7229,10 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 57,
+            count, 59,
             "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表 \
-             + 1 张审计表 + 3 张交付跟踪表（016）+ 4 张来源表（017：身份/候选/修订/观察关联）"
+             + 1 张审计表 + 3 张交付跟踪表（016）+ 4 张来源表（017：身份/候选/修订/观察关联）\
+             + 2 张去重表（018：命令回执/来源关系）"
         );
     }
 
@@ -7079,5 +7451,294 @@ mod tests {
             .unwrap();
         assert_eq!(owner, "coder-1");
         assert_eq!(revision, 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // 去重语义（P8 3.3）：幂等键管命令重放，来源身份管对象重复
+    // -----------------------------------------------------------------------
+
+    fn count_rows(store: &SqliteStore, table: &str) -> i64 {
+        store
+            .read_connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("应能计数")
+    }
+
+    fn import_command(key: &str, tracking_id: &str, source_id: &str) -> ImportSourceCommand {
+        ImportSourceCommand {
+            idempotency_key: key.to_string(),
+            company_id: "company-default".to_string(),
+            project_id: "project-1".to_string(),
+            connection_id: "gh-1".to_string(),
+            object_type: Some("pull-request".to_string()),
+            provider_object_id: Some("PR_kw318".to_string()),
+            locator: "acme/web#318".to_string(),
+            title: "客户 A 登录失败".to_string(),
+            requirement: "登录偶发 500".to_string(),
+            owner_id: "alice".to_string(),
+            new_tracking_id: tracking_id.to_string(),
+            new_source_id: source_id.to_string(),
+            new_candidate_id: format!("{source_id}-cand"),
+            imported_by: "alice".to_string(),
+        }
+    }
+
+    /// §11 的并发导入用例：两人各用一个键导入同一个 PR，
+    /// 只产生**一个跟踪项与一条来源关系**；后到者拿到已有关系。
+    ///
+    /// 两个键各自留一条回执——它们确实是两条命令，去重发生在来源身份上，不在键上。
+    #[test]
+    fn two_keys_importing_one_source_yield_one_tracking_item() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let first = with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&import_command("k-alice", "dt-1", "src-1"), 1_000)
+        })
+        .expect("首次导入应成功");
+        assert!(first.created_tracking && first.created_source && !first.replayed);
+
+        let second = with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&import_command("k-bob", "dt-2", "src-2"), 1_100)
+        })
+        .expect("重复导入应成功而不是报错");
+
+        assert_eq!(
+            second.tracking_id.as_deref(),
+            Some("dt-1"),
+            "后到者必须拿到已有跟踪项，不能建第二个"
+        );
+        assert_eq!(
+            second.source_id.as_deref(),
+            Some("src-1"),
+            "五元组命中同一来源身份"
+        );
+        assert!(!second.created_tracking && !second.created_source);
+        assert!(!second.replayed, "换键不是重放：这是另一条命令");
+
+        assert_eq!(count_rows(&store, "delivery_tracking"), 1);
+        assert_eq!(count_rows(&store, "delivery_tracking_sources"), 1);
+        assert_eq!(count_rows(&store, "delivery_sources"), 1);
+        assert_eq!(count_rows(&store, "delivery_command_receipts"), 2);
+    }
+
+    /// 同键同载荷：重放首次结果，**不写第二遍**。
+    #[test]
+    fn same_key_and_payload_replays_without_writing() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let command = import_command("k-1", "dt-1", "src-1");
+        let first = with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&command, 1_000)
+        })
+        .expect("首次导入应成功");
+        let snapshot: Vec<i64> = [
+            "delivery_tracking",
+            "delivery_sources",
+            "delivery_tracking_sources",
+            "delivery_command_receipts",
+        ]
+        .iter()
+        .map(|table| count_rows(&store, table))
+        .collect();
+
+        let again = with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&command, 1_500)
+        })
+        .expect("重放应成功");
+        assert!(again.replayed, "同键同载荷必须是重放");
+        assert_eq!(again.tracking_id, first.tracking_id);
+        // created_* 描述首次执行的事实，不因重放而改写。
+        assert!(again.created_tracking && again.created_source);
+
+        let after: Vec<i64> = [
+            "delivery_tracking",
+            "delivery_sources",
+            "delivery_tracking_sources",
+            "delivery_command_receipts",
+        ]
+        .iter()
+        .map(|table| count_rows(&store, table))
+        .collect();
+        assert_eq!(snapshot, after, "重放不得写入任何一行");
+    }
+
+    /// 同键异载荷：冲突，且**什么都不写**（不是「覆盖上一次」）。
+    #[test]
+    fn same_key_with_other_payload_conflicts_and_writes_nothing() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let first = import_command("k-1", "dt-1", "src-1");
+        with_uow(&mut store, |uow| uow.import_delivery_source(&first, 1_000))
+            .expect("首次导入应成功");
+
+        let mut retitled = first.clone();
+        retitled.title = "改过的标题".to_string();
+        let err = with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&retitled, 1_100)
+        })
+        .expect_err("同键异载荷必须冲突");
+        assert!(
+            matches!(
+                err,
+                StoreError::Idempotency(IdempotencyError::KeyReusedWithOtherPayload { .. })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(count_rows(&store, "delivery_tracking"), 1);
+        assert_eq!(count_rows(&store, "delivery_command_receipts"), 1);
+    }
+
+    /// 失败的导入不污染键：修正载荷后用**同一个键**重试应当是首次执行。
+    ///
+    /// 这是「回执与业务写入同事务」的直接后果。若先写回执再干活，
+    /// 这里的重试会撞上自己伪造的冲突，然后人就再也不敢用那个键了。
+    #[test]
+    fn failed_import_does_not_poison_the_key() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let mut broken = import_command("k-1", "dt-1", "src-1");
+        broken.object_type = None; // 有稳定 ID 却没类型：调用方漏字段
+        let err = with_uow(&mut store, |uow| uow.import_delivery_source(&broken, 1_000))
+            .expect_err("缺对象类型必须报错");
+        assert!(
+            matches!(err, StoreError::Source(SourceError::MissingObjectType)),
+            "{err:?}"
+        );
+        assert_eq!(
+            count_rows(&store, "delivery_command_receipts"),
+            0,
+            "失败的导入不得留下回执"
+        );
+        assert_eq!(count_rows(&store, "delivery_sources"), 0);
+
+        let fixed = import_command("k-1", "dt-1", "src-1");
+        let outcome = with_uow(&mut store, |uow| uow.import_delivery_source(&fixed, 1_100))
+            .expect("修正后同键重试应成功");
+        assert!(!outcome.replayed, "此前没有成功执行过，这不是重放");
+        assert!(outcome.created_tracking && outcome.created_source);
+    }
+
+    /// 只有定位：进候选，**不建跟踪项**。候选没有稳定身份，撑不起覆盖结论。
+    #[test]
+    fn locator_only_import_creates_a_candidate_not_a_tracking_item() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let mut command = import_command("k-1", "dt-1", "src-1");
+        command.provider_object_id = None;
+        command.locator = "https://github.com/acme/web/pull/318".to_string();
+
+        let outcome = with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&command, 1_000)
+        })
+        .expect("只有定位应进候选而不是报错");
+        assert_eq!(outcome.candidate_id.as_deref(), Some("src-1-cand"));
+        assert!(outcome.created_candidate);
+        assert!(!outcome.created_tracking);
+        assert!(outcome.tracking_id.is_none());
+        assert_eq!(count_rows(&store, "delivery_tracking"), 0);
+        assert_eq!(count_rows(&store, "delivery_source_candidates"), 1);
+
+        let receipt = store
+            .find_command_receipt("company-default", "k-1")
+            .expect("应能读回执")
+            .expect("回执应存在");
+        assert_eq!(receipt.result_kind, ResultKind::Candidate);
+        assert_eq!(receipt.result_id, "src-1-cand");
+    }
+
+    /// 导入到已存在的跟踪项：不建新项，只挂关系。
+    #[test]
+    fn import_can_attach_to_an_existing_tracking_item() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-1"))
+        })
+        .expect("跟踪项应可写入");
+
+        let outcome = with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&import_command("k-1", "dt-1", "src-1"), 1_000)
+        })
+        .expect("导入到已有跟踪项应成功");
+        assert_eq!(outcome.tracking_id.as_deref(), Some("dt-1"));
+        assert!(!outcome.created_tracking, "跟踪项本来就在，不算本次新建");
+        assert!(outcome.created_source);
+        assert_eq!(count_rows(&store, "delivery_tracking"), 1);
+        assert_eq!(count_rows(&store, "delivery_tracking_sources"), 1);
+    }
+
+    /// 一个来源身份只承载一条跟踪关系：换一条跟踪项挂要明确拒绝，重复挂同一条则幂等。
+    #[test]
+    fn a_source_cannot_be_linked_to_a_second_tracking_item() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-1"))?;
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-2"))?;
+            uow.import_delivery_source(&import_command("k-1", "dt-1", "src-1"), 1_000)
+                .map(|_| ())
+        })
+        .expect("首次导入应成功");
+
+        let err = with_uow(&mut store, |uow| {
+            uow.link_delivery_tracking_source("company-default", "src-1", "dt-2", "bob", 1_100)
+        })
+        .expect_err("改挂必须被拒绝");
+        assert!(
+            matches!(
+                err,
+                StoreError::Source(SourceError::SourceAlreadyLinked { .. })
+            ),
+            "{err:?}"
+        );
+
+        // 重复挂同一条：幂等，不新增行也不报错。
+        let again = with_uow(&mut store, |uow| {
+            uow.link_delivery_tracking_source("company-default", "src-1", "dt-1", "bob", 1_200)
+        })
+        .expect("重复挂同一条应幂等");
+        assert!(!again.created);
+        assert_eq!(count_rows(&store, "delivery_tracking_sources"), 1);
+    }
+
+    /// 跨项目的来源不得挂到本项目的交付上（复合外键读不出「项目不同」）。
+    #[test]
+    fn cross_project_link_is_refused() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let mut other_project = delivery_tracking("company-default", "dt-2");
+        other_project.project_id = "project-2".to_string();
+        with_uow(&mut store, |uow| {
+            uow.insert_delivery_tracking(&other_project)?;
+            uow.import_delivery_source(&import_command("k-1", "dt-1", "src-1"), 1_000)
+                .map(|_| ())
+        })
+        .expect("首次导入应成功");
+
+        let err = with_uow(&mut store, |uow| {
+            uow.link_delivery_tracking_source("company-default", "src-1", "dt-2", "bob", 1_100)
+        })
+        .expect_err("跨项目挂载必须被拒绝");
+        assert!(
+            matches!(
+                err,
+                StoreError::Source(SourceError::SourceProjectMismatch { .. })
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// 回执不可改写：重放必须返回**当时**的结果，改写等于伪造历史。
+    #[test]
+    fn command_receipts_are_append_only() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&import_command("k-1", "dt-1", "src-1"), 1_000)
+                .map(|_| ())
+        })
+        .expect("首次导入应成功");
+
+        let update = store.execute_batch_for_test(
+            "UPDATE delivery_command_receipts SET result_id = 'dt-9' WHERE idempotency_key = 'k-1'",
+        );
+        assert!(update.is_err(), "改写回执必须被拒绝");
+        let delete = store.execute_batch_for_test(
+            "DELETE FROM delivery_command_receipts WHERE idempotency_key = 'k-1'",
+        );
+        assert!(delete.is_err(), "删除回执必须被拒绝");
     }
 }
