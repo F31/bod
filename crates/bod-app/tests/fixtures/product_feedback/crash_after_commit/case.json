@@ -1,0 +1,16 @@
+{
+  "case": "crash_after_commit",
+  "source_suite": "product_feedback",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "manager_agent_id": "manager-a",
+  "grant_ref": "grant:manager-r2",
+  "appointed_by": "user-owner",
+  "audience": "host:local",
+  "appointed_at": "2026-11-20T12:00:00Z",
+  "not_after": "2026-11-20T12:20:00Z",
+  "submit_at": "2026-11-20T12:05:00Z",
+  "now_ms": 1764100000000,
+  "command_id": "cmd-recover-1",
+  "expected": "authorization_survives_restart_and_repeat_confirm_creates_one_recovery_intent"
+}

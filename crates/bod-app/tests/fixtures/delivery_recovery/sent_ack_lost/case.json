@@ -1,0 +1,14 @@
+{
+  "case": "sent_ack_lost",
+  "source_suite": "delivery_recovery",
+  "deployment_id": "dep-lost-1",
+  "plan_id": "plan-lost-1",
+  "invocation_id": "inv-lost-1",
+  "business_key": "send-external-message",
+  "receipt_id": "rcp-lost-1",
+  "channel_id": "im-main",
+  "now": "2026-11-21T10:00:00Z",
+  "later": "2026-11-21T10:05:00Z",
+  "query_evidence": "channel-api:message=ext-1 confirmed",
+  "expected": "ack_lost_is_unknown_queryable_and_never_resent_blindly"
+}

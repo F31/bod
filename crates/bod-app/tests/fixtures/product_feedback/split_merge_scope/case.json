@@ -1,0 +1,15 @@
+{
+  "case": "split_merge_scope",
+  "source_suite": "product_feedback",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "feedback_keys": ["fb-cust-a", "fb-cust-b"],
+  "profile_id": "merged-feedback",
+  "customers": ["cust-a", "cust-b"],
+  "receipt_ids": ["rcp-a", "rcp-b"],
+  "env_a": "env-customer-a",
+  "thread_id": "thread-1",
+  "channel_id": "im-1",
+  "revision": 2,
+  "expected": "after_split_each_receipt_reads_and_writes_only_its_own_public_record"
+}

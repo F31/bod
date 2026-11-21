@@ -1,0 +1,12 @@
+{
+  "case": "reclaim_restore",
+  "source_suite": "delivery_recovery",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "attempt_id": "attempt-unknown-1",
+  "dirty_paths": ["src/ exclusive.rs"],
+  "scope_allow": ["src/"],
+  "scope_coordinated": ["openspec/"],
+  "unknown_detail": "工作树归属未知，不能回收",
+  "expected": "active_or_unknown_worktree_is_not_reclaimed_and_unique_changes_restore_file_by_file"
+}

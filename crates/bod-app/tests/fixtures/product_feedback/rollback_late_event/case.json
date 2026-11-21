@@ -1,0 +1,22 @@
+{
+  "case": "rollback_late_event",
+  "source_suite": "product_feedback",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "env_a_id": "env-customer-a",
+  "env_b_id": "env-customer-b",
+  "deployment_id": "dep-1",
+  "plan_id": "plan-1",
+  "invocation_id": "inv-1",
+  "business_key": "deploy-defect-1",
+  "old_digest": "sha256:before-fix",
+  "new_digest": "sha256:after-fix",
+  "old_revision": "build-8",
+  "new_revision": "build-9",
+  "receipt_a": "rcp-a",
+  "recipient_a": "cust-a",
+  "channel_id": "im-1",
+  "now": "2026-11-21T10:00:00Z",
+  "later": "2026-11-21T12:00:00Z",
+  "expected": "late_deploy_event_does_not_restore_wrong_state_and_does_not_notify_b"
+}

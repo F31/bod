@@ -46,6 +46,9 @@ use std::path::Path;
 /// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据，
 /// 014 为 decisions 不可变 trigger（P2 3.4 加固）；
 /// 新增迁移只能追加，不可原地改写（§33.7）。
+/// P7 基准统一页缓存：负数按 KiB 解释，64 MiB；避免依赖 SQLite 默认 2 MiB。
+const BENCH_CACHE_SIZE_KIB: i64 = 65_536;
+
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_queue.sql"),
@@ -262,6 +265,17 @@ impl SqliteStore {
 
     pub fn in_memory(config: &BodConfig) -> Result<Self, StoreError> {
         Self::open(Path::new(":memory:"), config)
+    }
+
+    /// P7 基准口径专用：固定页缓存与临时表位置，避免不同机器的 SQLite 默认值混入两阶段对比。
+    ///
+    /// 不写入正常启动路径：产品默认值仍由 §37.14 的配置决定，测量报告必须显式声明这里设的值。
+    #[doc(hidden)]
+    pub fn apply_bench_pragmas(&self) -> Result<(), StoreError> {
+        self.conn
+            .pragma_update(None, "cache_size", BENCH_CACHE_SIZE_KIB as i64)?;
+        self.conn.pragma_update(None, "temp_store", "MEMORY")?;
+        Ok(())
     }
 
     pub fn transaction(&mut self) -> Result<UnitOfWork<'_>, StoreError> {

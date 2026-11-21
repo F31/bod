@@ -1,0 +1,19 @@
+{
+  "case": "revoke_separately",
+  "source_suite": "work_authority",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "manager_a": "manager-a",
+  "manager_b": "manager-b",
+  "audience": "host:local",
+  "grant_ref": "grant:manager-r2",
+  "appointed_by": "user-owner",
+  "appointed_at": "2026-11-20T12:00:00Z",
+  "revoke_at": "2026-11-20T12:06:00Z",
+  "not_after": "2026-11-20T12:20:00Z",
+  "submit_at": "2026-11-20T12:07:00Z",
+  "now_ms": 1764100000000,
+  "independent_executor": "independent-agent",
+  "invocation_id": "inv-unknown-1",
+  "expected": "old_epoch_command_rejected_independent_work_continues_unknown_external_result_reconciled"
+}

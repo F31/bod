@@ -1,0 +1,14 @@
+{
+  "case": "dirty_stop_restart",
+  "source_suite": "delivery_recovery",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "attempt_id": "attempt-dirty-1",
+  "dirty_paths": ["src/uncommitted.rs", "migrations/002_new.sql"],
+  "stop_states": ["running", "unknown"],
+  "running_issues": 1,
+  "unattributed": 1,
+  "blank_confirmation": "   ",
+  "detail": "宿主已终止，现场未确认",
+  "expected": "dirty_scene_retained_and_resolved_once_without_auto_resume_or_silent_destruction"
+}

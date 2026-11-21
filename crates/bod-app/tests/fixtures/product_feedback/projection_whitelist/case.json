@@ -1,0 +1,18 @@
+{
+  "case": "projection_whitelist",
+  "source_suite": "product_feedback",
+  "company_id": "company-1",
+  "other_company_id": "company-2",
+  "project_id": "project-1",
+  "viewer": "external-a",
+  "customers": ["cust-a", "cust-b"],
+  "receipt_ids": ["rcp-a", "rcp-b", "rcp-internal"],
+  "entry_url": "https://bod.local/r/rcp-1",
+  "summary": "修复已提供，客户环境待核实",
+  "code": "fn secret_export() {}",
+  "log": "stack trace with token",
+  "attachment": "screenshot.png",
+  "request_id": "req-whitelist-1",
+  "export_base": "feedback",
+  "expected": "api_notification_page_and_download_each_redact_withheld_content"
+}

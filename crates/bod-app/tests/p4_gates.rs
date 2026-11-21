@@ -118,15 +118,26 @@ fn each_case_carries_real_assertions() {
 
 #[test]
 fn p4_gates_are_not_bound_as_implemented_yet() {
-    // P4 出口未达：G-24/G-32/G-33 不得出现在 gates.yaml。G-9 是 P0 的旧绑定，
-    // 只允许它继续指向 artifact_acceptance 的既有用例。
+    // A1 起 P2—P7 的 I/G 引用全部登记到 gates.yaml，未达出口的门禁以 planned
+    // 显式占位，但绝不能提前标成 implemented。G-9 是 P0 的旧绑定，只允许它
+    // 继续指向 artifact_acceptance 的既有用例。
+    let entry = |gate: &str| {
+        let marker = format!("- id: {gate}");
+        let Some(start) = GATES.find(&marker) else {
+            return None;
+        };
+        let rest = &GATES[start + marker.len()..];
+        Some(&rest[..rest.find("\n- id: ").unwrap_or(rest.len())])
+    };
     for gate in ["G-24", "G-32", "G-33", "G-35"] {
-        assert!(
-            !GATES.contains(&format!("- id: {gate}")),
-            "{gate} 不应在出口前写入 gates.yaml"
-        );
+        if let Some(block) = entry(gate) {
+            assert!(
+                block.contains("status: planned"),
+                "{gate} 在出口前应保持 planned：{block}"
+            );
+        }
     }
-    let g9 = GATES.split("- id: G-9").nth(1).expect("G-9 是 P0 既有绑定");
+    let g9 = entry("G-9").expect("G-9 是 P0 既有绑定");
     assert!(
         g9.contains("bod-app::artifact_acceptance"),
         "G-9 仍应指向 P0 的 artifact_acceptance"

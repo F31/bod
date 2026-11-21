@@ -125,6 +125,32 @@ fn task_4_1_tolerance_boundary_is_inclusive() {
     assert_eq!(over_edge.unresolved(), vec!["idle_tick_cost"]);
 }
 
+/// 4.1：方法或样本数变化后，数字相同也不能跨阶段比较。
+#[test]
+fn task_4_1_method_or_sample_mismatch_blocks_promotion() {
+    let first = MeasureItem::new("metric", FormFactor::Headless, "≤ 10 ms")
+        .with_method("旧口径：50 次 p99，未 checkpoint")
+        .measured("10.000", 50, "xtask bench", Some(true))
+        .with_numeric(10.0);
+    let second = MeasureItem::new("metric", FormFactor::Headless, "≤ 10 ms")
+        .with_method("新口径：200 次 p99，先 WAL checkpoint")
+        .measured("10.000", 200, "xtask bench", Some(true))
+        .with_numeric(10.0);
+    let comparison = two_phases(vec![first], vec![second]);
+    assert!(
+        comparison.promotable().is_empty(),
+        "口径不同不得转 Measured：{comparison:?}"
+    );
+    assert!(comparison.unresolved().contains(&"metric"));
+    let PhaseComparison::Comparable {
+        method_mismatch, ..
+    } = comparison
+    else {
+        panic!("环境一致时应为 Comparable");
+    };
+    assert!(method_mismatch.contains(&"metric"));
+}
+
 /// 4.1：环境或数据规模不同的两轮不可比，任何项都不得转 Measured。
 #[test]
 fn task_4_1_incomparable_phases_promote_nothing() {

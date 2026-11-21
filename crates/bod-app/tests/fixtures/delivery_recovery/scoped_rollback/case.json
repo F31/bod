@@ -1,0 +1,19 @@
+{
+  "case": "scoped_rollback",
+  "source_suite": "delivery_recovery",
+  "deployment_id": "dep-scoped-1",
+  "plan_id": "plan-scoped-1",
+  "invocation_id": "inv-scoped-1",
+  "business_key": "rollback-defect-1",
+  "env_a_id": "env-customer-a",
+  "env_b_id": "env-customer-b",
+  "old_digest": "sha256:before-fix",
+  "new_digest": "sha256:after-fix",
+  "receipt_a": "rcp-a",
+  "recipient_a": "cust-a",
+  "recipient_b": "cust-b",
+  "channel_id": "im-1",
+  "now": "2026-11-21T10:00:00Z",
+  "later": "2026-11-21T11:00:00Z",
+  "expected": "only_a_gets_correction_b_stays_unknown_and_last_confirmed_revision_matches_public_receipt"
+}

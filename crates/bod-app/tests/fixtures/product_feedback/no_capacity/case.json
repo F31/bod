@@ -1,0 +1,17 @@
+{
+  "case": "no_capacity",
+  "source_suite": "product_feedback",
+  "plan_id": "plan-cap-1",
+  "stage_id": "stage-1",
+  "revision_id": "rev-2",
+  "artifact_digest": "sha256:capacity-pkg",
+  "environment_id": "env-staging",
+  "approval_id": "apr-cap-1",
+  "approved_by": "lead-1",
+  "valid_until": "2026-11-22T00:00:00Z",
+  "now": "2026-11-21T10:00:00Z",
+  "limit_minor": 1000,
+  "settled_minor": 1000,
+  "settled_after_topup_minor": 500,
+  "expected": "work_retained_with_explainable_budget_block_then_resumes_after_topup"
+}

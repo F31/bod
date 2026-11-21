@@ -1,0 +1,11 @@
+{
+  "case": "advisor_proposal_only",
+  "source_suite": "work_authority",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "advisor": "advisor-1",
+  "profile_id": "advisor-proposals",
+  "feedback_text": "建议把导出按钮改为蓝色",
+  "base_revision": 0,
+  "expected": "advisor_can_submit_proposal_but_dispatch_rejected_without_side_effects"
+}

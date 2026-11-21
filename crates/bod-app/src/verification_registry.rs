@@ -26,14 +26,13 @@ pub fn shipped_registry() -> &'static str {
 /// （实测 9 份现行规格里 `I-`/`G-` 命中数均为 0，唯一命中在 proposal），
 /// 把 spec 正文当来源会得到"零引用"的假覆盖。
 ///
-/// 路径指向归档目录：P0 于 2026-11-19 归档，P1 于 2026-11-20 归档
-/// （`openspec archive`），Change 正文移到 `openspec/changes/archive/<date>-<change>/`。
-/// 归档是单一来源，不复制副本；再归档导致目录名变化时这里必须同步，编译期即失败。
+/// 路径分两类：P0/P1 已归档，正文在 `openspec/changes/archive/<date>-<change>/`；
+/// P2—P7 仍在 `openspec/changes/<change>/`。归档或目录改名会使这里编译期失败，
+/// 因此不会出现“规格换了而覆盖检查仍读旧副本”。
 ///
-/// 两阶段来源都保留：P0 归档来源保持历史约定的覆盖检查，P1 归档来源使 P1 引用的
-/// I-71 与 G-15/G-16/G-51 等也进入 `coverage_gaps()`。现行 `openspec/specs/` 已有
-/// 13 个 capability（78 需求 / 87 场景），但 spec 正文不含 I/G 编号，
-/// 因此仍只取 proposal/tasks 作来源。
+/// 现行 `openspec/specs/` 已有 13 个 capability（78 需求 / 87 场景），但 spec 正文
+/// 不含 I/G 编号，因此仍只取 proposal/tasks 作来源。此前只纳入 P0/P1，导致 P2—P7
+/// 中 40 个 I/G 引用从未进入 `coverage_gaps()`；A1 起全部活动切片都纳入覆盖。
 pub const BINDING_SOURCES: &[(&str, &str)] = &[
     (
         "p0-proposal",
@@ -58,6 +57,54 @@ pub const BINDING_SOURCES: &[(&str, &str)] = &[
         include_str!(
             "../../../openspec/changes/archive/2026-11-20-p1-single-executor-delivery/tasks.md"
         ),
+    ),
+    (
+        "p2-proposal",
+        include_str!("../../../openspec/changes/p2-work-continuation/proposal.md"),
+    ),
+    (
+        "p2-tasks",
+        include_str!("../../../openspec/changes/p2-work-continuation/tasks.md"),
+    ),
+    (
+        "p3-proposal",
+        include_str!("../../../openspec/changes/p3-change-collaboration/proposal.md"),
+    ),
+    (
+        "p3-tasks",
+        include_str!("../../../openspec/changes/p3-change-collaboration/tasks.md"),
+    ),
+    (
+        "p4-proposal",
+        include_str!("../../../openspec/changes/p4-runtime-delivery/proposal.md"),
+    ),
+    (
+        "p4-tasks",
+        include_str!("../../../openspec/changes/p4-runtime-delivery/tasks.md"),
+    ),
+    (
+        "p5-proposal",
+        include_str!("../../../openspec/changes/p5-team-reuse/proposal.md"),
+    ),
+    (
+        "p5-tasks",
+        include_str!("../../../openspec/changes/p5-team-reuse/tasks.md"),
+    ),
+    (
+        "p6-proposal",
+        include_str!("../../../openspec/changes/p6-open-extension/proposal.md"),
+    ),
+    (
+        "p6-tasks",
+        include_str!("../../../openspec/changes/p6-open-extension/tasks.md"),
+    ),
+    (
+        "p7-proposal",
+        include_str!("../../../openspec/changes/p7-capacity-evaluation/proposal.md"),
+    ),
+    (
+        "p7-tasks",
+        include_str!("../../../openspec/changes/p7-capacity-evaluation/tasks.md"),
     ),
 ];
 
@@ -417,7 +464,11 @@ pub fn unreferenced_bindings(registry: &Registry) -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct G50Report {
+    /// N：规格 intent 来源中出现的不同 I/G 引用数。
+    pub referenced: usize,
+    /// M：索引实际登记的绑定数（含未被当前规格引用的前瞻条目）。
     pub total: usize,
+    /// K：其中具备真实测试目标与断言的 implemented 条数。
     pub implemented: usize,
     pub planned: usize,
     pub unverified: usize,
@@ -434,7 +485,11 @@ impl G50Report {
 
     pub fn summary(&self) -> String {
         format!(
-            "共 {} 条绑定：implemented {} / planned {} / unverified {}；缺失引用 {}；结构问题 {}",
+            "N/M/K = {}/{}/{}：规格引用 {} 项、登记绑定 {} 条、implemented {} 条（planned {} / unverified {}）；缺失引用 {}；结构问题 {}",
+            self.referenced,
+            self.total,
+            self.implemented,
+            self.referenced,
             self.total,
             self.implemented,
             self.planned,
@@ -448,7 +503,12 @@ impl G50Report {
 pub fn g50_report() -> Result<G50Report, RegistryError> {
     let registry = parse(shipped_registry())?;
     let problems = validate(&registry);
+    let mut referenced = BTreeSet::new();
+    for (_, text) in BINDING_SOURCES {
+        referenced.extend(references_in(text));
+    }
     Ok(G50Report {
+        referenced: referenced.len(),
         total: registry.bindings.len(),
         implemented: registry
             .bindings
@@ -492,6 +552,20 @@ mod tests {
             report.gaps
         );
         assert!(report.ok(), "G-50 未通过：{}", report.summary());
+    }
+
+    #[test]
+    fn coverage_counts_cover_all_active_change_sources() {
+        let report = g50_report().expect("索引必须可解析");
+        // P0—P7 的 proposal/tasks 合计 91 个不同 I/G 引用（含 invariant_i_NN 写法）；
+        // A1 前只统计 P0/P1 的 44 个，P2—P7 的引用全部漏检。
+        assert_eq!(report.referenced, 91);
+        assert!(
+            report.total >= report.referenced,
+            "登记数必须不少于规格引用数：{}",
+            report.summary()
+        );
+        assert!(report.implemented > 0, "至少应有真实 implemented 绑定");
     }
 
     #[test]

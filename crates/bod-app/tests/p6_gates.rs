@@ -127,12 +127,23 @@ fn each_case_carries_real_assertions() {
 
 #[test]
 fn p6_gates_are_not_bound_before_the_exit_is_met() {
-    // P6 出口未达（2.8 与 4.6 缺真实环境）：五个门禁一个都不许写进 gates.yaml。
+    // P6 出口未达（2.8 与 4.6 缺真实环境）：A1 起五个门禁以 planned 登记，
+    // 只恢复规格覆盖，不提前宣称 implemented。
+    let entry = |gate: &str| {
+        let marker = format!("- id: {gate}");
+        let Some(start) = GATES.find(&marker) else {
+            return None;
+        };
+        let rest = &GATES[start + marker.len()..];
+        Some(&rest[..rest.find("\n- id: ").unwrap_or(rest.len())])
+    };
     for gate in ["G-19", "G-23", "G-34", "G-46", "G-47"] {
-        assert!(
-            !GATES.contains(&format!("- id: {gate}")),
-            "{gate} 不应在出口前写入 gates.yaml"
-        );
+        if let Some(block) = entry(gate) {
+            assert!(
+                block.contains("status: planned"),
+                "{gate} 在出口前应保持 planned：{block}"
+            );
+        }
     }
 }
 

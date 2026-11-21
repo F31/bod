@@ -1,0 +1,14 @@
+{
+  "case": "scope_escalation",
+  "source_suite": "work_authority",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-scope-1",
+  "old_revision": 4,
+  "new_revision": 5,
+  "scope_owner": "scope-lead",
+  "unauthorized": "outsider",
+  "executor": "agent-1",
+  "now": "2026-11-21T10:00:00Z",
+  "expected": "only_scope_owner_approves_new_revision_once_and_independent_work_continues"
+}

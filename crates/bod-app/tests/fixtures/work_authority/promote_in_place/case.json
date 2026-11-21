@@ -1,0 +1,20 @@
+{
+  "case": "promote_in_place",
+  "source_suite": "work_authority",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "issue_id": "issue-1",
+  "manager": "manager-special",
+  "audience": "host:local",
+  "grant_ref": "grant:special-r1",
+  "appointed_by": "user-owner",
+  "appointed_at": "2026-11-20T12:00:00Z",
+  "not_after": "2026-11-20T12:20:00Z",
+  "submit_at": "2026-11-20T12:05:00Z",
+  "now_ms": 1764100000000,
+  "root_issue_id": "issue-root-1",
+  "reservation_id": "res-1",
+  "receipt_id": "rcp-1",
+  "command_id": "cmd-promote-1",
+  "expected": "in_flight_direct_task_promoted_in_place_with_stable_ids_and_no_old_assignment_rerun"
+}

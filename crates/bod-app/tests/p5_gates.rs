@@ -118,13 +118,23 @@ fn each_case_carries_real_assertions() {
 
 #[test]
 fn p5_gates_are_not_bound_before_the_exit_is_met() {
-    // P5 出口未达：G-13/G-22/G-25 不得出现在 gates.yaml。G-21 是 P0 的旧绑定，
-    // 只允许它继续指向 control_api 的既有用例，不得被 P5 的新用例改写。
+    // A1 起 P5 门禁以 planned 登记，覆盖规格引用但绝不提前标 implemented。
+    // G-21 是 P0 的旧绑定，只允许它继续指向 control_api 的既有用例。
+    let entry = |gate: &str| {
+        let marker = format!("- id: {gate}");
+        let Some(start) = GATES.find(&marker) else {
+            return None;
+        };
+        let rest = &GATES[start + marker.len()..];
+        Some(&rest[..rest.find("\n- id: ").unwrap_or(rest.len())])
+    };
     for gate in ["G-13", "G-22", "G-25"] {
-        assert!(
-            !GATES.contains(&format!("- id: {gate}")),
-            "{gate} 不应在出口前写入 gates.yaml"
-        );
+        if let Some(block) = entry(gate) {
+            assert!(
+                block.contains("status: planned"),
+                "{gate} 在出口前应保持 planned：{block}"
+            );
+        }
     }
     let g21 = GATES
         .split("- id: G-21")

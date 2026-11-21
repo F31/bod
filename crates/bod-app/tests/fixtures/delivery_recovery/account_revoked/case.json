@@ -1,0 +1,16 @@
+{
+  "case": "account_revoked",
+  "source_suite": "delivery_recovery",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "member": "lead-1",
+  "environment": "env-prod",
+  "artifact_digest": "sha256:artifact-1",
+  "params_digest": "sha256:params-1",
+  "account_id": "acct-original",
+  "connector_id": "connector-1",
+  "approved_until": "2026-11-22T00:00:00Z",
+  "now": "2026-11-21T10:00:00Z",
+  "external_credential": "connector-token-1",
+  "expected": "approved_send_is_blocked_after_account_revocation_with_original_decision_preserved"
+}

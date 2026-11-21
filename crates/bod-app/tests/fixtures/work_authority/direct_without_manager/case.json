@@ -1,0 +1,13 @@
+{
+  "case": "direct_without_manager",
+  "source_suite": "work_authority",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-direct-1",
+  "revision": 3,
+  "member": "member-1",
+  "executor": "agent-1",
+  "acceptor": "lead-1",
+  "now": "2026-11-21T10:00:00Z",
+  "expected": "member_dispatch_allowed_acceptance_by_independent_lead_and_no_release_decision"
+}

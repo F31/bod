@@ -1,0 +1,13 @@
+{
+  "case": "concurrent_triage",
+  "source_suite": "delivery_recovery",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "feedback_id": "fb-duplicate-1",
+  "profile_id": "triage-decision",
+  "workers": ["triage-a", "triage-b"],
+  "customers": ["cust-a", "cust-b"],
+  "receipt_ids": ["rcp-a", "rcp-b"],
+  "executor": "agent-1",
+  "expected": "one_current_owner_one_decision_and_isolated_customer_receipts"
+}

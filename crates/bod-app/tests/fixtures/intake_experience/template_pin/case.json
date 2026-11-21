@@ -1,0 +1,14 @@
+{
+  "case": "template_pin",
+  "source_suite": "intake_experience",
+  "profile_id": "delivery-template",
+  "old_digest": "sha256:test-target-template",
+  "new_digest": "sha256:prod-target-template",
+  "published_at": "2026-11-21T11:00:00Z",
+  "test_environment": "env-test",
+  "prod_environment": "env-prod",
+  "now": "2026-11-21T12:00:00Z",
+  "release_operator": "release-op-1",
+  "outsider": "outsider-1",
+  "expected": "old_task_keeps_pinned_template_and_new_task_still_needs_project_release_authorization"
+}

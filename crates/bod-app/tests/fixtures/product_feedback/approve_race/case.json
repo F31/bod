@@ -1,0 +1,12 @@
+{
+  "case": "approve_race",
+  "source_suite": "product_feedback",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-root-1",
+  "revision": 7,
+  "approvers": ["lead-a", "lead-b"],
+  "decision_ledger": "decision-ledger",
+  "decision_field": "authorization_decision",
+  "expected": "exactly_one_authorization_decision_one_root_issue_one_dispatch_intent"
+}

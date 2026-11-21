@@ -1,0 +1,14 @@
+{
+  "case": "scoped_rollout",
+  "source_suite": "product_feedback",
+  "defect_id": "defect-1",
+  "old_digest": "sha256:before-fix",
+  "fixed_digest": "sha256:after-fix",
+  "env_a_id": "env-customer-a",
+  "env_b_id": "env-customer-b",
+  "revision_fixed": "build-9",
+  "revision_rollback": "build-10",
+  "published_at": "2026-11-21T09:00:00Z",
+  "rolled_back_at": "2026-11-21T11:00:00Z",
+  "expected": "only_a_receives_fix_then_a_conclusion_updates_on_rollback_b_stays_unknown"
+}

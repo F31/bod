@@ -1,0 +1,13 @@
+{
+  "case": "pinned_review",
+  "source_suite": "delivery_recovery",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "subject": "reviewer-1",
+  "ref_id": "template-doc",
+  "old_revision": "rev-1",
+  "new_revision": "rev-2",
+  "old_body": "原模板：导出按钮位于页脚",
+  "new_body": "新模板：导出按钮位于工具栏",
+  "expected": "old_ticket_keeps_pinned_template_and_relocated_annotation_returns_to_unlocated"
+}

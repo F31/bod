@@ -1,0 +1,14 @@
+{
+  "case": "card_race",
+  "source_suite": "intake_experience",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-card-1",
+  "member": "member-1",
+  "card_key": "approve",
+  "old_revision": 4,
+  "new_revision": 5,
+  "now": "2026-11-21T10:00:00Z",
+  "card_expires_at": "2026-11-21T12:00:00Z",
+  "expected": "only_one_decision_accepted_and_stale_card_refreshed"
+}

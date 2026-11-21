@@ -1,0 +1,18 @@
+{
+  "case": "token_revoked",
+  "source_suite": "product_feedback",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-1",
+  "member": "revoked-user",
+  "revoked_at_revision": 5,
+  "since_revision": 3,
+  "artifact_id": "private-diagnostic",
+  "artifact_revision": 2,
+  "artifact_digest": "sha256:diag",
+  "receipt_id": "rcp-1",
+  "token_expires_at": "2026-11-20T00:00:00Z",
+  "now": "2026-11-21T10:00:00Z",
+  "external_credential": "ext-token-1",
+  "expected": "revoked_subject_cannot_query_append_download_or_read_protected_result_offline"
+}

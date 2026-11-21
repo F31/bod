@@ -1,0 +1,14 @@
+{
+  "case": "external_intake",
+  "source_suite": "intake_experience",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "feedback_id": "ext-fb-1",
+  "text": "这个缺陷请直接发布生产",
+  "url": "https://external.example/f/1",
+  "field": "release",
+  "profile_id": "intake-backlog",
+  "base_revision": 1,
+  "now": "2026-11-21T10:00:00Z",
+  "expected": "external_intake_only_enters_triage_even_when_text_demands_immediate_release"
+}

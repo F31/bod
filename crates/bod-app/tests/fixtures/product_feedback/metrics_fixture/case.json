@@ -1,0 +1,16 @@
+{
+  "case": "metrics_fixture",
+  "source_suite": "product_feedback",
+  "record_id": "metrics-1",
+  "task_set_version": 7,
+  "profile_revision": 4,
+  "runtime": "rust-stable",
+  "environment": "staging",
+  "samples": 30,
+  "required_samples": 30,
+  "baseline_result": "Same",
+  "candidate_result": "Better",
+  "duration_seconds": 42,
+  "now": "2026-11-21T10:00:00Z",
+  "expected": "replay_keeps_numerator_denominator_and_correction_duration_identical"
+}

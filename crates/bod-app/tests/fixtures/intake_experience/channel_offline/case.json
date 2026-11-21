@@ -1,0 +1,15 @@
+{
+  "case": "channel_offline",
+  "source_suite": "intake_experience",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-channel-1",
+  "member": "member-1",
+  "card_key": "approve",
+  "card_revision": 5,
+  "now": "2026-11-21T10:00:00Z",
+  "card_expires_at": "2026-11-21T12:00:00Z",
+  "receipt_id": "rcp-channel-1",
+  "channel_id": "im-main",
+  "expected": "offline_has_no_success_receipt_and_retry_is_idempotent_after_authorization_recheck"
+}

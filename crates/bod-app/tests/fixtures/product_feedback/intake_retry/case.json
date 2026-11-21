@@ -1,0 +1,12 @@
+{
+  "case": "intake_retry",
+  "source_suite": "product_feedback",
+  "external_key": "ext-submit-1",
+  "text": "导出按钮乱码，请修复",
+  "url": "https://external.example/feedback/1",
+  "profile_id": "feedback-profile",
+  "field": "export_format",
+  "value": "fixed-format",
+  "changed_value": "different-format",
+  "expected": "one_feedback_and_conflict_on_same_key_with_changed_payload"
+}

@@ -361,4 +361,356 @@
   tests: bod-app::verification_registry::tests::registry_covers_every_spec_reference
   status: implemented
   evidence: cargo run -p bod -- verify-index
+  note: "A1 起绑定来源覆盖 P0—P7 全部 proposal/tasks；N/M/K 在 summary 中输出"
+- id: I-13
+  kind: invariant
+  requirement: 共享任务清单由单一协调入口更新，手工勾选不绕过验收
+  module: bod-app::merge_queue
+  status: planned
+  evidence: cargo test -p bod-app merge_queue
+  note: P3 出口 2.6 的真实接口变化样本未取得；现有串行合并用例只作支撑证据，不升 implemented
+- id: I-14
+  kind: invariant
+  requirement: 任务恢复不会自动将原始输出晋升为知识
+  module: bod-app::feedback_knowledge
+  tests: bod-app::feedback_knowledge::tests::invariant_i_14_concurrent_proposal_conflicts_and_keeps_candidate
+  status: implemented
+  evidence: cargo test -p bod-app feedback_knowledge
+  note: 并发提案同键冲突保留候选，原始输出不绕过ProposalDraft晋升路径
+- id: I-15
+  kind: invariant
+  requirement: 被声明为强隔离的路径实际通过运行器测试
+  module: bod-app::extension_sdk
+  tests: bod-app::extension_sdk::tests::invariant_i_15_unverified_extension_is_experimental_and_out_of_pool
+  status: implemented
+  evidence: cargo test -p bod-app extension_sdk
+  note: 无 conformance 的扩展只标 Experimental 且不进调度候选
+- id: I-19
+  kind: invariant
+  requirement: 普通反馈不修改已批准验收条件或其他项目规则
+  module: bod-app::feedback_knowledge
+  tests: bod-app::feedback_knowledge::tests::invariant_i_19_feedback_cannot_change_accepted_criteria
+  status: implemented
+  evidence: cargo test -p bod-app feedback_knowledge
   note: ""
+- id: I-23
+  kind: invariant
+  requirement: 规则发布回滚不伪造外部操作或历史验收回滚
+  module: bod-app::feedback_knowledge
+  tests: bod-app::feedback_knowledge::tests::invariant_i_23_rollback_refreshes_session_without_reverting_ledger
+  status: implemented
+  evidence: cargo test -p bod-app feedback_knowledge
+  note: 并列用例 invariant_i_23_two_different_task_sets_cannot_be_compared 禁止不同任务集误比较
+- id: I-40
+  kind: invariant
+  requirement: 一套内部执行契约映射外部协议，不支持不能报成功
+  module: bod-app::extension_sdk
+  tests: bod-app::extension_sdk::tests::task_1_6_support_claim_requires_version_platform_and_report
+  status: implemented
+  evidence: cargo test -p bod-app extension_sdk
+  note: 并列用例 task_1_1_protocol_and_evidence_tier_are_checked_separately 验证协议版本与证据层级分别拒绝
+- id: I-44
+  kind: invariant
+  requirement: Catalog 升级不静默覆盖本地修改、不自动扩权
+  module: bod-app::catalog_upgrade
+  tests: bod-app::catalog_upgrade::tests::invariant_i_44_upgrade_preserves_local_edit_and_proposes
+  status: implemented
+  evidence: cargo test -p bod-app catalog_upgrade
+  note: 并列用例 invariant_i_44_new_permissions_require_readmission_and_never_grant_admin 覆盖权限重新准入
+- id: I-45
+  kind: invariant
+  requirement: Issue 完成要求实际必需交付被接受，不由外部 completed 直接设置
+  module: bod-app::artifact_acceptance
+  tests: bod-app::artifact_acceptance::tests::partial_acceptance_does_not_complete_issue
+  status: implemented
+  evidence: cargo test -p bod-app artifact_acceptance
+  note: 并列用例 all_required_accepted_and_gate_passed_completes 证明全部必需交付被接受后才完成
+- id: I-46
+  kind: invariant
+  requirement: 交接骨架的账本/副作用/版本由宿主事实生成，Agent 叙述不可覆盖
+  module: bod-app::handoff_facts
+  tests: bod-app::handoff_facts::tests::invariant_i_46_narrative_cannot_override_effect_state
+  status: implemented
+  evidence: cargo test -p bod-app handoff_facts
+  note: 同组用例覆盖 done 叙述、外部证据与自报证据的边界
+- id: I-47
+  kind: invariant
+  requirement: 部分现场可保存，但自动接续必须满足声明等级与范围要求
+  module: bod-app::handoff_package
+  tests: bod-app::handoff_package::tests::l3_request_for_untested_combination_is_rejected
+  status: implemented
+  evidence: cargo test -p bod-app handoff_package && cargo test -p bod-app handoff_snapshot
+  note: handoff_snapshot::tests::partial_snapshot_reports_missing_reasons_and_integrity 证明部分现场可保存且缺口可见
+- id: I-49
+  kind: invariant
+  requirement: 挂起/换 Agent 不释放在途及未知费用，不重发未知副作用
+  module: bod-app::effect_reconciliation
+  tests: bod-app::effect_reconciliation::tests::invariant_i_49_unknown_effect_is_not_resent
+  status: implemented
+  evidence: cargo test -p bod-app effect_reconciliation
+  note: 同组用例覆盖仅 Unknown 可查询、恶意 hint 不跟随、相关依赖阻塞
+- id: I-50
+  kind: invariant
+  requirement: 治理覆盖结论不高于来源支持等级，日志不独自证明强制隔离
+  module: bod-app::conformance_report
+  tests: bod-app::conformance_report::tests::overall_badge_is_refused_by_construction
+  status: implemented
+  evidence: cargo test -p bod-app conformance_report
+  note: 并列用例 declared_supported_without_case_is_only_declared 与 extension_sdk::tests::task_1_6_support_claim_requires_version_platform_and_report
+- id: I-53
+  kind: invariant
+  requirement: 影响分析区分确定关系、推测和未知，不把无边当无影响
+  module: bod-app::impact_revalidation
+  tests: bod-app::impact_revalidation::tests::inferred_edge_stays_inferred_and_does_not_mark_downstream_failed
+  status: implemented
+  evidence: cargo test -p bod-app impact_revalidation
+  note: 并列用例 region_without_relations_is_unknown_not_unaffected 与 region_with_edges_but_no_path_is_also_unknown
+- id: I-54
+  kind: invariant
+  requirement: 重验/维护工作有幂等、预算和范围约束，不无限循环
+  module: bod-app::impact_revalidation
+  tests: bod-app::impact_revalidation::tests::duplicate_change_events_merge_into_one_proposal
+  status: implemented
+  evidence: cargo test -p bod-app impact_revalidation && cargo test -p bod-app maintenance
+  note: 并列用例 budget_and_scope_bound_the_number_of_proposals 与 maintenance::tests::budget_exhaustion_stops_maintenance_proposals
+- id: I-58
+  kind: invariant
+  requirement: 每个管理 scope 最多一个当前 Active 主委任，epoch 单调且不回退
+  module: bod-app::manager_transfer
+  tests: bod-app::manager_transfer::tests::appoint_assigns_host_epoch_and_blocks_a_second_active
+  status: implemented
+  evidence: cargo test -p bod-app manager_transfer
+  note: 并列用例 epoch_increases_on_each_generation_and_is_never_reused 与 store_refuses_second_active_or_reused_epoch
+- id: I-60
+  kind: invariant
+  requirement: 未委任普通执行者只能反馈，受委任负责人在 Grant 内可安排工作
+  module: bod-app::staff_continuation
+  tests: bod-app::staff_continuation::tests::roles_separate_management_from_execution
+  status: implemented
+  evidence: cargo test -p bod-app staff_continuation && cargo test -p bod-app authorization
+  note: authorization::tests::task_2_1_assign_without_team 与 invariant_i_12::feedback_payload_cannot_claim_another_project 为并列覆盖
+- id: I-62
+  kind: invariant
+  requirement: 旧管理身份失效不自动使独立合法执行反馈失效
+  module: bod-app::staff_continuation
+  tests: bod-app::staff_continuation::tests::employee_instruction_does_not_depend_on_who_leaves
+  status: implemented
+  evidence: cargo test -p bod-app staff_continuation
+  note: 并列用例 reports_to_writes_only_metadata_and_keeps_execution_facts 确保组织元数据不迁移执行事实
+- id: I-64
+  kind: invariant
+  requirement: Committed 后故障只向前恢复，重新委任旧 Agent 也用新 epoch
+  module: bod-app::manager_transfer
+  tests: bod-app::manager_transfer::tests::epoch_increases_on_each_generation_and_is_never_reused
+  status: implemented
+  evidence: cargo test -p bod-app manager_transfer
+  note: 并列用例 revoked_appointment_is_terminal_and_cannot_be_resumed 与 old_epoch_ticket_is_rejected_and_reason_is_recorded
+- id: I-65
+  kind: invariant
+  requirement: 检查点带游标，接管补读增量，不依赖旧经理在线或叙述正确
+  module: bod-app::takeover_review
+  tests: bod-app::takeover_review::tests::delta_separates_added_changed_and_vanished
+  status: implemented
+  evidence: cargo test -p bod-app takeover_review
+  note: 并列用例 gaps_are_queryable_without_the_old_manager_summary 与 confirmation_survives_reopen_and_records_the_reviewed_delta
+- id: I-48
+  kind: invariant
+  requirement: 旧写入者未停/未隔离时，新执行不得重复写相关资源
+  module: bod-app::p2_fault_acceptance
+  tests: bod-app::p2_fault_acceptance::case_stop_old_writer_rejects_foreign_diff_and_keeps_the_scene
+  status: implemented
+  evidence: cargo test -p bod-app --test p2_fault_acceptance
+  note: 同文件 case_dirty_files_are_retained_then_require_explicit_confirmation 覆盖脏文件保留与显式确认
+- id: I-52
+  kind: invariant
+  requirement: 旧回执对应旧内容，重新打包或新候选不静默改写历史决定
+  module: bod-app::artifact_acceptance
+  tests: bod-app::artifact_acceptance::tests::later_acceptance_supersedes_previous_and_stale_cas_is_refused
+  status: implemented
+  evidence: cargo test -p bod-app artifact_acceptance
+  note: 并列用例 evidence_from_previous_revision_is_rejected 证明旧证据不能批准新修订
+- id: I-57
+  kind: invariant
+  requirement: 符合性关键安全项失败禁止启用，不用降级徽章豁免
+  module: bod-app::extension_sdk
+  tests: bod-app::extension_sdk::tests::invariant_i_57_identity_failure_disables_dispatch_without_badge_exemption
+  status: implemented
+  evidence: cargo test -p bod-app extension_sdk
+  note: 并列用例 conformance_report::tests::enablement_block_is_rendered_without_escape_hatch
+- id: I-59
+  kind: invariant
+  requirement: 受委任 Agent 的管理命令应用事务检查当前委任，不仅在接收/连接时检查
+  module: bod-app::manager_transfer
+  tests: bod-app::manager_transfer::tests::warm_cache_does_not_authorize_after_revocation
+  status: implemented
+  evidence: cargo test -p bod-app manager_transfer && cargo test -p bod-app takeover_review
+  note: 并列用例 takeover_review::tests::commands_are_still_checked_against_the_current_epoch_after_confirmation
+- id: I-61
+  kind: invariant
+  requirement: 管理切换不默认取消正常员工、删除成果或重置预算
+  module: bod-app::staff_continuation
+  tests: bod-app::staff_continuation::tests::switch_keeps_running_work_accepted_results_and_rejects_old_commands
+  status: implemented
+  evidence: cargo test -p bod-app staff_continuation
+  note: 并列用例 contribution_of_the_outgoing_manager_is_retained 与 accepted_artifact_cannot_be_redone_but_open_work_can
+- id: G-4
+  kind: gate
+  requirement: 能力与隔离 conformance
+  module: bod-app::adapter_conformance
+  status: planned
+  evidence: cargo test -p bod-app adapter_conformance
+  note: P2 出口 4.5 的能力缺失三处一致已有支撑用例，但 5.2/5.3 未完成，门禁保持 planned
+- id: G-7
+  kind: gate
+  requirement: 多 Agent 仓库闭环
+  module: bod-app::coding_integration
+  status: planned
+  evidence: cargo test -p bod-app coding_integration
+  note: P3 出口 2.6 真实接口样本未取得，门禁保持 planned
+- id: G-13
+  kind: gate
+  requirement: 反馈污染/冲突/回滚测试
+  module: bod-app::feedback_knowledge
+  status: planned
+  evidence: cargo test -p bod-app feedback_knowledge
+  note: P5 出口 5.2 未完成；I-14/I-19/I-23 已升 implemented，但门禁不提前提升
+- id: G-19
+  kind: gate
+  requirement: 远程分区与孤儿对账（声明支持时）
+  module: bod-app::remote_partition
+  status: planned
+  evidence: cargo test -p bod-app remote_partition
+  note: P6 出口 2.8/4.6 缺双机与真机证据，门禁保持 planned
+- id: G-22
+  kind: gate
+  requirement: 受限反馈
+  module: bod-app::authorization
+  status: planned
+  evidence: cargo test -p bod-app authorization
+  note: P5 六阶段权限已有样本，但真实主体核对未完成，门禁保持 planned
+- id: G-23
+  kind: gate
+  requirement: 声明协议子集
+  module: bod-app::protocol_mapping
+  status: planned
+  evidence: cargo test -p bod-app extension_sdk
+  note: P6 真实协议互验收集未完成，门禁保持 planned
+- id: G-24
+  kind: gate
+  requirement: 联合交付
+  module: bod-app::runtime_verification
+  status: planned
+  evidence: cargo test -p bod-app runtime_verification
+  note: P4 出口 5.2/5.3 未完成，不因登记而宣称 implemented
+- id: G-25
+  kind: gate
+  requirement: Catalog 冲突与升级
+  module: bod-app::catalog_upgrade
+  status: planned
+  evidence: cargo test -p bod-app catalog_upgrade
+  note: P5 出口 5.2 未完成，门禁保持 planned
+- id: G-26
+  kind: gate
+  requirement: 默认轻量装配
+  module: bod-app::package_smoke
+  status: planned
+  evidence: cargo test -p bod-app package_smoke
+  note: P7 已验证性能结论不自动扩大支持矩阵，但轻量装配包体 smoke 未执行，保持 planned
+- id: G-28
+  kind: gate
+  requirement: 两种已测运行时接续；含 dirty 文件、崩溃、迟到回报、摘要损坏和缺资料
+  module: bod-app::context_handoff
+  status: planned
+  evidence: cargo test -p bod-app p2_fault_acceptance
+  note: P2 出口 blocked，真实双运行时报告未取得，门禁保持 planned
+- id: G-30
+  kind: gate
+  requirement: 挂起保留风险占用，新 Attempt 不重复计费/执行；相关依赖准确阻塞
+  module: bod-app::budget_admission
+  status: planned
+  evidence: cargo test -p bod-app budget_admission
+  note: P2 出口 blocked，门禁保持 planned
+- id: G-31
+  kind: gate
+  requirement: 接口变化触发对应检查，不相关元数据不全部重跑；关系缺失明确 unknown
+  module: bod-app::impact_revalidation
+  status: planned
+  evidence: cargo test -p bod-app impact_revalidation
+  note: P3 出口 2.6 真实接口样本未取得，门禁保持 planned
+- id: G-32
+  kind: gate
+  requirement: 在固定包/环境运行真实场景，工具失败与应用失败区分，拒绝假通过
+  module: bod-app::runtime_verification
+  status: planned
+  evidence: cargo test -p bod-app runtime_verification
+  note: P4 出口 blocked，门禁保持 planned
+- id: G-33
+  kind: gate
+  requirement: 内容篡改失败，旧包验证仍成立；无信任锚不宣称身份/时间已证实
+  module: bod-app::artifact_acceptance
+  status: planned
+  evidence: cargo test -p bod-app artifact_acceptance
+  note: P4 出口 blocked，门禁保持 planned
+- id: G-34
+  kind: gate
+  requirement: 授权低风险可自动，越界需升级，只读不启动 Agent；披露/限流有测试
+  module: bod-app::readonly_api
+  status: planned
+  evidence: cargo test -p bod-app readonly_api
+  note: P6 出口 blocked，门禁保持 planned
+- id: G-35
+  kind: gate
+  requirement: 条件变化生成去重提案，预算到限停止，未知环境不显示健康
+  module: bod-app::maintenance
+  status: planned
+  evidence: cargo test -p bod-app maintenance
+  note: P4 出口 blocked，门禁保持 planned
+- id: G-38
+  kind: gate
+  requirement: 双人同时换经理只一次成功；旧命令队列和正在应用命令与切换提交正确排序
+  module: bod-app::manager_transfer
+  status: planned
+  evidence: cargo test -p bod-app p2_fault_acceptance
+  note: P2 出口 4.4/5.2 未完成，门禁保持 planned
+- id: G-39
+  kind: gate
+  requirement: Preparing 崩溃、提交后回包丢失、Committed 后唤醒丢失/重复均无双主或重复派发
+  module: bod-app::manager_transfer
+  status: planned
+  evidence: cargo test -p bod-app p2_fault_acceptance
+  note: P2 出口 blocked，门禁保持 planned
+- id: G-40
+  kind: gate
+  requirement: 两项工作在途时换经理，保持 Assignment/接受/费用；迟到员工反馈正常入账
+  module: bod-app::staff_continuation
+  status: planned
+  evidence: cargo test -p bod-app staff_continuation
+  note: P2 出口 blocked，门禁保持 planned
+- id: G-41
+  kind: gate
+  requirement: 旧经理兼任编码且未停止/持外部密钥，冲突写受阻；只撤管理权不误杀其他员工
+  module: bod-app::workspace_safety
+  status: planned
+  evidence: cargo test -p bod-app workspace_safety
+  note: P2 出口 blocked，门禁保持 planned
+- id: G-42
+  kind: gate
+  requirement: 无旧经理总结、部分资料缺失、快照后新增员工结果，能够查询缺口和增量
+  module: bod-app::takeover_review
+  status: planned
+  evidence: cargo test -p bod-app takeover_review
+  note: P2 出口 blocked，I-65 已有真实用例但门禁不提前提升
+- id: G-46
+  kind: gate
+  requirement: 分项 probe/配额未知/能力驱动 UI 与服务端拒绝
+  module: bod-app::capability_dispatch
+  status: planned
+  evidence: cargo test -p bod-app capability_dispatch
+  note: P2/P6 出口未完成，门禁保持 planned
+- id: G-47
+  kind: gate
+  requirement: 可靠观察 ACK/乱序/重连/命令去重保留
+  module: bod-app::protocol_reliability
+  status: planned
+  evidence: cargo test -p bod-app protocol_reliability
+  note: P6 出口 blocked，门禁保持 planned

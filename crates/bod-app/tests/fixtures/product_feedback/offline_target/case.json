@@ -1,0 +1,17 @@
+{
+  "case": "offline_target",
+  "source_suite": "product_feedback",
+  "environment_id": "env-target-1",
+  "provider": "k8s",
+  "external_id": "cluster-a/ns-b",
+  "desired_revision": "build-9",
+  "candidate_id": "cand-9",
+  "commit": "commit-9",
+  "artifact_digest": "sha256:9",
+  "report_id": "report-9",
+  "spec_revision": "spec-1",
+  "rule_revision": "rule-1",
+  "raw_ref": "cas:sha256:report-9",
+  "now": "2026-11-21T10:00:00Z",
+  "expected": "artifact_only_is_unknown_then_binding_target_observation_and_revalidation_allows_reply"
+}

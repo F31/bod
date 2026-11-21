@@ -1,0 +1,15 @@
+{
+  "case": "separate_release",
+  "source_suite": "work_authority",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-1",
+  "revision": 6,
+  "acceptor": "acceptor-1",
+  "executor": "agent-1",
+  "tester": "tester-1",
+  "release_operator": "release-op-1",
+  "now": "2026-11-21T10:00:00Z",
+  "check_id": "independent-review",
+  "expected": "accept_and_release_are_two_decisions_and_same_subject_cannot_self_review"
+}

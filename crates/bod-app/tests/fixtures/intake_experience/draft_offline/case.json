@@ -1,0 +1,15 @@
+{
+  "case": "draft_offline",
+  "source_suite": "intake_experience",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "member": "member-1",
+  "executor": "agent-1",
+  "text": "报告页显示旧数据",
+  "field": "report_refresh",
+  "empty_value": "",
+  "filled_value": "refresh-on-open",
+  "profile_id": "intake-drafts",
+  "draft_key": "draft-offline-1",
+  "expected": "offline_draft_saved_then_edited_and_dispatched_once_with_duplicate_guard"
+}

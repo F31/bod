@@ -78,6 +78,8 @@ pub struct MeasureItem {
     pub command: String,
     /// 测量方法与数据规模。
     pub method: String,
+    /// `method + samples` 的短指纹：口径或样本数变化即不得跨阶段比较。
+    pub method_fingerprint: Option<String>,
     /// 结论或口径限制，不得夸大。
     pub note: String,
     /// 能否与目标比较：`None` 表示目标不是可比较数值（或未测）。
@@ -86,6 +88,16 @@ pub struct MeasureItem {
     pub numeric: Option<f64>,
     pub failure_reason: Option<String>,
     pub status: MeasureStatus,
+}
+
+/// `method + samples` 的稳定短指纹。不使用 `DefaultHasher`：其算法不承诺跨版本稳定。
+fn method_fingerprint(method: &str, samples: usize) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in format!("{method}\0samples={samples}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 impl MeasureItem {
@@ -98,6 +110,7 @@ impl MeasureItem {
             samples: 0,
             command: String::new(),
             method: String::new(),
+            method_fingerprint: None,
             note: String::new(),
             meets_target: None,
             numeric: None,
@@ -132,6 +145,7 @@ impl MeasureItem {
     ) -> Self {
         self.value = Some(value.into());
         self.samples = samples;
+        self.method_fingerprint = Some(method_fingerprint(&self.method, samples));
         self.command = command.to_string();
         self.meets_target = meets_target;
         self.status = MeasureStatus::Measured;
@@ -710,6 +724,8 @@ pub enum PhaseComparison {
         tolerance_pct: f64,
         /// 只在某一阶段出现的项：无法判断稳定性，不得转 Measured。
         single_phase: Vec<&'static str>,
+        /// 方法或样本数不同的项：即使数字相同也不是同一口径，不得跨阶段比较。
+        method_mismatch: Vec<&'static str>,
     },
 }
 
@@ -733,6 +749,7 @@ impl PhaseComparison {
             Self::Comparable {
                 drifts,
                 single_phase,
+                method_mismatch,
                 ..
             } => {
                 let mut names: Vec<&'static str> = drifts
@@ -741,6 +758,9 @@ impl PhaseComparison {
                     .map(|drift| drift.name)
                     .collect();
                 names.extend(single_phase.iter().copied());
+                names.extend(method_mismatch.iter().copied());
+                names.sort_unstable();
+                names.dedup();
                 names
             }
         }
@@ -750,12 +770,19 @@ impl PhaseComparison {
     pub fn stage(&self) -> BudgetStage {
         match self {
             Self::Incomparable { diff } => BudgetStage::Incomparable { diff: diff.clone() },
-            Self::Comparable { drifts, .. } => {
-                let drifted: Vec<&'static str> = drifts
+            Self::Comparable {
+                drifts,
+                method_mismatch,
+                ..
+            } => {
+                let mut drifted: Vec<&'static str> = drifts
                     .iter()
                     .filter(|drift| !drift.within_tolerance)
                     .map(|drift| drift.name)
                     .collect();
+                drifted.extend(method_mismatch.iter().copied());
+                drifted.sort_unstable();
+                drifted.dedup();
                 BudgetStage::TwoComparablePhases { diff: drifted }
             }
         }
@@ -775,16 +802,23 @@ pub fn compare_phases(
 
     let mut drifts = Vec::new();
     let mut single_phase = Vec::new();
+    let mut method_mismatch = Vec::new();
     for item in &first.items {
         let Some(other) = second.item(item.name) else {
             single_phase.push(item.name);
             continue;
         };
         let (Some(left), Some(right)) = (item.numeric, other.numeric) else {
-            // 没有标量的项各自成条，不参与漂移判定。
+            // 没有标量的项各自成条，不参与漂移判定；目标/未测项不检查方法指纹。
             single_phase.push(item.name);
             continue;
         };
+        if item.method_fingerprint.is_none() || item.method_fingerprint != other.method_fingerprint
+        {
+            // 口径或样本数变了，数字相等也不能证明稳定。
+            method_mismatch.push(item.name);
+            continue;
+        }
         let delta_pct = if left == 0.0 {
             if right == 0.0 { 0.0 } else { f64::INFINITY }
         } else {
@@ -810,6 +844,7 @@ pub fn compare_phases(
         drifts,
         tolerance_pct,
         single_phase,
+        method_mismatch,
     }
 }
 
@@ -848,6 +883,7 @@ pub fn render_phase_comparison(
         PhaseComparison::Comparable {
             drifts,
             single_phase,
+            method_mismatch,
             ..
         } => {
             out.push_str("## 单项漂移\n\n");
@@ -877,6 +913,13 @@ pub fn render_phase_comparison(
                     out,
                     "\n只在单一阶段出现的项（无标量或不参与对比）：{}\n",
                     single_phase.join("、")
+                );
+            }
+            if !method_mismatch.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "\n方法或样本数不同、不得跨阶段比较的项：{}\n",
+                    method_mismatch.join("、")
                 );
             }
 

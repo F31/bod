@@ -7,7 +7,9 @@
 //! 测量口径（口径定义在 [`crate::capacity_evaluation`]，归因在 [`crate::bottleneck`]）：
 //! - 环境：OS / 架构 / rustc / 构建参数 / SQLite 同步策略 / 数据规模 / 缓存冷热；
 //! - SQLite：WAL + `synchronous=FULL` + `BEGIN IMMEDIATE`（`BodConfig::default()`）；
+//!   基准连接统一 `cache_size=-65536 KiB` / `temp_store=MEMORY`，重启、恢复与体积测量前做 WAL checkpoint；
 //! - 延迟取 p50/p95/p99（排序后取分位），单位毫秒；**吞吐与尾延迟分别结论**；
+//! - 每项带 `method + samples` 指纹：口径或样本数变化后不得跨阶段比较；
 //! - 每一项都带样本数与命令，缺命令或缺样本的项不进入容量决策；
 //! - 恢复 RTO 把**外部复制**与**内部重开/校验**分开计时（2.1）。
 
@@ -22,6 +24,7 @@ use crate::config::BodConfig;
 use crate::domain::DomainId;
 use crate::domain::queue::WorkQueueEntry;
 use crate::store::{SqliteStore, StoreError};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -46,9 +49,33 @@ fn workspace(name: &str) -> Result<(PathBuf, SqliteStore), String> {
         .unwrap_or(0);
     let root = std::env::temp_dir().join(format!("bod-perf-{name}-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&root).map_err(|err| err.to_string())?;
-    let store = SqliteStore::open(&root.join("bod.sqlite"), &BodConfig::default())
-        .map_err(|err| err.to_string())?;
+    let store = open_store(&root.join("bod.sqlite"))?;
     Ok((root, store))
+}
+
+/// 与 store.rs 的 P7 基准页缓存保持一致；报告必须声明该口径。
+const BENCH_CACHE_SIZE_KIB: i64 = 65_536;
+
+fn open_store(path: &Path) -> Result<SqliteStore, String> {
+    let store = SqliteStore::open(path, &BodConfig::default()).map_err(|err| err.to_string())?;
+    store.apply_bench_pragmas().map_err(|err| err.to_string())?;
+    Ok(store)
+}
+
+fn raw_conn(path: &Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(path).map_err(|err| err.to_string())?;
+    conn.pragma_update(None, "cache_size", BENCH_CACHE_SIZE_KIB as i64)
+        .map_err(|err| err.to_string())?;
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .map_err(|err| err.to_string())?;
+    Ok(conn)
+}
+
+/// 把 WAL 截断后再测体积/重开，避免上一项写入的 WAL 残留被误算成稳态体积或恢复成本。
+fn checkpoint(path: &Path) -> Result<(), String> {
+    let conn = raw_conn(path)?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(|err| err.to_string())
 }
 
 fn percentile(samples: &mut [Duration], ratio: f64) -> Duration {
@@ -71,11 +98,10 @@ fn verdict(value_ms: f64, target_ms: f64) -> Option<bool> {
 /// 冷启动：仅到"存储就绪（迁移已应用）"，不含 HTTP ready 与外部探测。
 fn cold_start(root: &Path) -> Result<MeasureItem, String> {
     let mut samples = Vec::new();
-    for round in 0..5 {
+    for round in 0..15 {
         let path = root.join(format!("cold-{round}.sqlite"));
         let started = Instant::now();
-        let store =
-            SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
+        let store = open_store(&path)?;
         samples.push(started.elapsed());
         drop(store);
     }
@@ -88,7 +114,7 @@ fn cold_start(root: &Path) -> Result<MeasureItem, String> {
         FormFactor::Headless,
         "≤ 500 ms（到本地 API ready）",
     )
-    .with_method("新建空库 + 应用全部迁移，重复 5 次取 p50/p99；文件在本地临时目录，冷缓存不可控")
+    .with_method("新建空库 + 应用全部迁移，重复 15 次取 p50/p99；每连接 cache_size=-65536 KiB、temp_store=MEMORY；本机页缓存仍不可控")
     .with_note("只覆盖到存储就绪，未包含 HTTP 监听与握手，故不能直接宣称 API ready 达标")
     .with_numeric(ms(p99))
     .measured(
@@ -99,27 +125,116 @@ fn cold_start(root: &Path) -> Result<MeasureItem, String> {
     ))
 }
 
-/// 冷启动到 API ready：bench 内没有宿主监听器，如实记缺口。
+/// 冷启动到 API ready：在 bench 旁边真实 spawn 一个 `bod serve` 并等待就绪行。
+///
+/// 只测本地监听就绪，不执行会话握手；握手语义仍由 host_handshake conformance 覆盖。
 fn cold_start_api_ready() -> MeasureItem {
-    MeasureItem::new(
-        "cold_start_to_api_ready",
-        FormFactor::Headless,
-        "≤ 1 s（到本地 API ready）",
-    )
-    .with_method("需要宿主进程内真实监听 + 一次成功握手；bench 不启动宿主")
-    .unverified(
-        "bench 进程内没有 HTTP 监听器，无法测到 ready；只测到存储就绪（cold_start_store_ready）",
-        BENCH_COMMAND,
-    )
+    let name = "cold_start_to_api_ready";
+    let target = "≤ 1 s（到本地 API ready）";
+    let unverified = |reason: String| {
+        MeasureItem::new(name, FormFactor::Headless, target)
+            .with_method("spawn 同目录 bod serve --listen 127.0.0.1:0 --json，等待 ready 行后 TCP 连接；不执行会话握手")
+            .unverified(reason, BENCH_COMMAND)
+    };
+
+    let Ok(exe) = std::env::current_exe() else {
+        return unverified("读不到当前可执行文件，无法定位 bod serve".to_string());
+    };
+    let candidates = [exe.with_file_name("bod"), exe.with_file_name("bod.exe")];
+    let Some(binary) = candidates.into_iter().find(|path| path.is_file()) else {
+        return unverified(format!(
+            "{} 旁边没有 bod/bod.exe，bench 不能冒充宿主已就绪",
+            exe.display()
+        ));
+    };
+    let descriptor = std::env::temp_dir().join(format!(
+        "bod-api-ready-{}-{}.endpoint.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let started = Instant::now();
+    let mut child = match std::process::Command::new(&binary)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--descriptor",
+            &descriptor.to_string_lossy(),
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => return unverified(format!("spawn bod serve 失败：{err}")),
+    };
+    let stdout = child.stdout.take().expect("已请求 piped stdout");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .map(|_| line);
+        let _ = sender.send(result);
+    });
+    let ready_line = match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(line)) => line,
+        Ok(Err(err)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return unverified(format!("读取 ready 行失败：{err}"));
+        }
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return unverified(format!("5 s 内没有 ready 行：{err}"));
+        }
+    };
+    let address = serde_json::from_str::<serde_json::Value>(&ready_line)
+        .ok()
+        .and_then(|value| value.get("address")?.as_str().map(str::to_string));
+    let Some(address) = address else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return unverified(format!("ready 行不含可解析 address：{ready_line}"));
+    };
+    let connect = address
+        .parse::<std::net::SocketAddr>()
+        .map_err(|err| err.to_string())
+        .and_then(|socket| {
+            std::net::TcpStream::connect_timeout(&socket, std::time::Duration::from_secs(1))
+                .map_err(|err| err.to_string())
+        });
+    let ready_ms = ms(started.elapsed());
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&descriptor);
+    match connect {
+        Ok(_) => MeasureItem::new(name, FormFactor::Headless, target)
+            .with_method("spawn 同目录 bod serve --listen 127.0.0.1:0 --json，等待 ready 行后 TCP 连接；不执行会话握手")
+            .with_note("只到监听就绪；受保护握手、业务 API 与 Web 可见性分别由其它用例覆盖")
+            .with_numeric(ready_ms)
+            .measured(
+                format!("spawn→ready→connect {ready_ms:.1} ms（{address}）"),
+                1,
+                BENCH_COMMAND,
+                verdict(ready_ms, 1_000.0),
+            ),
+        Err(err) => unverified(format!("ready 后 TCP 连接失败：{err}")),
+    }
 }
 
 /// 关键事务延迟：单条写事务（含 WAL + synchronous=FULL 提交）。
 fn transaction_latency(root: &Path) -> Result<MeasureItem, String> {
     let path = root.join("tx.sqlite");
-    let mut store =
-        SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
-    let mut samples = Vec::with_capacity(200);
-    for index in 0..200 {
+    let mut store = open_store(&path)?;
+    let mut samples = Vec::with_capacity(500);
+    for index in 0..500 {
         let started = Instant::now();
         let uow = store.transaction().map_err(|err| err.to_string())?;
         uow.put_queue(&WorkQueueEntry::new(
@@ -142,7 +257,7 @@ fn transaction_latency(root: &Path) -> Result<MeasureItem, String> {
         FormFactor::Headless,
         "p99 ≤ 10 ms",
     )
-    .with_method("200 次单条写事务（BEGIN IMMEDIATE + 一次 INSERT + COMMIT），WAL/synchronous=FULL；单连接串行，无并发争用")
+    .with_method("500 次单条写事务（BEGIN IMMEDIATE + 一次 INSERT + COMMIT），WAL/synchronous=FULL、cache_size=-65536 KiB、temp_store=MEMORY；单连接串行，无并发争用")
     .with_note("串行单写线程口径；多进程争用下的排队等待未覆盖")
     .with_numeric(ms(p99))
     .measured(
@@ -161,8 +276,7 @@ fn transaction_latency(root: &Path) -> Result<MeasureItem, String> {
 /// 事件写入吞吐（批量事务）：与尾延迟分开结论。
 fn event_throughput(root: &Path, entries: usize) -> Result<MeasureItem, String> {
     let path = root.join("throughput.sqlite");
-    let mut store =
-        SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
+    let mut store = open_store(&path)?;
     let started = Instant::now();
     let uow = store.transaction().map_err(|err| err.to_string())?;
     for index in 0..entries {
@@ -201,8 +315,7 @@ fn event_throughput(root: &Path, entries: usize) -> Result<MeasureItem, String> 
 /// 逐条持久化吞吐：每次都提交，代表"每条事件都要落盘"的口径。
 fn durable_event_throughput(root: &Path, entries: usize) -> Result<MeasureItem, String> {
     let path = root.join("durable.sqlite");
-    let mut store =
-        SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
+    let mut store = open_store(&path)?;
     let started = Instant::now();
     for index in 0..entries {
         let uow = store.transaction().map_err(|err| err.to_string())?;
@@ -239,8 +352,7 @@ fn durable_event_throughput(root: &Path, entries: usize) -> Result<MeasureItem, 
 /// 队列扫描与就绪候选选择成本。
 fn queue_selection(root: &Path, entries: usize) -> Result<MeasureItem, String> {
     let path = root.join("queue.sqlite");
-    let mut store =
-        SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
+    let mut store = open_store(&path)?;
     let uow = store.transaction().map_err(|err| err.to_string())?;
     for index in 0..entries {
         uow.put_queue(&WorkQueueEntry::new(
@@ -252,8 +364,12 @@ fn queue_selection(root: &Path, entries: usize) -> Result<MeasureItem, String> {
     }
     uow.commit().map_err(|err| err.to_string())?;
 
-    let mut samples = Vec::new();
-    for _ in 0..50 {
+    // 预热后再计时：首次全表读取要把页装入缓存，混入 p99 会放大两阶段差异。
+    for _ in 0..20 {
+        let _ = store.list_queue(COMPANY).map_err(|err| err.to_string())?;
+    }
+    let mut samples = Vec::with_capacity(200);
+    for _ in 0..200 {
         let started = Instant::now();
         let rows = store.list_queue(COMPANY).map_err(|err| err.to_string())?;
         if rows.len() != entries {
@@ -273,9 +389,9 @@ fn queue_selection(root: &Path, entries: usize) -> Result<MeasureItem, String> {
         "1000 就绪候选 p99 ≤ 20 ms",
     )
     .with_method(format!(
-        "{entries} 条 work_queue 全量读取（含 50 次重复），页缓存热态，单连接"
+        "{entries} 条 work_queue 全量读取；20 次预热后计时 200 次，页缓存热态，单连接，cache_size=-65536 KiB"
     ))
-    .with_note("全量扫描而非分页；超过 1000 条后的线性增长需要另行测量")
+    .with_note("全量扫描而非分页；p99 取 200 次样本，超过 1000 条后的线性增长需要另行测量")
     .with_numeric(ms(p99))
     .measured(
         format!(
@@ -293,8 +409,7 @@ fn queue_selection(root: &Path, entries: usize) -> Result<MeasureItem, String> {
 /// 10 万事件后的重启就绪时间。
 fn restart_after_events(root: &Path, events: usize) -> Result<MeasureItem, String> {
     let path = root.join("events.sqlite");
-    let mut store =
-        SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
+    let mut store = open_store(&path)?;
     let started = Instant::now();
     let uow = store.transaction().map_err(|err| err.to_string())?;
     for index in 0..events {
@@ -309,14 +424,21 @@ fn restart_after_events(root: &Path, events: usize) -> Result<MeasureItem, Strin
     }
     uow.commit().map_err(|err| err.to_string())?;
     let seed = started.elapsed();
+    // 不把未 checkpoint 的 WAL 残留算进“重开就绪”；两阶段都按同一稳态口径。
+    checkpoint(&path)?;
     drop(store);
 
-    let started = Instant::now();
-    let reopened =
-        SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
-    let ready = started.elapsed();
-    let counts = reopened.core_row_counts().map_err(|err| err.to_string())?;
-    drop(reopened);
+    let mut samples = Vec::with_capacity(5);
+    let mut counts = None;
+    for _ in 0..5 {
+        let started = Instant::now();
+        let reopened = open_store(&path)?;
+        samples.push(ms(started.elapsed()));
+        counts = Some(reopened.core_row_counts().map_err(|err| err.to_string())?);
+        drop(reopened);
+    }
+    let ready = median_f64(&mut samples);
+    let counts = counts.expect("至少重开一次");
 
     Ok(MeasureItem::new(
         "restart_after_100k_events",
@@ -324,29 +446,32 @@ fn restart_after_events(root: &Path, events: usize) -> Result<MeasureItem, Strin
         "10 万事件后重启 ready ≤ 3 s",
     )
     .with_method(format!(
-        "单事务写入 {events} 条 events 后关闭连接，重新打开同一文件库并读取行数（issues={}）",
+        "单事务写入 {events} 条 events → WAL TRUNCATE checkpoint → 关闭连接 → 重开 5 次取中位数并读取行数（issues={}）；cache_size=-65536 KiB",
         counts.issues
     ))
-    .with_note("当前无事件回放投影，重开只应用幂等迁移；接入投影后必须重测")
-    .with_numeric(ms(ready))
+    .with_note("当前无事件回放投影，重开只应用幂等迁移；重复重开使用同一文件，页缓存可能偏热，接入投影后必须重测")
+    .with_numeric(ready)
     .measured(
         format!(
-            "{events} 事件写入 {:.0} ms；重开就绪 {:.0} ms",
+            "{events} 事件写入 {:.0} ms；5 次重开中位就绪 {:.0} ms",
             ms(seed),
-            ms(ready)
+            ready
         ),
-        1,
+        samples.len(),
         BENCH_COMMAND,
-        verdict(ms(ready), TARGET_RESTART_MS),
+        verdict(ready, TARGET_RESTART_MS),
     ))
 }
 
 /// 空闲循环单次成本：队列扫描 + 租约到期检查 + outbox 状态查询。
 fn idle_tick(root: &Path) -> Result<MeasureItem, String> {
     let path = root.join("idle.sqlite");
-    let store = SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
-    let mut samples = Vec::new();
-    for _ in 0..100 {
+    let store = open_store(&path)?;
+    for _ in 0..50 {
+        let _ = store.list_queue(COMPANY).map_err(|err| err.to_string())?;
+    }
+    let mut samples = Vec::with_capacity(1_000);
+    for _ in 0..1_000 {
         let started = Instant::now();
         let _ = store.list_queue(COMPANY).map_err(|err| err.to_string())?;
         let _ = store
@@ -366,7 +491,7 @@ fn idle_tick(root: &Path) -> Result<MeasureItem, String> {
         FormFactor::Headless,
         "无冻结目标（§38.2 只约束 RSS/CPU 占比）",
     )
-    .with_method("空库上空转 100 次：队列读取 + outbox Prepared 查询 + open 对账案件查询")
+    .with_method("空库上预热 50 次后空转 1000 次：队列读取 + outbox Prepared 查询 + open 对账案件查询；cache_size=-65536 KiB")
     .with_note("单次成本低不等于空闲 CPU 占比达标；轮询周期与唤醒机制需另行测量")
     .with_numeric(ms(p99))
     .measured(
@@ -453,16 +578,73 @@ fn idle_rss() -> MeasureItem {
     }
 }
 
-fn idle_cpu_ratio() -> MeasureItem {
+/// Linux `/proc/self/stat` 的 utime+stime，单位 tick；本探针按常见 USER_HZ=100 换算。
+fn process_cpu_ticks() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let fields: Vec<&str> = text.rsplit_once(')')?.1.split_whitespace().collect();
+    // 右括号后第一项是 state（field 3），故 utime 是 field 14 → index 11。
+    let utime = fields.get(11)?.parse::<u64>().ok()?;
+    let stime = fields.get(12)?.parse::<u64>().ok()?;
+    Some(utime + stime)
+}
+
+/// 本地空闲循环 CPU 占比探针：连续执行 idle_tick 语义并观察进程 CPU 时间。
+///
+/// 这不是“真实宿主 60 s 空闲守护进程”的替代测量；报告中必须保留此限制。
+fn idle_cpu_ratio(root: &Path) -> MeasureItem {
+    let Some(before) = process_cpu_ticks() else {
+        return MeasureItem::new(
+            "idle_cpu_ratio",
+            FormFactor::Headless,
+            "无冻结数值；§38.2 要求空闲时无模型调用与热轮询",
+        )
+        .with_method("需要进程 CPU 时间计数器；非 Linux 或无 /proc 时如实留空")
+        .unverified(
+            "当前平台读不到 /proc/self/stat 的进程 CPU 时间，不能用 idle_tick_cost 反推",
+            BENCH_COMMAND,
+        );
+    };
+    let path = root.join("idle-cpu.sqlite");
+    let Ok(store) = open_store(&path) else {
+        return MeasureItem::new(
+            "idle_cpu_ratio",
+            FormFactor::Headless,
+            "无冻结数值；§38.2 要求空闲时无模型调用与热轮询",
+        )
+        .with_method("连续执行 idle_tick 语义并读取 /proc/self/stat 的 utime+stime")
+        .unverified("空闲探针临时库无法建立，CPU 占比未测", BENCH_COMMAND);
+    };
+    let started = Instant::now();
+    for _ in 0..2_000 {
+        let _ = store.list_queue(COMPANY);
+        let _ = store.list_outbox_by_status(crate::domain::queue::EffectStatus::Prepared);
+        let _ = store.list_reconciliation_cases(COMPANY, true);
+    }
+    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
+    let Some(after) = process_cpu_ticks() else {
+        return MeasureItem::new(
+            "idle_cpu_ratio",
+            FormFactor::Headless,
+            "无冻结数值；§38.2 要求空闲时无模型调用与热轮询",
+        )
+        .with_method("连续执行 idle_tick 语义并读取 /proc/self/stat 的 utime+stime")
+        .unverified("观测窗口结束时读不到 CPU 时间，未取得读数", BENCH_COMMAND);
+    };
+    let cpu_seconds = (after.saturating_sub(before)) as f64 / 100.0;
+    let ratio_pct = cpu_seconds / elapsed * 100.0;
     MeasureItem::new(
         "idle_cpu_ratio",
         FormFactor::Headless,
         "无冻结数值；§38.2 要求空闲时无模型调用与热轮询",
     )
-    .with_method("需要进程 CPU 时间计数器与固定观测窗口（≥60 s）")
-    .unverified(
-        "已测 idle_tick_cost 作为单次成本下界，但空闲 CPU 占比未取得实测",
+    .with_method("连续 2000 次 idle_tick 语义（队列/outbox/对账查询）期间读 /proc/self/stat 的 utime+stime；按 USER_HZ=100 估算")
+    .with_note("这是 bench 内连续空转的 CPU 占比上界，不等于真实宿主空闲守护进程 60 s 占比；不得据此宣称空闲目标达标")
+    .with_numeric(ratio_pct)
+    .measured(
+        format!("CPU {:.1}% / 窗口 {:.3} s", ratio_pct, elapsed),
+        2_000,
         BENCH_COMMAND,
+        None,
     )
 }
 
@@ -490,8 +672,51 @@ fn package_size() -> MeasureItem {
     }
 }
 
-fn web_and_shell_gaps() -> Vec<MeasureItem> {
+/// Web 侧本地投影探针：只计只读事实装配 + 首页投影，不冒充浏览器渲染可见。
+fn web_projection_probe(root: &Path) -> MeasureItem {
+    let path = root.join("web-projection.sqlite");
+    let Ok(store) = open_store(&path) else {
+        return MeasureItem::new(
+            "web_projection_p95",
+            FormFactor::Web,
+            "无冻结目标（本地投影，非渲染可见）",
+        )
+        .with_method("空库上预热后调用 home_from_store 200 次取 p95")
+        .unverified("本地投影临时库无法建立", BENCH_COMMAND);
+    };
+    for _ in 0..20 {
+        let _ =
+            crate::workbench_projection::home_from_store(&store, COMPANY, "proj-web-projection");
+    }
+    let mut samples = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let started = Instant::now();
+        let _ =
+            crate::workbench_projection::home_from_store(&store, COMPANY, "proj-web-projection");
+        samples.push(started.elapsed());
+    }
+    let p95 = percentile(&mut samples, 0.95);
+    MeasureItem::new(
+        "web_projection_p95",
+        FormFactor::Web,
+        "无冻结目标（本地投影，非渲染可见）",
+    )
+    .with_method(
+        "空库上预热 20 次后调用 home_from_store 200 次取 p95；只读事实装配，不含传输与浏览器渲染",
+    )
+    .with_note("state_to_web_visible_p95 仍需真实 Web 宿主，不能用本地投影数字替代")
+    .with_numeric(ms(p95))
+    .measured(
+        format!("本地首页投影 p95 {:.3} ms", ms(p95)),
+        samples.len(),
+        BENCH_COMMAND,
+        None,
+    )
+}
+
+fn web_and_shell_gaps(root: &Path) -> Vec<MeasureItem> {
     vec![
+        web_projection_probe(root),
         MeasureItem::new("state_to_web_visible_p95", FormFactor::Web, "≤ 2 s")
             .with_method("需要 Web 宿主：状态变更 → 投影 → 浏览器渲染可见")
             .unverified(
@@ -558,7 +783,7 @@ fn median_f64(values: &mut [f64]) -> f64 {
 
 /// `PRAGMA quick_check`：恢复后必须先确认库没坏。
 fn quick_check(path: &Path) -> Result<String, String> {
-    let conn = rusqlite::Connection::open(path).map_err(|err| err.to_string())?;
+    let conn = raw_conn(path)?;
     conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
         .map_err(|err| err.to_string())
 }
@@ -579,8 +804,8 @@ fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
 
     let backup = root.join("recovery-backup.sqlite");
     {
-        let store =
-            SqliteStore::open(&source, &BodConfig::default()).map_err(|err| err.to_string())?;
+        checkpoint(&source)?;
+        let store = open_store(&source)?;
         store
             .vacuum_into(&backup.to_string_lossy())
             .map_err(|err| err.to_string())?;
@@ -590,7 +815,7 @@ fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
     let mut reopen = Vec::new();
     let mut verify = Vec::new();
     let mut checked_rows = 0i64;
-    for round in 0..3 {
+    for round in 0..5 {
         let restored = root.join(format!("recovery-restored-{round}.sqlite"));
         let _ = std::fs::remove_file(&restored);
 
@@ -601,8 +826,7 @@ fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
 
         // 内部阶段一：打开并应用迁移（幂等检查）。
         let started = Instant::now();
-        let store =
-            SqliteStore::open(&restored, &BodConfig::default()).map_err(|err| err.to_string())?;
+        let store = open_store(&restored)?;
         reopen.push(ms(started.elapsed()));
 
         // 内部阶段二：行数校验 + 完整性检查。
@@ -642,7 +866,7 @@ fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
         "10 万事件后恢复 RTO ≤ 60 s",
     )
     .with_method(format!(
-        "VACUUM INTO 备份 → 复制到新路径 → 重开（含迁移幂等检查）→ quick_check + 行数校验；3 轮取各阶段中位数（invocations={checked_rows}）"
+        "源库 WAL TRUNCATE checkpoint → VACUUM INTO 备份 → 复制到新路径 → 重开（含迁移幂等检查）→ quick_check + 行数校验；5 轮取各阶段中位数（invocations={checked_rows}）"
     ))
     .with_note(format!(
         "总 RTO {:.0} ms 中外部复制占 {:.0} ms（{:.0}%）：换盘或换机后主要变化在外部这一段，内部恢复 {:.0} ms",
@@ -660,7 +884,7 @@ fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
             reading.phases[1].millis,
             reading.phases[2].millis
         ),
-        3,
+        5,
         BENCH_COMMAND,
         meets,
     );
@@ -673,7 +897,7 @@ fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
 
 /// §38.2 事务 p99 目标，复用于争用判定。
 const CONTENTION_WRITERS: [usize; 4] = [1, 2, 4, 8];
-const CONTENTION_TX_PER_WRITER: usize = 40;
+const CONTENTION_TX_PER_WRITER: usize = 80;
 
 fn is_busy(err: &StoreError) -> bool {
     matches!(
@@ -702,20 +926,23 @@ fn write_contention(root: &Path) -> Result<(MeasureItem, ContentionRun), String>
     let path = root.join("contention.sqlite");
     // 先建库，避免把首次迁移算进第一个写者的延迟。
     {
-        let _store =
-            SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
+        let _store = open_store(&path)?;
     }
 
     let mut samples = Vec::new();
     let mut throughput = Vec::new();
-    let mut total_transactions = 0usize;
+    // 样本数按“配置发起的事务数”固定；实际成功数与 Busy 在 detail 中分开报告。
+    let total_transactions = CONTENTION_WRITERS
+        .iter()
+        .map(|writers| writers * CONTENTION_TX_PER_WRITER)
+        .sum::<usize>();
     for writers in CONTENTION_WRITERS {
         // 连接**顺序**建好再交给线程：并发 open 会走 journal_mode/迁移路径，
         // 那部分锁竞争不属于被测事务，混进来会把 Busy 记错。
         let mut stores = Vec::with_capacity(writers);
         for _ in 0..writers {
             stores.push(
-                SqliteStore::open(&path, &BodConfig::default())
+                open_store(&path)
                     .map_err(|err| format!("并发写者连接建立失败（{writers} 写者）：{err}"))?,
             );
         }
@@ -789,7 +1016,6 @@ fn write_contention(root: &Path) -> Result<(MeasureItem, ContentionRun), String>
             ));
         }
 
-        total_transactions += all.len();
         let p99_us = percentile_us(&mut all, 0.99);
         let count = all.len();
         samples.push(ContentionSample {
@@ -826,7 +1052,7 @@ fn write_contention(root: &Path) -> Result<(MeasureItem, ContentionRun), String>
         "p99 增长 ≤ 25%",
     )
     .with_method(format!(
-        "顺序建立 {} 个独立连接（并发 open 的锁竞争不计入），每个做 {CONTENTION_TX_PER_WRITER} 次单条写事务（BEGIN IMMEDIATE + commit，busy_timeout 取 BodConfig 默认值）",
+        "顺序建立 {} 个独立连接（并发 open 的锁竞争不计入），共配置 {total_transactions} 次单条写事务（BEGIN IMMEDIATE + commit，busy_timeout 取 BodConfig 默认值）；samples 记配置发起数，实际成功与 Busy 分开报告",
         CONTENTION_WRITERS
             .iter()
             .map(|count| count.to_string())
@@ -891,10 +1117,11 @@ fn volume_and_rebuild(
     if !path.exists() {
         return Err("没有 10 万事件样本库，体积与重建成本未测".to_string());
     }
+    checkpoint(&path)?;
     let db_bytes = std::fs::metadata(&path)
         .map(|meta| meta.len())
         .map_err(|err| err.to_string())?;
-    let conn = rusqlite::Connection::open(&path).map_err(|err| err.to_string())?;
+    let conn = raw_conn(&path)?;
     let page_count: i64 = conn
         .query_row("PRAGMA page_count", [], |row| row.get(0))
         .map_err(|err| err.to_string())?;
@@ -916,10 +1143,14 @@ fn volume_and_rebuild(
         .flatten()
         .map(|value| value as u64);
 
-    let started = Instant::now();
-    conn.execute_batch("REINDEX")
-        .map_err(|err| err.to_string())?;
-    let rebuild_ms = ms(started.elapsed());
+    let mut rebuild_samples = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let started = Instant::now();
+        conn.execute_batch("REINDEX")
+            .map_err(|err| err.to_string())?;
+        rebuild_samples.push(ms(started.elapsed()));
+    }
+    let rebuild_ms = median_f64(&mut rebuild_samples);
 
     // events 上有 UNIQUE(aggregate_id, aggregate_version) 自动索引：用聚合列当"未索引"对照会失真。
     // 这里用真正没有索引的 payload 列做全表扫描，与主键等值查询对比。
@@ -979,12 +1210,14 @@ fn volume_and_rebuild(
         FormFactor::Headless,
         "重建预算 10 s",
     )
-    .with_method("对 10 万事件库执行 REINDEX（全索引重建）一次并计时")
+    .with_method(
+        "对 10 万事件库执行 REINDEX（全索引重建）5 次取中位数；测量前先 WAL TRUNCATE checkpoint",
+    )
     .with_note("重建成本随行数与索引数线性增长；跨机器比较必须同数据规模")
     .with_numeric(rebuild_ms)
     .measured(
-        format!("{rebuild_ms:.0} ms"),
-        1,
+        format!("{rebuild_ms:.0} ms（5 次中位）"),
+        rebuild_samples.len(),
         BENCH_COMMAND,
         Some(rebuild_ms <= BUDGET_REBUILD_MS),
     );
@@ -1000,7 +1233,7 @@ fn volume_and_rebuild(
         "无冻结目标（判断索引优化空间）",
     )
     .with_method(
-        "同一张 events 表：payload（无索引，LIKE 全表扫描）vs event_id（主键等值），各 5 次取中位数",
+        "同一张 events 表：payload（无索引，LIKE 全表扫描）vs event_id（主键等值），各 50 次取中位数",
     )
     .with_note(format!(
         "两者差 {factor:.1} 倍：{:?}；events 的 aggregate_id 已有 UNIQUE 自动索引，不能拿它当「未索引」对照",
@@ -1013,7 +1246,7 @@ fn volume_and_rebuild(
             unindexed_lookup_us as f64 / 1_000.0,
             indexed_lookup_us as f64 / 1_000.0
         ),
-        5,
+        50,
         BENCH_COMMAND,
         None,
     );
@@ -1026,8 +1259,8 @@ fn volume_and_rebuild(
 }
 
 fn timed_lookup(conn: &rusqlite::Connection, sql: &str, value: &str) -> Result<u128, String> {
-    let mut samples = Vec::with_capacity(5);
-    for _ in 0..5 {
+    let mut samples = Vec::with_capacity(50);
+    for _ in 0..50 {
         let started = Instant::now();
         let _count: i64 = conn
             .query_row(sql, rusqlite::params![value], |row| row.get(0))
@@ -1078,8 +1311,11 @@ fn executor_slots(run: &ContentionRun) -> (Vec<MeasureItem>, SlotReading, SlotVe
         "同一批写事务在 1 与 {widest} 个并发连接下的每秒完成数（共 {} 次事务）",
         run.transactions
     ))
-    .with_note(format!("{label}；样本来自 {}", run.samples.len()))
-    .with_numeric(gain * 100.0)
+    .with_note(format!(
+        "{label}；样本来自 {}；跨阶段标量用最宽写者绝对吞吐，避免收益比例在接近零分母时失真",
+        run.samples.len()
+    ))
+    .with_numeric(saturated)
     .measured(
         format!(
             "单写 {single:.0} txn/s → {widest} 写者 {saturated:.0} txn/s（收益 {:.0}%）",
@@ -1125,7 +1361,7 @@ fn environment(environment_note_text: &str, data_scale: &str) -> EnvironmentReco
         ),
         sqlite_sync: "WAL + synchronous=FULL + BEGIN IMMEDIATE（BodConfig::default）".to_string(),
         data_scale: data_scale.to_string(),
-        cache_state: "冷缓存：每次运行新建临时库；仅队列候选读取为页缓存热态".to_string(),
+        cache_state: "每次运行新建临时库；统一 cache_size=-65536 KiB 与 temp_store=MEMORY；重启/恢复/体积前做 WAL TRUNCATE checkpoint；队列与 Web 投影预热后计时".to_string(),
     }
 }
 
@@ -1196,15 +1432,15 @@ pub fn run_detailed(environment_note: &str, commit: &str) -> Result<BenchOutput,
     items.extend(slot_items);
 
     items.push(idle_tick(&root)?);
-    items.push(idle_cpu_ratio());
+    items.push(idle_cpu_ratio(&root));
     items.push(package_size());
-    items.extend(web_and_shell_gaps());
+    items.extend(web_and_shell_gaps(&root));
 
     let baseline = BaselineReport {
         environment: environment(
             environment_note,
             &format!(
-                "200 单条事务 + 5000 批量事件 + 200 逐条持久化事件 + 1000 就绪候选 + {events} 事件重启 + 恢复 3 轮 + 争用 1/2/4/8 写者 × {CONTENTION_TX_PER_WRITER} 事务"
+                "500 单条事务 + 5000 批量事件 + 200 逐条持久化事件 + 1000 就绪候选 + {events} 事件 checkpoint 后重开 5 次 + 恢复 5 轮 + 争用 1/2/4/8 写者 × {CONTENTION_TX_PER_WRITER} 事务 + 重建 5 次/查询各 50 次"
             ),
         ),
         commit: commit.to_string(),
@@ -1238,6 +1474,7 @@ mod tests {
             "key_transaction_latency",
             "event_throughput_batched",
             "queue_selection_1000",
+            "web_projection_p95",
             "state_to_web_visible_p95",
             "restart_after_100k_events",
             "package_size_headless",
@@ -1256,9 +1493,14 @@ mod tests {
                 "storage_volume_100k_events",
                 "idle_tick_cost",
                 "idle_cpu_ratio",
+                "web_projection_p95",
                 "package_size_headless",
             ];
-            names.extend(web_and_shell_gaps().iter().map(|item| item.name));
+            let root = std::env::temp_dir()
+                .join(format!("bod-perf-web-probe-test-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&root);
+            names.extend(web_and_shell_gaps(&root).iter().map(|item| item.name));
+            let _ = std::fs::remove_dir_all(&root);
             names
         };
         for name in required {
@@ -1278,20 +1520,30 @@ mod tests {
         assert!(record.build_params.contains("debug_assertions"));
         assert!(record.sqlite_sync.contains("synchronous=FULL"));
         assert_eq!(record.data_scale, "测试规模");
-        assert!(record.cache_state.contains("冷"));
+        assert!(record.cache_state.contains("cache_size=-65536 KiB"));
         assert!(record.diff(&record).is_empty());
     }
 
-    /// 1.2：分形态项各自成组，headless 之外一律未测。
+    /// 1.2：分形态项各自成组；真正的缺口仍未测，本地投影探针单独可测但不冒充渲染可见。
     #[test]
     fn task_1_2_gap_items_are_all_unverified_and_per_form_factor() {
-        let items = web_and_shell_gaps();
+        let root = tempdir().expect("临时目录");
+        let items = web_and_shell_gaps(&root);
+        let gaps: Vec<_> = items
+            .iter()
+            .filter(|item| item.name != "web_projection_p95")
+            .collect();
         assert!(
-            items
-                .iter()
+            gaps.iter()
                 .all(|item| item.status == MeasureStatus::Unverified)
         );
-        assert!(items.iter().all(|item| item.failure_reason.is_some()));
+        assert!(gaps.iter().all(|item| item.failure_reason.is_some()));
+        let projection = items
+            .iter()
+            .find(|item| item.name == "web_projection_p95")
+            .expect("本地 Web 投影探针应在清单中");
+        assert_eq!(projection.status, MeasureStatus::Measured);
+        assert!(projection.failure_reason.is_none());
         assert!(items.iter().all(|item| !item.command.is_empty()));
         assert!(
             items.iter().any(|item| item.form_factor == FormFactor::Web),
@@ -1330,7 +1582,7 @@ mod tests {
 
         let tx = transaction_latency(temp.as_path()).expect("事务延迟应可测");
         assert_eq!(tx.name, "key_transaction_latency");
-        assert_eq!(tx.samples, 200, "尾延迟要有样本数");
+        assert_eq!(tx.samples, 500, "尾延迟要有样本数");
     }
 
     fn tempdir() -> Result<PathBuf, String> {

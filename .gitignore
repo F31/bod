@@ -52,3 +52,4 @@ drills/
 
 # 文档与规格手册只保留在本机，不进入版本库（含 reports / spec-notes / 方案文档）
 docs/
+/tmp/

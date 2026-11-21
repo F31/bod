@@ -1,0 +1,17 @@
+{
+  "case": "reopen",
+  "source_suite": "product_feedback",
+  "company_id": "company-default",
+  "project_id": "project-1",
+  "issue_id": "issue-1",
+  "revision": 4,
+  "lead": "lead-1",
+  "executor": "agent-1",
+  "card_key": "approve",
+  "receipt_ids": ["rcp-failed", "rcp-unconfirmed", "rcp-confirmed"],
+  "now": "2026-11-21T10:00:00Z",
+  "later": "2026-11-22T10:00:00Z",
+  "card_expires_at": "2026-11-21T12:00:00Z",
+  "evidence_digest": "sha256:original-evidence",
+  "expected": "failed_unconfirmed_confirmed_have_distinct_states_and_reopen_keeps_original_evidence"
+}

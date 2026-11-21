@@ -1,0 +1,12 @@
+{
+  "case": "backlog_only",
+  "source_suite": "product_feedback",
+  "feedback_id": "req-1",
+  "text": "请直接发布生产版本",
+  "field": "release",
+  "profile_id": "backlog",
+  "base_revision": 1,
+  "policy_actor": "lead-1",
+  "now": "2026-11-21T10:00:00Z",
+  "expected": "candidate_backlog_accepted_without_run_and_production_release_requires_separate_authorization"
+}

@@ -1,0 +1,19 @@
+{
+  "case": "receipt_scope",
+  "source_suite": "intake_experience",
+  "company_id": "company-1",
+  "project_id": "project-1",
+  "internal_viewer": "internal-lead",
+  "customer_viewer": "external-a",
+  "customers": ["cust-a", "cust-b"],
+  "record_ids": ["rcp-a", "rcp-b", "rcp-internal"],
+  "entry_url": "https://bod.local/r/rcp-a",
+  "summary": "修复已提供，客户环境待核实",
+  "code": "fn internal_code() {}",
+  "log": "internal stack trace",
+  "attachment": "internal.png",
+  "artifact_id": "verification-detail",
+  "artifact_revision": 3,
+  "artifact_digest": "sha256:verify",
+  "expected": "internal_card_shows_verification_details_customer_card_only_public_basis"
+}
