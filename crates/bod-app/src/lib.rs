@@ -32,6 +32,7 @@ pub mod descriptor_schema;
 pub mod durable_process;
 pub mod effect_reconciliation;
 pub mod effect_recovery;
+pub mod extension_sdk;
 pub mod fake_executor;
 pub mod fault_matrix;
 pub mod feedback_knowledge;

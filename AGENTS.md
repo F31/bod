@@ -360,6 +360,23 @@
   验收需要真实多主体（成员 + Agent + 客户 + 连接器）与真实网关，机器不能生成；
   P5 的 I/G 绑定（G-13/G-21/G-22/G-25、I-14/I-19/I-23/I-44）全部保持 planned。
   P4 的 I/G 绑定**全部保持 planned**。
+- **P6 进行中（2026-11-21）**：`openspec/changes/p6-open-extension` 任务 1.1—1.6 已勾选，
+  2.x—5.x 未开始（2.8 需双机真实环境、4.6 需真实 iOS/Android 设备）。
+  `bod-app::extension_sdk` 承接第三方适配的接入边界：描述符带版本/平台/schema 版本/能力分项与
+  限制，握手先判协议版本再逐项判必需能力与证据门槛，**拒绝只作用于新扩展任务**（缺 `Delegation`
+  的旧适配器仍走原本地路径）；安装按「版本 → digest → 来源 → 许可证 → 协议 → schema → fixture →
+  内嵌密钥 → conformance」顺序判，没有该 schema 版本的 fixture 一律拒装，"能解析"不等于"我们测过"；
+  无 conformance 报告只可 `Experimental`，不进调度候选、不标 Supported，报告张冠李戴按
+  `ReportAdapterMismatch` 拒装；四级证据 `SelfReported < Probed < ContractTested < RealTask`
+  不等价，三项安全项（身份/授权/消息完整性）任一失败即 `Unsupported` 并禁用派发，降级徽章不豁免
+  （`invariant_i_57`），界面徽章与 `dispatch_enabled` 同出 `view_for`；工具清单摘要排序去重后比对，
+  可执行摘要/清单/`schema` 任一变化即 `Required`，旧批准不沿用；出站材料按项目/范围/接收方/账号
+  四项比对，无决定即 `ZeroDelivery`，扩大范围必走 `NeedsDecision`，审计只留引用与摘要（SB06）；
+  `support_claim` 让"支持声明"成为机器可检结构——确定版本 + 具体平台 + 对应报告，自报级只能说
+  自己是自报级。11 条命名用例 + 6 条漂移检查，说明见 `docs/spec-notes/p6-sdk.md`。
+  **P6 的 I/G 绑定（G-19/G-23/G-34/G-46/G-47、`invariant_i_15`/`invariant_i_57`）保持 planned**：
+  `Supported` 只表示该适配器自己的闸门用例全绿，Fake Executor 即使跑通自己的套件也照样
+  `is_production_capable() == false`，自测报告不是生产能力，支持矩阵不因此升 Supported。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 
