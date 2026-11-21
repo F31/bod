@@ -249,6 +249,10 @@ pub struct Route<S> {
 
 /// 匹配结果。`MethodMismatch` 对外仍是 404（与既有行为一致），
 /// 但对内分开表示，便于将来加 405 与日志统计。
+///
+/// 注意 `MethodMismatch` 的触发面比「字面路径存在」更宽：只要该路径被
+/// **静态模式占用**，即使另有参数模式能匹配、且方法相符，也算方法不符。
+/// 理由见 `match_route` 的第一步。
 pub enum Match<'a, S> {
     Found {
         route: &'a Route<S>,
@@ -327,16 +331,50 @@ fn match_pattern(pattern: &'static str, path: &str) -> Option<Vec<(&'static str,
     Some(params)
 }
 
-/// 匹配路由。**静态优先，与注册顺序无关**——两遍扫描。
+/// 模式里是否含参数段。
+fn is_parameterized(pattern: &str) -> bool {
+    pattern.contains('{')
+}
+
+/// 匹配路由。**路径归属优先于方法，静态优先于参数**——三步，顺序即契约。
+///
+/// 1. **静态模式占用路径即定归属**：命中静态模式且方法相符就返回；方法不符
+///    直接 `MethodMismatch`，不再尝试参数模式。
+///    否则 `POST /delivery-tracking/imports` 与 `GET /delivery-tracking/{id}`
+///    并存时，`GET /delivery-tracking/imports` 会被解析成「查 id=imports」，
+///    把**方法错误伪装成数据不存在**——客户端会去查数据，而不是改方法。
+/// 2. 路径没被静态占用，才进参数模式。
+/// 3. 都没命中：有任一模式能匹配该路径则 `MethodMismatch`，否则 `NotFound`。
+///
+/// 「静态」与「参数」的区分按整条模式判断（含 `{` 即参数模式），不是逐段判断；
+/// 逐段会让 `/a/{x}/c` 与 `/a/b/{y}` 这种混排产生歧义。
 pub fn match_route<'a, S>(routes: &'a [Route<S>], request: &Request) -> Match<'a, S> {
     let method = Method::parse(&request.method);
     let path = request.path_only();
     let path_parts = segments(path);
-    let path_has_param = |pattern: &'static str| pattern.contains('{');
 
-    // 第一遍：纯静态模式，逐段全等。
+    // 第一步：静态模式。先确定「谁占了这个路径」，再看方法。
+    let mut static_owns_path = false;
     for route in routes {
-        if Some(route.method) != method || path_has_param(route.pattern) {
+        if is_parameterized(route.pattern) || match_pattern(route.pattern, path).is_none() {
+            continue;
+        }
+        static_owns_path = true;
+        if Some(route.method) == method {
+            // 静态模式的参数集必然为空，不必回读 `match_pattern` 的结果。
+            return Match::Found {
+                route,
+                params: Vec::new(),
+            };
+        }
+    }
+    if static_owns_path {
+        return Match::MethodMismatch;
+    }
+
+    // 第二步：参数模式。走到这里说明该路径没被任何静态模式占用。
+    for route in routes {
+        if !is_parameterized(route.pattern) || Some(route.method) != method {
             continue;
         }
         if let Some(params) = match_pattern(route.pattern, path) {
@@ -344,22 +382,13 @@ pub fn match_route<'a, S>(routes: &'a [Route<S>], request: &Request) -> Match<'a
         }
     }
 
-    // 第二遍：含参数的模式。
-    for route in routes {
-        if Some(route.method) != method || !path_has_param(route.pattern) {
-            continue;
-        }
-        if let Some(params) = match_pattern(route.pattern, path) {
-            return Match::Found { route, params };
-        }
-    }
-
-    // 没命中：区分「路径存在但方法不对」与「路径根本不存在」。
-    let same_path_exists = routes
-        .iter()
-        .any(|route| match_pattern(route.pattern, path).is_some())
-        && !path_parts.is_empty();
-    if same_path_exists {
+    // 第三步：区分「路径存在但方法不对」与「路径根本不存在」。
+    // 根路径不参与：它永远「存在」，报成方法不符只会掩盖真实的 404。
+    if !path_parts.is_empty()
+        && routes
+            .iter()
+            .any(|route| match_pattern(route.pattern, path).is_some())
+    {
         return Match::MethodMismatch;
     }
     Match::NotFound
@@ -456,6 +485,28 @@ mod tests {
         ]
     }
 
+    /// §11 的路径形态：**静态子资源只挂了 POST**，参数子资源挂 GET。
+    ///
+    /// 顺序刻意把参数路由放前面——若实现依赖注册顺序，这里会立刻红。
+    fn tracking_routes() -> Vec<Route<()>> {
+        vec![
+            Route {
+                method: Method::Get,
+                pattern: "/api/v1/delivery-tracking/{id}",
+                auth: Auth::Bearer("BOD_TEST_DENIED"),
+                note: "跟踪项含客户交付事实",
+                handler: ping,
+            },
+            Route {
+                method: Method::Post,
+                pattern: "/api/v1/delivery-tracking/imports",
+                auth: Auth::Bearer("BOD_TEST_DENIED"),
+                note: "导入需身份，权限与发布执行分开",
+                handler: ping,
+            },
+        ]
+    }
+
     #[test]
     fn exact_path_matches() {
         let routes = routes();
@@ -502,6 +553,66 @@ mod tests {
                 assert_eq!(route.pattern, "/api/v1/feedback-receipts/summary")
             }
             _ => panic!("静态路由应胜出"),
+        }
+    }
+
+    /// §11 的首个端点形态：静态路径归 POST，参数路径归 GET。
+    ///
+    /// 缺陷的原症状是 `GET /delivery-tracking/imports` 被
+    /// `GET /delivery-tracking/{id}` 以 `id="imports"` 吃掉——方法错误被
+    /// 伪装成「查无此跟踪项」。修好后静态路径占用即定归属，方法不符直接暴露。
+    #[test]
+    fn static_path_owned_by_another_method_is_not_captured_by_parameter_route() {
+        let routes = tracking_routes();
+        let request = Request::new("GET", "/api/v1/delivery-tracking/imports");
+        assert!(
+            matches!(match_route(&routes, &request), Match::MethodMismatch),
+            "GET 静态路径被 POST 占用时，不得回落成查 id=imports"
+        );
+        assert!(matches!(
+            dispatch(&routes, &(), "secret", request),
+            Outcome::MethodNotAllowed
+        ));
+    }
+
+    /// 同一静态路径挂了多个方法时，各自命中自己那条，互不遮蔽。
+    #[test]
+    fn same_static_path_serves_each_registered_method() {
+        let mut routes = tracking_routes();
+        routes.push(Route {
+            method: Method::Get,
+            pattern: "/api/v1/delivery-tracking/imports",
+            auth: Auth::Bearer("BOD_TEST_DENIED"),
+            note: "查询导入批次状态",
+            handler: ping,
+        });
+        for (method, path) in [
+            ("GET", "/api/v1/delivery-tracking/imports"),
+            ("POST", "/api/v1/delivery-tracking/imports"),
+        ] {
+            let request = Request::new(method, path);
+            match match_route(&routes, &request) {
+                Match::Found { route, params } => {
+                    assert_eq!(route.method.as_str(), method);
+                    assert_eq!(route.pattern, "/api/v1/delivery-tracking/imports");
+                    assert!(params.is_empty(), "静态路由不应产生参数");
+                }
+                _ => panic!("{method} {path} 应命中静态路由"),
+            }
+        }
+    }
+
+    /// 修复不能把参数路由整体关掉：路径没被静态占用时照常匹配。
+    #[test]
+    fn parameter_route_still_matches_when_no_static_pattern_owns_path() {
+        let routes = tracking_routes();
+        let request = Request::new("GET", "/api/v1/delivery-tracking/track-7");
+        match match_route(&routes, &request) {
+            Match::Found { route, params } => {
+                assert_eq!(route.pattern, "/api/v1/delivery-tracking/{id}");
+                assert_eq!(params, vec![("id", "track-7".to_string())]);
+            }
+            _ => panic!("参数路由应命中"),
         }
     }
 

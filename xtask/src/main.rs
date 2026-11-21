@@ -17,6 +17,7 @@ use std::process::ExitCode;
 
 mod cross_check;
 mod impact_sample;
+mod reach;
 mod revalidate;
 
 /// 依赖违规记录。
@@ -899,6 +900,123 @@ fn cross(args: &[String]) -> ExitCode {
     ExitCode::from(result.verdict.exit_code())
 }
 
+/// 模块可达性只读报表。成功即 0：孤岛是读数不是失败，避免变成第二个门禁。
+/// 只有 `--check` 在「新增不可达 / 原可达退化」时退 1，格式错误一律退 2。
+fn reach_command(args: &[String]) -> ExitCode {
+    let mut crate_name = "bod-app".to_string();
+    let mut top = 20usize;
+    let mut all = false;
+    let mut baseline_out: Option<String> = None;
+    let mut baseline_in: Option<String> = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        let value = args.get(index + 1).cloned();
+        match args[index].as_str() {
+            "--crate" => match value {
+                Some(text) => {
+                    crate_name = text;
+                    index += 2;
+                }
+                None => {
+                    println!("[reach] FAIL --crate 缺少参数");
+                    return ExitCode::from(2);
+                }
+            },
+            "--top" => match value.and_then(|text| text.parse::<usize>().ok()) {
+                Some(parsed) => {
+                    top = parsed;
+                    index += 2;
+                }
+                None => {
+                    println!("[reach] FAIL --top 需要一个正整数");
+                    return ExitCode::from(2);
+                }
+            },
+            "--all" => {
+                all = true;
+                index += 1;
+            }
+            "--write-baseline" => match value {
+                Some(text) => {
+                    baseline_out = Some(text);
+                    index += 2;
+                }
+                None => {
+                    println!("[reach] FAIL --write-baseline 缺少路径");
+                    return ExitCode::from(2);
+                }
+            },
+            "--check" => match value {
+                Some(text) => {
+                    baseline_in = Some(text);
+                    index += 2;
+                }
+                None => {
+                    println!("[reach] FAIL --check 缺少路径");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                println!("[reach] FAIL 未知参数 {other}");
+                println!(
+                    "[reach] 用法：reach [--crate NAME] [--top N | --all] | --write-baseline PATH | --check PATH"
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    let root = workspace_root();
+    let report = match reach::collect(&root, &crate_name) {
+        Ok(report) => report,
+        Err(err) => {
+            println!("[reach] FAIL {err}");
+            return ExitCode::from(2);
+        }
+    };
+    print!("{}", reach::render(&report, top, all));
+
+    if let Some(path) = baseline_out {
+        if let Some(parent) = Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(err) = fs::create_dir_all(parent)
+        {
+            println!("[reach] FAIL 创建目录失败：{err}");
+            return ExitCode::from(2);
+        }
+        if let Err(err) = fs::write(&path, reach::baseline_text(&report)) {
+            println!("[reach] FAIL 写入基线失败：{err}");
+            return ExitCode::from(2);
+        }
+        println!("[reach] 基线已写入 {path}");
+    }
+
+    if let Some(path) = baseline_in {
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                println!("[reach] FAIL 读不了基线 {path}：{err}");
+                return ExitCode::from(2);
+            }
+        };
+        let entries = match reach::parse_baseline(&text) {
+            Ok(entries) => entries,
+            Err(err) => {
+                println!("[reach] FAIL 基线格式错误：{err}");
+                return ExitCode::from(2);
+            }
+        };
+        let drift = reach::compare(&report, &entries);
+        print!("{}", reach::render_drift(&drift));
+        if !drift.is_clean() {
+            return ExitCode::from(1);
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
     println!("usage: xtask <command> [options]");
     println!("  verify --stage P0   G-1 依赖方向与 AGENTS.md 声明校验");
@@ -916,6 +1034,9 @@ fn print_help() {
     println!("               P3 5.2：真跑重验 + rustc 真值核对漏项 + 走一遍再次接受");
     println!("  cross [--from REV] [--to REV] | --staged | --worktree [--explain]");
     println!("               跨平台验证触发判定：退出码 0 可单平台 / 1 必须跨平台 / 2 无法判定");
+    println!("  reach [--crate NAME] [--top N | --all]   模块可达性只读报表（孤岛/仅测试）");
+    println!("  reach --write-baseline PATH              冻结当前读数作为基线");
+    println!("  reach --check PATH                       与基线比对：新增不可达或退化则退 1");
     println!("  --self-test         违例注入自测");
 }
 
@@ -1310,6 +1431,7 @@ fn main() -> ExitCode {
         [cmd, rest @ ..] if cmd == "evidence" => evidence(rest),
         // cross 的退出码 2 表示「无法判定」，不能折叠成 false/FAILURE 的 1。
         [cmd, rest @ ..] if cmd == "cross" => return cross(rest),
+        [cmd, rest @ ..] if cmd == "reach" => return reach_command(rest),
         [cmd, rest @ ..] if cmd == "impact" => impact(rest),
         [cmd, rest @ ..] if cmd == "revalidate" => revalidate(rest),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {

@@ -531,6 +531,18 @@
     只能靠读每个分支的代码才知道，而 §6 还要再加 5 个业务接口。
     拒绝码按端点保持稳定（`BOD_SHUTDOWN_DENIED` 不等于通用 `BOD_UNAUTHORIZED`），
     客户端按码分支，改码等于改契约。
+14. **禁止让参数路由吃掉已被静态路径占用的路径**：`match_route` 的判定顺序是
+    「路径归属优先于方法」——静态模式一旦匹配该路径，方法不符就报 `MethodMismatch`，
+    不再尝试参数模式。否则 `POST /delivery-tracking/imports` 与
+    `GET /delivery-tracking/{id}` 并存时，`GET /delivery-tracking/imports` 会被解析成
+    「查 id=imports」，**把方法错误伪装成数据不存在**，客户端会去查数据而不是改方法。
+    新增端点时必须检查是否存在同名的静态子资源与参数路由竞争；
+    `static_path_owned_by_another_method_is_not_captured_by_parameter_route` 锁这个行为。
+15. **禁止新增零引用模块而不登记**：新模块要么有生产调用方，要么在支持矩阵显式登记
+    `integration: planned`（写明目标切片）。`p4_coverage.rs` 那种「断言模块已在 lib.rs 注册」
+    的漂移检查**不算调用方**——它让 1,424 行的 `coverage_receipt` 在门禁全绿的同时零引用。
+    检查用 `cargo run -p xtask -- reach --check verification/reach-baseline.tsv`：
+    只对**相对基线新增**的不可达模块报警，既有孤岛不返红（它们是待接线资产或待判定沉淀）。
 
 ## 验证与完成规则
 
@@ -552,3 +564,8 @@
   不改变 `verify --stage P0` 的结论。
   注意 WSL 的边界：内核语义可信（`kill`、文件权限、symlink），但 `/mnt/e` 的文件系统与网络都是
   虚拟化的，不能当真实 Linux 服务器或 P6 2.8 双机证据。
+- **模块可达性**：`cargo run -p xtask -- reach` 输出「可达 / 仅测试 / 孤岛」三态，
+  口径是**全工作区**代码引用（`crates/*`、`apps/*`、`xtask/src`），字符串字面量与
+  `pub mod` 声明不算引用，根文件的 `pub use` 只记 re-export 不计可达。
+  它是读数不是门禁（成功即退 0）；`--check verification/reach-baseline.tsv` 才在
+  「新增不可达 / 原可达退化」时退 1。行数按逻辑行计，末尾无换行的文件比 `wc -l` 多 1。
