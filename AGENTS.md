@@ -318,7 +318,7 @@
   （`docs/reports/p4-exit-evidence.md`，结论 `blocked`，阻塞项 5.2、5.3）；支持矩阵 §10
   为 4 Unverified + 2 Planned + **0 Supported**。**5.2 与 5.3 未勾选**：一条真实业务流程的
   最终制品/环境组合、三类产品对照基线都需要真实环境与真实样本，机器不能生成。
-- **P5 进行中（2026-11-21）**：`openspec/changes/p5-team-reuse` 任务 1.1—1.6、2.1—2.7 已勾选。
+- **P5 进行中（2026-11-21）**：`openspec/changes/p5-team-reuse` 任务 1.1—1.6、2.1—2.7、3.1—3.7 已勾选。
   `bod-app::catalog_upgrade` 承接协作配置包的四段边界：安装前五道校验（确定版本 → digest →
   来源 → 许可证 → schema，再判管理员权与内嵌密钥，本地文件默认关闭）；`InstallTxn` 五阶段，
   联网下载不占写事务、候选在 `Applied` 前不执行、没预览不许批准、硬冲突挡在批准前；
@@ -336,7 +336,16 @@
   待发动作前核六项，被拦时连接器调用数为零（AZ05）；撤权停用全部 Grant、保留 Assignment 与资产、
   在途发停止请求、无法撤销的外部凭据进对账。15 条命名用例 + 4 条漂移检查，
   说明见 `docs/spec-notes/p5-permissions.md`。
-  **3.x—5.x 未开始**：反馈晋升、通道回执与出口证据需要真实多主体验收，未接入前不标 Supported；
+  `bod-app::feedback_knowledge` 承接反馈到规则的晋升：分类先判治理（发布生产/权限/密钥/预算/
+  已批准验收条件五类转独立流程，不写 Profile），「以后」「所有项目」收窄到项目而不当永久全组织；
+  提案带 `base_revision` 乐观并发，冲突保留候选且当前修订不动，旧修订摘要合并后逐字节不变
+  （`invariant_i_14`、`invariant_i_19`）；自动接受要同时满足已认证来源、允许字段、作用域上限、
+  有效期与审计，外部网页/PR 评论/工具输出/Agent 自述一律交人；发布产生新修订与新指针，
+  下一次 Attempt 钉住后不再切换，回滚是"发布旧内容的新修订"且只刷新会话、不撤账本
+  （`invariant_i_23`）；缓存只按 revision+digest 精确命中并按公司/项目/权限过滤，删除与撤权即
+  miss，Manifest 与 CAS 永不淘汰（G-48 回归）；`EvaluationRecord` 样本不足即拒、不同任务集不可比
+  （G-13）。15 条命名用例 + 5 条漂移检查，说明见 `docs/spec-notes/p5-knowledge.md`。
+  **4.x—5.x 未开始**：通道回执与出口证据需要真实多主体验收，未接入前不标 Supported；
   P5 的 I/G 绑定（G-13/G-21/G-22/G-25、I-14/I-19/I-23/I-44）全部保持 planned。
   P4 的 I/G 绑定**全部保持 planned**。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；

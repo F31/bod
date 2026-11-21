@@ -34,6 +34,7 @@ pub mod effect_reconciliation;
 pub mod effect_recovery;
 pub mod fake_executor;
 pub mod fault_matrix;
+pub mod feedback_knowledge;
 pub mod first_use;
 pub mod handoff_drill;
 pub mod handoff_event;
