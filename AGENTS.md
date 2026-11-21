@@ -455,9 +455,13 @@
   §4 预算冻结与出口（`cargo run -p xtask -- freeze [--out-dir DIR]` 连跑两轮同一测量集）：
   `compare_phases` 逐项算 `delta_pct`，容差 `PHASE_TOLERANCE_PCT=25.0` 闭区间；两轮环境或数据规模
   不一致整轮 `Incomparable` 且**任何项都不转**；只有「两阶段都 `Measured` + 在容差内」进
-  `promotable()`，其余进 `unresolved()`；零基线记 `INFINITY`（零基线加噪声不算稳）。真实结论是
-  **两平台都未冻结**（Windows 可转 10 / 超差 4，Linux 可转 7 / 超差 7），两平台都超差的 3 项是
-  `queue_selection_1000`、`recovery_rto_100k_events`、`idle_tick_cost`——**不调宽容差、不删项**，
+  `promotable()`，其余进 `unresolved()`；方法指纹（`FNV-1a(方法+samples)`）不等即归
+  `method_mismatch`，口径或样本数一变就不许跨阶段比较；零基线记 `INFINITY`（零基线加噪声不算稳）。
+  真实结论是**两平台都未冻结**（A2 加固后：Linux 可转 14 / 保留 12，Windows 可转 10 / 保留 16）。
+  逐项定位：`idle_tick_cost`（0.05 ms 量级，接近计时器噪声）、`queue_selection_1000`、
+  `write_contention_p99_growth`（Linux）；Windows 另加 `cold_start_to_api_ready`、
+  `event_throughput_batched`、`index_rebuild_cost_100k_events`、`key_transaction_latency`、
+  `web_projection_p95`——**不调宽容差、不删项、不改指纹造假**，
   改进口径或留 `Unverified`，两条都做不到就不冻结。冻结本身要过 `freeze_with_attribution` 四关：
   两轮可比、`relaxations` 为空（`guard_change_in_capacity_stage` 阻断降同步/放宽事务/跳门禁）、
   有可转项、每个排除项都先定位到「默认依赖」或「结构」；任一关不过就写「未冻结」并说明停在哪一步，
@@ -465,8 +469,14 @@
   换任一项都要升版本重跑，Windows 数字不能当 Linux 预算、headless 预算不能约束桌面。
   预算与出口台账见 `docs/reports/p7-budget.md`、`docs/reports/p7-exit-evidence.md`，
   手册 §8 见 `docs/spec-notes/p7-measurement.md`；`tests/p7_freeze.rs` 10 条 + `tests/p7_exit.rs` 11 条守上述口径。
-  **未取得**：`agent_slot_occupancy`、`idle_cpu_ratio`、`cold_start_to_api_ready`、
-  `state_to_web_visible_p95`、桌面四项、移动包体积、多机写入需求——全部保持 `Unverified` 并写复测条件。
+  **未取得**：`agent_slot_occupancy`、`state_to_web_visible_p95`、桌面四项、移动包体积、多机写入需求
+  ——全部保持 `Unverified` 并写复测条件。`idle_cpu_ratio` 与 `cold_start_to_api_ready` 已在 Linux 实测，
+  但前者只是 bench 内忙循环上界（127%，不等于守护进程 60 s 空闲占比）、后者不含会话握手且 Windows 不稳；
+  `web_projection_p95` 只是本地事实装配，**不能顶替**渲染可见延迟。
+- **真实演练工具包**（P2—P6）：`cargo run -p xtask -- drill --list|--template|--check|--render`。
+  记录字段统一（case/phase/commit/operator/environment/steps/readings/gaps），`DrillRecord`
+  **没有结论字段**、JSON 夹带 `conclusion`/`passed` 会被拒；`--check` 只报缺什么，全部填完也只写
+  「记录完整」并固定输出「未结论」，判定留给出口评审。演练记录本身不解除任何门禁。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

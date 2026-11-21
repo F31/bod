@@ -514,6 +514,14 @@ fn commit_note() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// 当前 Unix 毫秒时间戳，写进演练记录便于回溯。
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// P7 容量基线：跑一遍测量，打印 Markdown，可选落到文件。
 ///
 /// 返回 `false` 表示**报告本身不可作为容量决策输入**（有 Target 项或某项缺命令/样本），
@@ -678,7 +686,138 @@ fn print_help() {
     println!("  migration-check     全部迁移表覆盖与破坏性 DDL 检查");
     println!("  bench [--out PATH]  P7 容量基线实测（Markdown 报告）");
     println!("  freeze [--out-dir DIR] 连跑两轮同一测量集并对比（4.1 预算冻结）");
+    println!("  drill --list        P2—P6 真实演练案件清单");
+    println!("  drill --template CASE [--out PATH]  生成空白记录（填空后仍需人工判定）");
+    println!("  drill --check PATH 校验记录完整性（只查是否填完，不给通过结论）");
+    println!("  drill --render PATH  把记录渲染成报告片段（结论固定为未结论）");
     println!("  --self-test         违例注入自测");
+}
+
+/// 列出真实演练案件：只打印需要离开本机才能证明的那些，避免"演练做完了其实没验证"。
+fn drill_list() -> bool {
+    use bod_app::drill::{DRILL_CASES, DrillPhase};
+    for phase in DrillPhase::all() {
+        println!("[{}]", phase.as_str());
+        for case in DRILL_CASES.iter().filter(|case| case.phase == phase) {
+            println!(
+                "  {}  {:<14} {}（{} 步 / {} 项读数）",
+                case.id,
+                case.requirement,
+                case.scenario,
+                case.steps.len(),
+                case.readings.len()
+            );
+        }
+    }
+    println!(
+        "[drill] 共 {} 个案件；记录只含读数，判定由出口评审给出",
+        DRILL_CASES.len()
+    );
+    true
+}
+
+/// 生成空白模板。模板本身**不允许**通过校验：必须先填完实际观察与读数。
+fn drill_template(case_id: &str, out: Option<&str>) -> bool {
+    use bod_app::drill::{case_by_id, template, to_json};
+    let Some(case) = case_by_id(case_id) else {
+        println!("[drill] FAIL 未登记的案件 {case_id}；先运行 xtask drill --list");
+        return false;
+    };
+    let commit = commit_note();
+    let record = template(case, &commit, now_ms());
+    let text = match to_json(&record) {
+        Ok(text) => text,
+        Err(err) => {
+            println!("[drill] FAIL 模板序列化失败：{err}");
+            return false;
+        }
+    };
+    match out {
+        Some(path) => {
+            if let Some(parent) = std::path::Path::new(path).parent()
+                && !parent.as_os_str().is_empty()
+                && let Err(err) = fs::create_dir_all(parent)
+            {
+                println!("[drill] FAIL 创建目录失败：{err}");
+                return false;
+            }
+            match fs::write(path, &text) {
+                Ok(()) => {
+                    println!("[drill] 已写入空白记录 {path}（填写前不可作为演练结果）");
+                    true
+                }
+                Err(err) => {
+                    println!("[drill] FAIL 写入 {path} 失败：{err}");
+                    false
+                }
+            }
+        }
+        None => {
+            println!("{text}");
+            true
+        }
+    }
+}
+
+/// 校验记录：只报"缺什么"，不判"通过"。缺项即返回非 0。
+fn drill_check(path: &str) -> bool {
+    use bod_app::drill::{from_json, render_markdown, validate};
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            println!("[drill] FAIL 读取 {path} 失败：{err}");
+            return false;
+        }
+    };
+    let record = match from_json(&text) {
+        Ok(record) => record,
+        Err(err) => {
+            println!("[drill] FAIL {err}");
+            return false;
+        }
+    };
+    let problems = validate(&record);
+    if problems.is_empty() {
+        println!(
+            "[drill] 记录完整：{}（{} 步 / {} 项读数）——完整性不等于通过，判定仍由评审给出",
+            record.case,
+            record.steps.len(),
+            record.readings.len()
+        );
+        let out = render_markdown(&record);
+        if out.contains("未结论") {
+            return true;
+        }
+        println!("[drill] FAIL 渲染结果缺少未结论声明");
+        return false;
+    }
+    println!("[drill] 记录未完成（{} 项）：", problems.len());
+    for problem in problems {
+        println!("  - {problem}");
+    }
+    false
+}
+
+/// 把记录渲染成报告片段。即使未填完也渲染：报告里会列出未完成项，便于交接。
+fn drill_render(path: &str) -> bool {
+    use bod_app::drill::{from_json, render_markdown};
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            println!("[drill] FAIL 读取 {path} 失败：{err}");
+            return false;
+        }
+    };
+    match from_json(&text) {
+        Ok(record) => {
+            print!("{}", render_markdown(&record));
+            true
+        }
+        Err(err) => {
+            println!("[drill] FAIL {err}");
+            false
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -692,6 +831,15 @@ fn main() -> ExitCode {
         [cmd, flag, path] if cmd == "bench" && flag == "--out" => bench(Some(path.as_str())),
         [cmd] if cmd == "freeze" => freeze(None),
         [cmd, flag, path] if cmd == "freeze" && flag == "--out-dir" => freeze(Some(path.as_str())),
+        [cmd, flag] if cmd == "drill" && flag == "--list" => drill_list(),
+        [cmd, flag, case] if cmd == "drill" && flag == "--template" => drill_template(case, None),
+        [cmd, flag, case, out_flag, out]
+            if cmd == "drill" && flag == "--template" && out_flag == "--out" =>
+        {
+            drill_template(case, Some(out.as_str()))
+        }
+        [cmd, flag, path] if cmd == "drill" && flag == "--check" => drill_check(path),
+        [cmd, flag, path] if cmd == "drill" && flag == "--render" => drill_render(path),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {
             verify_stage_p0(&root)
         }

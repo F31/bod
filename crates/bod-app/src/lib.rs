@@ -32,6 +32,7 @@ pub mod coverage_receipt;
 pub mod delivery_verification;
 pub mod descriptor_schema;
 pub mod desktop_lifecycle;
+pub mod drill;
 pub mod durable_process;
 pub mod effect_reconciliation;
 pub mod effect_recovery;
