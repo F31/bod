@@ -519,14 +519,15 @@ fn commit_note() -> String {
 /// 返回 `false` 表示**报告本身不可作为容量决策输入**（有 Target 项或某项缺命令/样本），
 /// 这是 bench 的漂移信号，不是性能结论。
 fn bench(out_path: Option<&str>) -> bool {
-    let report = match bod_app::perf_probe::run(&environment_note(), &commit_note()) {
-        Ok(report) => report,
+    let output = match bod_app::perf_probe::run_detailed(&environment_note(), &commit_note()) {
+        Ok(output) => output,
         Err(err) => {
             println!("[bench] FAIL 测量未完成：{err}");
             return false;
         }
     };
-    let markdown = bod_app::capacity_evaluation::render_markdown(&report, &[]);
+    let report = &output.baseline;
+    let markdown = bod_app::capacity_evaluation::render_markdown(report, &[]);
     if let Some(path) = out_path {
         if let Err(err) = fs::write(path, &markdown) {
             println!("[bench] FAIL 报告写入 {path} 失败：{err}");
@@ -555,6 +556,40 @@ fn bench(out_path: Option<&str>) -> bool {
     let unresolved = report.unresolved();
     if !unresolved.is_empty() {
         println!("[bench] 未能宣称达标的项：{}", unresolved.join(", "));
+    }
+
+    // 2.5：四类毕业信号分开报，缺数据写 unknown。
+    let signals = output.signals();
+    println!("[bench] 四类毕业信号：");
+    for signal in &signals {
+        let verdict = match signal.met {
+            Some(true) => "越界",
+            Some(false) => "未越界",
+            None => "unknown（缺观测）",
+        };
+        println!(
+            "  - {}：{}｜观测：{}｜阈值：{}",
+            signal.signal.as_str(),
+            verdict,
+            signal.observed,
+            signal.threshold
+        );
+    }
+    match bod_app::capacity_evaluation::graduation(&signals, None) {
+        bod_app::capacity_evaluation::Graduation::NoMigration { unknown, .. } => {
+            println!("[bench] 毕业判定：不迁移（unknown {} 项）", unknown.len())
+        }
+        bod_app::capacity_evaluation::Graduation::Candidate { signals, .. } => println!(
+            "[bench] 毕业判定：可进入方案对比（越界信号：{}）",
+            signals
+                .iter()
+                .map(|signal| signal.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+        bod_app::capacity_evaluation::Graduation::RejectedByEventCount { daily_events } => {
+            println!("[bench] 毕业判定：拒绝（仅日均事件数 {daily_events}，无信号观测）")
+        }
     }
     report.usable_for_decision()
 }

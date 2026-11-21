@@ -428,6 +428,17 @@
   **未取得的部分**：`cold_start_to_api_ready`（bench 不启动宿主监听）、Windows 侧 `idle_rss`
   （读不到 `/proc/self/status`）、`idle_cpu_ratio`、Web 可见延迟、桌面三项与桌面包体积、移动包体积
   全部保持 `Unverified` 并写明缺口；`May claim` 因此为 false，报告不会给出"全部达标"。
+  §2 归因判定在 `bod-app::bottleneck`，三条不许含混的口径：①恢复 RTO 必须拆成外部复制与内部
+  重开/校验，缺任一侧 `classify_recovery` 直接 `Unverified`；②单写争用要同时看 Busy 与 p99 增长，
+  `busy_timeout` 取默认值时连接是**等待**而非报错，所以 Busy 通常为 0，`QueueingWithoutBusy`
+  只记排队与 unknown、不判成 Busy 争用；③体积压力（库大小/`REINDEX` 成本）与索引空间
+  （未索引全表扫 vs 索引等值的倍数）分开评，`events` 的 `aggregate_id` 已有 UNIQUE 自动索引，
+  不能当"未索引"对照。`classify_slots` 用单写与最宽并发的吞吐比判 `WritePathBound`/`ScaleExecutors`，
+  `agent_slot_claim(None)` 拒绝宣称 Agent 槽位容量，`guard_replicate_side_effect_package()` 永久拒绝
+  复制副作用工作包提吞吐；`signals_from` 汇总四类信号，多机写入需求在单机 bench 里恒为 unknown。
+  22 条命名用例 + 16 条漂移检查，手册见 `docs/spec-notes/p7-measurement.md`（§4 归因口径），
+  台账见 `docs/reports/p7-baseline-<platform>.md`。
+  **仍未取得**：`agent_slot_occupancy`（bench 内无真实 Agent 进程）、多机写入需求（需双机/容灾演练）。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

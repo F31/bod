@@ -18,11 +18,16 @@
 
 ## 2. 瓶颈定位
 
-- [ ] 2.1 实测恢复 RTO 与重启 ready，验证十万事件样本下的结果可复核且区分外部恢复耗时。
-- [ ] 2.2 实测单写争用与 Busy/写等待，验证事务 p99 升高时不被误判为写锁争用，unknown 区域明确记录。
-- [ ] 2.3 实测表/索引体积、查询与重建成本，验证数据体积压力与索引优化空间分别有数据和命令。
-- [ ] 2.4 实测 Agent 与执行槽位占用、并发容量，验证扩容收益与执行节点扩展需求分别判断，不为提高吞吐复制有副作用工作包。
-- [ ] 2.5 汇总四类毕业信号，验证没有以日均事件数或单一 RTO 指标推出迁移结论（§40.4）。
+- [x] 2.1 实测恢复 RTO 与重启 ready，验证十万事件样本下的结果可复核且区分外部恢复耗时。
+      → `recovery_rto_100k_events`（备份 → 复制到新路径=外部 → 重开 → `quick_check`+行数校验=内部，3 轮取中位数）+ `bottleneck::classify_recovery`（缺外部或缺内部一律 Unverified）；用例 `task_2_1_recovery_separates_external_from_internal`、`task_2_1_recovery_items_expose_external_and_internal_phases`、`task_2_1_to_2_4_missing_samples_never_produce_a_healthy_verdict`。
+- [x] 2.2 实测单写争用与 Busy/写等待，验证事务 p99 升高时不被误判为写锁争用，unknown 区域明确记录。
+      → `write_contention_p99_growth`（1/2/4/8 个独立连接各 40 次写事务，数 `DatabaseBusy`）+ `bottleneck::classify_contention`：无 Busy 且增长 >25% 只判 `QueueingWithoutBusy` 并列出 unknown 区域；实测 Busy 恒为 0（busy_timeout 默认值下连接是等待而非报错），手册 §4.3 写明「Busy=0 不等于无争用」；用例 `task_2_2_tail_latency_without_busy_is_not_write_lock_contention`、`task_2_2_contention_item_separates_busy_from_queueing`。
+- [x] 2.3 实测表/索引体积、查询与重建成本，验证数据体积压力与索引优化空间分别有数据和命令。
+      → `table_index_volume_100k_events`（库字节 + page_count×page_size + `dbstat` 索引页）、`index_rebuild_cost_100k_events`（真跑 `REINDEX`）、`indexed_vs_unindexed_lookup`（`payload LIKE` 全表扫 vs `event_id` 主键等值）；`classify_volume` 分别产出 size/rebuild/index_space 三个判断；用例 `task_2_3_volume_pressure_and_index_headroom_are_separate`、`task_2_3_volume_and_index_space_have_separate_items`。注：`events` 有 `UNIQUE(aggregate_id, aggregate_version)` 自动索引，不能用 `aggregate_id` 当「未索引」对照。
+- [x] 2.4 实测 Agent 与执行槽位占用、并发容量，验证扩容收益与执行节点扩展需求分别判断，不为提高吞吐复制有副作用工作包。
+      → `executor_slot_capacity`（单写 vs 8 写者吞吐）+ `classify_slots`（收益 <100% 判 `WritePathBound`，先优化存储）；`agent_slot_occupancy` 保持 `Unverified`（bench 内无真实 Agent 进程），`agent_slot_claim(None)` 拒绝宣称容量；`guard_replicate_side_effect_package()` 永久拒绝复制副作用工作包；用例 `task_2_4_scale_out_is_judged_separately_from_executor_demand`、`task_2_4_slot_items_and_guards_exist`。
+- [x] 2.5 汇总四类毕业信号，验证没有以日均事件数或单一 RTO 指标推出迁移结论（§40.4）。
+      → `bottleneck::signals_from` 产出 RTO/写争用/体积/多机四类信号，缺数据一律 `None`（unknown）；`graduation(&[], Some(n))` 直接 `RejectedByEventCount`；单机 bench 无法证明「确有第二写入者」→ 多机信号恒 unknown；用例 `task_2_5_event_count_alone_never_triggers_migration`、`task_2_5_no_migration_from_event_count_or_single_rto`、`task_2_5_missing_observations_stay_unknown`、`task_2_5_four_signals_are_aggregated_and_event_count_is_not_a_signal`。
 
 ## 3. 方案对比与决定
 

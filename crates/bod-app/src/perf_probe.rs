@@ -1,21 +1,27 @@
-//! 性能实测：P0 §38.2 空闲负担 + P7 容量基线（任务 1.1—1.3）。
+//! 性能实测：P0 §38.2 空闲负担 + P7 容量基线与瓶颈定位（任务 1.1—1.3、2.1—2.4）。
 //!
 //! 只测**本机进程内可测项**；需要 OS 计数器细节、WebView、真机或安装包的条目一律标
 //! `Unverified` 并写清测量缺口——**不以设计目标冒充实测**，也不把 headless 的数字套到
 //! 桌面/移动上。
 //!
-//! 测量口径（口径定义在 [`crate::capacity_evaluation`]）：
+//! 测量口径（口径定义在 [`crate::capacity_evaluation`]，归因在 [`crate::bottleneck`]）：
 //! - 环境：OS / 架构 / rustc / 构建参数 / SQLite 同步策略 / 数据规模 / 缓存冷热；
 //! - SQLite：WAL + `synchronous=FULL` + `BEGIN IMMEDIATE`（`BodConfig::default()`）；
 //! - 延迟取 p50/p95/p99（排序后取分位），单位毫秒；**吞吐与尾延迟分别结论**；
-//! - 每一项都带样本数与命令，缺命令或缺样本的项不进入容量决策。
+//! - 每一项都带样本数与命令，缺命令或缺样本的项不进入容量决策；
+//! - 恢复 RTO 把**外部复制**与**内部重开/校验**分开计时（2.1）。
 
+use crate::bottleneck::{
+    ContentionSample, ContentionVerdict, RecoveryPhase, RecoveryReading, RecoveryVerdict,
+    SlotReading, SlotVerdict, VolumeAssessment, VolumeReading, classify_contention,
+    classify_recovery, classify_slots, classify_volume,
+};
 use crate::capacity_evaluation::{BaselineReport, EnvironmentRecord, FormFactor, MeasureItem};
 use crate::cas::CasStore;
 use crate::config::BodConfig;
 use crate::domain::DomainId;
 use crate::domain::queue::WorkQueueEntry;
-use crate::store::SqliteStore;
+use crate::store::{SqliteStore, StoreError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -518,6 +524,565 @@ fn web_and_shell_gaps() -> Vec<MeasureItem> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// 2.1 恢复 RTO：外部复制与内部恢复分开计时
+// ---------------------------------------------------------------------------
+
+/// §38.2 的恢复目标。
+const TARGET_RTO_MS: f64 = 60_000.0;
+
+fn percentile_us(samples: &mut [u128], ratio: f64) -> u128 {
+    if samples.is_empty() {
+        return 0;
+    }
+    samples.sort_unstable();
+    let index = ((samples.len() - 1) as f64 * ratio).round() as usize;
+    samples[index.min(samples.len() - 1)]
+}
+
+fn median_f64(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    values[values.len() / 2]
+}
+
+/// `PRAGMA quick_check`：恢复后必须先确认库没坏。
+fn quick_check(path: &Path) -> Result<String, String> {
+    let conn = rusqlite::Connection::open(path).map_err(|err| err.to_string())?;
+    conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+        .map_err(|err| err.to_string())
+}
+
+fn recovery_rto(root: &Path) -> Result<(MeasureItem, RecoveryVerdict), String> {
+    let source = root.join("events.sqlite");
+    if !source.exists() {
+        let reason = "没有 10 万事件样本库，恢复 RTO 未测";
+        let item = MeasureItem::new(
+            "recovery_rto_100k_events",
+            FormFactor::Headless,
+            "10 万事件后恢复 RTO ≤ 60 s",
+        )
+        .with_method("备份 → 复制到新路径 → 重开 → quick_check + 行数校验，逐阶段计时")
+        .unverified(reason, BENCH_COMMAND);
+        return Ok((item, RecoveryVerdict::Unverified { reason }));
+    }
+
+    let backup = root.join("recovery-backup.sqlite");
+    {
+        let store =
+            SqliteStore::open(&source, &BodConfig::default()).map_err(|err| err.to_string())?;
+        store
+            .vacuum_into(&backup.to_string_lossy())
+            .map_err(|err| err.to_string())?;
+    }
+
+    let mut restore = Vec::new();
+    let mut reopen = Vec::new();
+    let mut verify = Vec::new();
+    let mut checked_rows = 0i64;
+    for round in 0..3 {
+        let restored = root.join(format!("recovery-restored-{round}.sqlite"));
+        let _ = std::fs::remove_file(&restored);
+
+        // 外部阶段：把备份搬到目标位置（换盘/换机时波动最大的一步）。
+        let started = Instant::now();
+        std::fs::copy(&backup, &restored).map_err(|err| err.to_string())?;
+        restore.push(ms(started.elapsed()));
+
+        // 内部阶段一：打开并应用迁移（幂等检查）。
+        let started = Instant::now();
+        let store =
+            SqliteStore::open(&restored, &BodConfig::default()).map_err(|err| err.to_string())?;
+        reopen.push(ms(started.elapsed()));
+
+        // 内部阶段二：行数校验 + 完整性检查。
+        let started = Instant::now();
+        let counts = store.core_row_counts().map_err(|err| err.to_string())?;
+        let check = quick_check(&restored)?;
+        if !check.eq_ignore_ascii_case("ok") {
+            return Err(format!("恢复后 quick_check 不是 ok：{check}"));
+        }
+        checked_rows = counts.invocations;
+        verify.push(ms(started.elapsed()));
+        drop(store);
+    }
+
+    let reading = RecoveryReading::new(vec![
+        RecoveryPhase {
+            name: "restore_copy",
+            millis: median_f64(&mut restore),
+            external: true,
+        },
+        RecoveryPhase {
+            name: "reopen",
+            millis: median_f64(&mut reopen),
+            external: false,
+        },
+        RecoveryPhase {
+            name: "quick_check_and_counts",
+            millis: median_f64(&mut verify),
+            external: false,
+        },
+    ]);
+    let verdict = classify_recovery(&reading, TARGET_RTO_MS);
+    let meets = Some(matches!(verdict, RecoveryVerdict::WithinTarget { .. }));
+    let item = MeasureItem::new(
+        "recovery_rto_100k_events",
+        FormFactor::Headless,
+        "10 万事件后恢复 RTO ≤ 60 s",
+    )
+    .with_method(format!(
+        "VACUUM INTO 备份 → 复制到新路径 → 重开（含迁移幂等检查）→ quick_check + 行数校验；3 轮取各阶段中位数（invocations={checked_rows}）"
+    ))
+    .with_note(format!(
+        "总 RTO {:.0} ms 中外部复制占 {:.0} ms（{:.0}%）：换盘或换机后主要变化在外部这一段，内部恢复 {:.0} ms",
+        reading.total_ms(),
+        reading.external_ms(),
+        reading.external_share() * 100.0,
+        reading.internal_ms()
+    ))
+    .measured(
+        format!(
+            "总 {:.0} ms（外部复制 {:.0} ms + 重开 {:.0} ms + 校验 {:.0} ms）",
+            reading.total_ms(),
+            reading.external_ms(),
+            reading.phases[1].millis,
+            reading.phases[2].millis
+        ),
+        3,
+        BENCH_COMMAND,
+        meets,
+    );
+    Ok((item, verdict))
+}
+
+// ---------------------------------------------------------------------------
+// 2.2 单写争用：多连接并发写，数 Busy 与 p99
+// ---------------------------------------------------------------------------
+
+/// §38.2 事务 p99 目标，复用于争用判定。
+const CONTENTION_WRITERS: [usize; 4] = [1, 2, 4, 8];
+const CONTENTION_TX_PER_WRITER: usize = 40;
+
+fn is_busy(err: &StoreError) -> bool {
+    matches!(
+        err,
+        StoreError::Sql(rusqlite::Error::SqliteFailure(inner, _))
+            if inner.code == rusqlite::ffi::ErrorCode::DatabaseBusy
+    )
+}
+
+struct ContentionRun {
+    samples: Vec<ContentionSample>,
+    throughput: Vec<(usize, f64)>,
+    transactions: usize,
+}
+
+/// 单个并发写者的结果。`other_errors` 与 `busy` 分开计数：
+/// 只有 Busy 才是写锁争用证据，其它错误必须让 bench 直接失败，不能被算成争用。
+struct WriterOutcome {
+    latencies: Vec<u128>,
+    busy: u64,
+    other_errors: u64,
+    last_error: Option<String>,
+}
+
+fn write_contention(root: &Path) -> Result<(MeasureItem, ContentionRun), String> {
+    let path = root.join("contention.sqlite");
+    // 先建库，避免把首次迁移算进第一个写者的延迟。
+    {
+        let _store =
+            SqliteStore::open(&path, &BodConfig::default()).map_err(|err| err.to_string())?;
+    }
+
+    let mut samples = Vec::new();
+    let mut throughput = Vec::new();
+    let mut total_transactions = 0usize;
+    for writers in CONTENTION_WRITERS {
+        // 连接**顺序**建好再交给线程：并发 open 会走 journal_mode/迁移路径，
+        // 那部分锁竞争不属于被测事务，混进来会把 Busy 记错。
+        let mut stores = Vec::with_capacity(writers);
+        for _ in 0..writers {
+            stores.push(
+                SqliteStore::open(&path, &BodConfig::default())
+                    .map_err(|err| format!("并发写者连接建立失败（{writers} 写者）：{err}"))?,
+            );
+        }
+
+        let started = Instant::now();
+        let results: Vec<WriterOutcome> = std::thread::scope(|scope| {
+            let handles: Vec<_> = stores
+                .into_iter()
+                .enumerate()
+                .map(|(writer, store)| {
+                    scope.spawn(move || {
+                        let mut store = store;
+                        let mut latencies = Vec::with_capacity(CONTENTION_TX_PER_WRITER);
+                        let mut busy = 0u64;
+                        let mut other_errors = 0u64;
+                        let mut last_error = None;
+                        for index in 0..CONTENTION_TX_PER_WRITER {
+                            let entry = WorkQueueEntry::new(
+                                DomainId::new(COMPANY),
+                                format!("issue:c-{writer:02}-{index:04}"),
+                                NOW + index as i64,
+                            );
+                            let started = Instant::now();
+                            let outcome = store.transaction().and_then(|uow| {
+                                uow.put_queue(&entry)?;
+                                uow.commit()
+                            });
+                            match outcome {
+                                Ok(()) => latencies.push(started.elapsed().as_micros()),
+                                Err(err) if is_busy(&err) => busy += 1,
+                                Err(err) => {
+                                    other_errors += 1;
+                                    last_error = Some(err.to_string());
+                                }
+                            }
+                        }
+                        WriterOutcome {
+                            latencies,
+                            busy,
+                            other_errors,
+                            last_error,
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok())
+                .collect()
+        });
+        let elapsed = started.elapsed();
+        if results.len() != writers {
+            return Err(format!("{writers} 写者中有线程异常退出"));
+        }
+
+        let mut all = Vec::new();
+        let mut busy = 0u64;
+        for outcome in &results {
+            all.extend(outcome.latencies.iter().copied());
+            busy += outcome.busy;
+        }
+        let other: u64 = results.iter().map(|outcome| outcome.other_errors).sum();
+        if other > 0 {
+            let detail = results
+                .iter()
+                .filter_map(|outcome| outcome.last_error.clone())
+                .next()
+                .unwrap_or_default();
+            return Err(format!(
+                "并发写出现 {other} 次非 Busy 错误（{writers} 写者）：{detail}；这不能算作写锁争用"
+            ));
+        }
+
+        total_transactions += all.len();
+        let p99_us = percentile_us(&mut all, 0.99);
+        let count = all.len();
+        samples.push(ContentionSample {
+            writers,
+            transactions: count,
+            p99_us,
+            busy_errors: busy,
+        });
+        throughput.push((writers, count as f64 / elapsed.as_secs_f64().max(1e-6)));
+    }
+
+    let verdict = classify_contention(&samples);
+    let detail = samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{} 写者 p99 {:.2} ms / Busy {}",
+                sample.writers,
+                sample.p99_us as f64 / 1_000.0,
+                sample.busy_errors
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    let meets = Some(matches!(verdict, ContentionVerdict::NoContention { .. }));
+    let item = MeasureItem::new(
+        "write_contention_p99_growth",
+        FormFactor::Headless,
+        "p99 增长 ≤ 25%",
+    )
+    .with_method(format!(
+        "顺序建立 {} 个独立连接（并发 open 的锁竞争不计入），每个做 {CONTENTION_TX_PER_WRITER} 次单条写事务（BEGIN IMMEDIATE + commit，busy_timeout 取 BodConfig 默认值）",
+        CONTENTION_WRITERS
+            .iter()
+            .map(|count| count.to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    ))
+    .with_note(format!("{detail}；归因：{}", contention_label(&verdict)))
+    .measured(
+        detail,
+        total_transactions,
+        BENCH_COMMAND,
+        meets,
+    );
+    Ok((
+        item,
+        ContentionRun {
+            samples,
+            throughput,
+            transactions: total_transactions,
+        },
+    ))
+}
+
+fn contention_label(verdict: &ContentionVerdict) -> String {
+    match verdict {
+        ContentionVerdict::WriteContention {
+            busy_errors,
+            growth,
+            ..
+        } => format!(
+            "写锁争用（Busy {busy_errors}，p99 增长 {:.0}%）",
+            growth * 100.0
+        ),
+        ContentionVerdict::QueueingWithoutBusy {
+            growth,
+            unknown_areas,
+            ..
+        } => format!(
+            "无 Busy，p99 增长 {:.0}%：写者排队，不归因为 Busy 争用；unknown：{}",
+            growth * 100.0,
+            unknown_areas.join("、")
+        ),
+        ContentionVerdict::NoContention { growth, .. } => {
+            format!("无争用（p99 增长 {:.0}%，噪声内）", growth * 100.0)
+        }
+        ContentionVerdict::Unknown { reason } => format!("无法判定：{reason}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2.3 体积、重建成本与索引优化空间
+// ---------------------------------------------------------------------------
+
+const BUDGET_DB_BYTES: u64 = 256 * 1024 * 1024;
+const BUDGET_REBUILD_MS: f64 = 10_000.0;
+
+fn volume_and_rebuild(
+    root: &Path,
+) -> Result<(Vec<MeasureItem>, VolumeReading, VolumeAssessment), String> {
+    let path = root.join("events.sqlite");
+    if !path.exists() {
+        return Err("没有 10 万事件样本库，体积与重建成本未测".to_string());
+    }
+    let db_bytes = std::fs::metadata(&path)
+        .map(|meta| meta.len())
+        .map_err(|err| err.to_string())?;
+    let conn = rusqlite::Connection::open(&path).map_err(|err| err.to_string())?;
+    let page_count: i64 = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .map_err(|err| err.to_string())?;
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(|err| err.to_string())?;
+    let event_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .map_err(|err| err.to_string())?;
+
+    // dbstat 是可选虚拟表：拿不到就记 None，不假装 0。
+    let index_bytes: Option<u64> = conn
+        .query_row(
+            "SELECT SUM(pgsize) FROM dbstat WHERE name LIKE 'idx_%' OR name LIKE 'ux_%'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+        .map(|value| value as u64);
+
+    let started = Instant::now();
+    conn.execute_batch("REINDEX")
+        .map_err(|err| err.to_string())?;
+    let rebuild_ms = ms(started.elapsed());
+
+    // events 上有 UNIQUE(aggregate_id, aggregate_version) 自动索引：用聚合列当"未索引"对照会失真。
+    // 这里用真正没有索引的 payload 列做全表扫描，与主键等值查询对比。
+    let unindexed_lookup_us = timed_lookup(
+        &conn,
+        "SELECT COUNT(*) FROM events WHERE payload LIKE ?1",
+        "%perf%",
+    )?;
+    let indexed_lookup_us = timed_lookup(
+        &conn,
+        "SELECT COUNT(*) FROM events WHERE event_id = ?1",
+        "ev-050000",
+    )?;
+
+    let reading = VolumeReading {
+        db_bytes,
+        event_rows,
+        index_bytes,
+        rebuild_ms,
+        unindexed_lookup_us,
+        indexed_lookup_us,
+    };
+    let assessment = classify_volume(&reading, BUDGET_DB_BYTES, BUDGET_REBUILD_MS);
+
+    let volume_value = match index_bytes {
+        Some(bytes) => format!(
+            "库 {:.1} MiB（{} 页 × {} B），索引约 {:.1} MiB，{} 行",
+            db_bytes as f64 / 1_048_576.0,
+            page_count,
+            page_size,
+            bytes as f64 / 1_048_576.0,
+            event_rows
+        ),
+        None => format!(
+            "库 {:.1} MiB（{} 页 × {} B），索引占用未取得（dbstat 不可用），{} 行",
+            db_bytes as f64 / 1_048_576.0,
+            page_count,
+            page_size,
+            event_rows
+        ),
+    };
+    let volume_item = MeasureItem::new(
+        "table_index_volume_100k_events",
+        FormFactor::Headless,
+        "体积预算 256 MiB",
+    )
+    .with_method("库文件字节数 + page_count × page_size + dbstat 按名聚合索引页")
+    .with_note(format!(
+        "体积压力：{:?}；重建压力：{:?}；索引优化空间：{:?}",
+        assessment.size, assessment.rebuild, assessment.index_space
+    ))
+    .measured(volume_value, 1, BENCH_COMMAND, None);
+
+    let rebuild_item = MeasureItem::new(
+        "index_rebuild_cost_100k_events",
+        FormFactor::Headless,
+        "重建预算 10 s",
+    )
+    .with_method("对 10 万事件库执行 REINDEX（全索引重建）一次并计时")
+    .with_note("重建成本随行数与索引数线性增长；跨机器比较必须同数据规模")
+    .measured(
+        format!("{rebuild_ms:.0} ms"),
+        1,
+        BENCH_COMMAND,
+        Some(rebuild_ms <= BUDGET_REBUILD_MS),
+    );
+
+    let factor = if indexed_lookup_us == 0 {
+        0.0
+    } else {
+        unindexed_lookup_us as f64 / indexed_lookup_us as f64
+    };
+    let lookup_item = MeasureItem::new(
+        "indexed_vs_unindexed_lookup",
+        FormFactor::Headless,
+        "无冻结目标（判断索引优化空间）",
+    )
+    .with_method(
+        "同一张 events 表：payload（无索引，LIKE 全表扫描）vs event_id（主键等值），各 5 次取中位数",
+    )
+    .with_note(format!(
+        "两者差 {factor:.1} 倍：{:?}；events 的 aggregate_id 已有 UNIQUE 自动索引，不能拿它当「未索引」对照",
+        assessment.index_space
+    ))
+    .measured(
+        format!(
+            "全表扫描 {:.2} ms / 索引等值 {:.3} ms（{factor:.0}×）",
+            unindexed_lookup_us as f64 / 1_000.0,
+            indexed_lookup_us as f64 / 1_000.0
+        ),
+        5,
+        BENCH_COMMAND,
+        None,
+    );
+
+    Ok((
+        vec![volume_item, rebuild_item, lookup_item],
+        reading,
+        assessment,
+    ))
+}
+
+fn timed_lookup(conn: &rusqlite::Connection, sql: &str, value: &str) -> Result<u128, String> {
+    let mut samples = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let started = Instant::now();
+        let _count: i64 = conn
+            .query_row(sql, rusqlite::params![value], |row| row.get(0))
+            .map_err(|err| err.to_string())?;
+        samples.push(started.elapsed().as_micros());
+    }
+    Ok(percentile_us(&mut samples, 0.5))
+}
+
+// ---------------------------------------------------------------------------
+// 2.4 执行槽位与并发容量
+// ---------------------------------------------------------------------------
+
+fn executor_slots(run: &ContentionRun) -> (Vec<MeasureItem>, SlotReading, SlotVerdict) {
+    let single = run
+        .throughput
+        .iter()
+        .find(|(writers, _)| *writers == 1)
+        .map(|(_, per_sec)| *per_sec)
+        .unwrap_or(0.0);
+    let (widest, saturated) = run
+        .throughput
+        .iter()
+        .copied()
+        .max_by_key(|(writers, _)| *writers)
+        .unwrap_or((1, 0.0));
+    let reading = SlotReading {
+        single_writer_per_sec: single,
+        saturated_per_sec: saturated,
+        // 本仓库没有真实 Agent 进程参与测量：如实留 None。
+        agent_processes_observed: None,
+    };
+    let verdict = classify_slots(&reading);
+    let gain = saturated / single.max(1e-6) - 1.0;
+    let label = match &verdict {
+        SlotVerdict::WritePathBound { .. } => {
+            "写路径受限：加执行节点拿不到吞吐，先优化存储".to_string()
+        }
+        SlotVerdict::ScaleExecutors { .. } => "可扩执行节点：多写者有明确收益".to_string(),
+        SlotVerdict::Unknown { reason } => format!("无法判定：{reason}"),
+    };
+    let capacity = MeasureItem::new(
+        "executor_slot_capacity",
+        FormFactor::Headless,
+        "无冻结目标（判断写路径 vs 执行槽位）",
+    )
+    .with_method(format!(
+        "同一批写事务在 1 与 {widest} 个并发连接下的每秒完成数（共 {} 次事务）",
+        run.transactions
+    ))
+    .with_note(format!("{label}；样本来自 {}", run.samples.len()))
+    .measured(
+        format!(
+            "单写 {single:.0} txn/s → {widest} 写者 {saturated:.0} txn/s（收益 {:.0}%）",
+            gain * 100.0
+        ),
+        run.transactions,
+        BENCH_COMMAND,
+        None,
+    );
+    let agent = MeasureItem::new(
+        "agent_slot_occupancy",
+        FormFactor::Headless,
+        "无冻结目标（Agent 槽位占用）",
+    )
+    .with_method("需要真实 Agent 进程：统计并发进程数、各自 RSS 与被抢占次数")
+    .unverified(
+        "bench 内没有真实 Agent 进程参与，测不到 Agent 槽位占用与并发上限",
+        BENCH_COMMAND,
+    );
+    (vec![capacity, agent], reading, verdict)
+}
+
 fn environment(environment_note_text: &str, data_scale: &str) -> EnvironmentRecord {
     EnvironmentRecord {
         note: environment_note_text.to_string(),
@@ -556,7 +1121,31 @@ fn rustc_version() -> String {
 }
 
 /// 运行全部可测项。`environment_note` 是 CLI 打印的环境行，原样留在报告里便于人工对照。
-pub fn run(environment_note: &str, commit: &str) -> Result<BaselineReport, String> {
+/// 一次完整 bench 的产物：基线报告 + 四类瓶颈归因。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchOutput {
+    pub baseline: BaselineReport,
+    pub contention: ContentionVerdict,
+    pub recovery: RecoveryVerdict,
+    pub volume_reading: VolumeReading,
+    pub volume: VolumeAssessment,
+    pub slots: SlotVerdict,
+}
+
+impl BenchOutput {
+    /// 2.5：四类毕业信号（缺数据的一律 unknown）。
+    pub fn signals(&self) -> Vec<crate::capacity_evaluation::SignalReading> {
+        crate::bottleneck::signals_from(
+            &self.contention,
+            &self.recovery,
+            &self.volume_reading,
+            &self.volume,
+            &self.slots,
+        )
+    }
+}
+
+pub fn run_detailed(environment_note: &str, commit: &str) -> Result<BenchOutput, String> {
     let (root, store) = workspace("main")?;
     drop(store);
     let _ = CasStore::open(root.join("cas")).map_err(|err| err.to_string())?;
@@ -576,21 +1165,44 @@ pub fn run(environment_note: &str, commit: &str) -> Result<BaselineReport, Strin
     let events = 100_000;
     items.push(restart_after_events(&root, events)?);
     items.push(storage_volume(&root, events)?);
+
+    // §2 瓶颈定位：RTO、争用、体积/重建、槽位，各自独立成项。
+    let (rto_item, recovery) = recovery_rto(&root)?;
+    items.push(rto_item);
+    let (contention_item, contention_run) = write_contention(&root)?;
+    items.push(contention_item);
+    let (volume_items, volume_reading, volume) = volume_and_rebuild(&root)?;
+    items.extend(volume_items);
+    let (slot_items, _slot_reading, slots) = executor_slots(&contention_run);
+    items.extend(slot_items);
+
     items.push(idle_tick(&root)?);
     items.push(idle_cpu_ratio());
     items.push(package_size());
     items.extend(web_and_shell_gaps());
 
-    Ok(BaselineReport {
+    let baseline = BaselineReport {
         environment: environment(
             environment_note,
             &format!(
-                "200 单条事务 + 5000 批量事件 + 200 逐条持久化事件 + 1000 就绪候选 + {events} 事件重启"
+                "200 单条事务 + 5000 批量事件 + 200 逐条持久化事件 + 1000 就绪候选 + {events} 事件重启 + 恢复 3 轮 + 争用 1/2/4/8 写者 × {CONTENTION_TX_PER_WRITER} 事务"
             ),
         ),
         commit: commit.to_string(),
         items,
+    };
+    Ok(BenchOutput {
+        baseline,
+        contention: classify_contention(&contention_run.samples),
+        recovery,
+        volume_reading,
+        volume,
+        slots,
     })
+}
+
+pub fn run(environment_note: &str, commit: &str) -> Result<BaselineReport, String> {
+    run_detailed(environment_note, commit).map(|output| output.baseline)
 }
 
 #[cfg(test)]
