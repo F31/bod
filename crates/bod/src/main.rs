@@ -141,12 +141,9 @@ fn report_json(report: &bod_app::fault_matrix::FaultMatrixReport) -> String {
     out
 }
 
+/// JSON 字符串字面量只有一份实现（CR-001），见 `bod_app::json_text`。
 fn json_string(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n");
-    format!("\"{escaped}\"")
+    bod_app::json_text::json_string(value)
 }
 
 fn json_array(values: &[String]) -> String {

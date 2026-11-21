@@ -183,6 +183,8 @@ pub struct HostServer {
     session_key: String,
     /// 事件源：`GET /_bod/events` 的 SSE 基线订阅从这里读（P6 2.6 / RM06）。
     feed: std::sync::Arc<dyn crate::event_stream::EventFeed>,
+    /// Host/Origin 白名单（CR-007）。每个请求进入 handler 前都要过这一关。
+    policy: crate::host_guard::HostPolicy,
 }
 
 impl HostServer {
@@ -208,6 +210,10 @@ impl HostServer {
             .local_addr()
             .map_err(|err| HostError::Io(err.to_string()))?
             .to_string();
+        // 白名单必须在 address 被 move 进描述文件之前算出来：它按实际监听端口构造，
+        // 不是拿配置里的 `listen` 字符串猜。
+        let policy = crate::host_guard::HostPolicy::for_local_control_plane(&address)
+            .map_err(HostError::Io)?;
         let descriptor = HostDescriptor {
             protocol: PROTOCOL.to_string(),
             address,
@@ -222,9 +228,22 @@ impl HostServer {
             descriptor_path: descriptor_path.to_path_buf(),
             session_key: random_token("session"),
             feed,
+            policy,
         };
         write_descriptor(descriptor_path, &server.descriptor)?;
         Ok(server)
+    }
+
+    /// 追加允许的 Origin（本地开发服务器用）。默认只放行 Tauri 的两种来源。
+    ///
+    /// 必须在 `run` 之前调用；发布产物不应调用它。
+    pub fn allow_origin(&mut self, origin: &str) {
+        self.policy = self.policy.clone().with_origin(origin);
+    }
+
+    /// 当前 Host/Origin 白名单，供测试与诊断读取。
+    pub fn policy(&self) -> &crate::host_guard::HostPolicy {
+        &self.policy
     }
 
     pub fn address(&self) -> String {
@@ -258,6 +277,20 @@ impl HostServer {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         let request = read_request(&mut stream)?;
+
+        // CR-007：Host/Origin 在路由与鉴权之前先过。拒绝发生在这一层，
+        // 后面的 handler 就不会被攻击者可控的请求碰到。
+        let hosts = request.header_values("host");
+        let origins = request.header_values("origin");
+        if let Err(rejection) = self.policy.check(&hosts, &origins) {
+            let body = serde_json::json!({
+                "error": rejection.code(),
+                "reason": rejection.explain(),
+            });
+            respond(&mut stream, 403, &body.to_string())?;
+            return Ok(false);
+        }
+
         match (request.method.as_str(), request.path_only()) {
             ("GET", "/_bod/events") => {
                 // 订阅是长连接：放到独立线程，否则会把健康检查与停止请求堵在队列里。
@@ -357,6 +390,16 @@ impl Request {
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
+    }
+
+    /// 同名字段的**全部**取值。Host 校验需要知道「有几个」，
+    /// 重复 Host 是请求走私的信号，不能只看第一个。
+    fn header_values(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+            .collect()
     }
 
     /// 不含查询串的路径：路由匹配一律用它，避免 `?cursor=3` 落到 404。

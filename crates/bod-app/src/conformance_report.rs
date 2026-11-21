@@ -578,15 +578,12 @@ fn build_row(
 }
 
 fn opt_json_string(value: Option<&str>) -> String {
-    value.map_or("null".to_string(), json_string)
+    crate::json_text::opt_json_string(value)
 }
 
+/// 保留此路径供既有调用点使用，实现只有一份（见 [`crate::json_text`]）。
 pub(crate) fn json_string(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n");
-    format!("\"{escaped}\"")
+    crate::json_text::json_string(value)
 }
 
 /// 毫秒时间戳 → UTC `YYYY-MM-DDTHH:MM:SSZ`。

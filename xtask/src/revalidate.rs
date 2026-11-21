@@ -1467,8 +1467,72 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
         }
     }
 
+    /// 构造一个**不依赖仓库历史**的样本。
+    ///
+    /// 原先用 `HEAD~1..HEAD` 作样本，测试因此隐含依赖「最新一次提交恰好改了 `crates/`
+    /// 下的文件」。`impact_sample::region_of` 只承认 `crates/` 下的路径，所以当 HEAD
+    /// 落在只改 `xtask/` 或 `apps/` 的提交上时提案数为 0，测试就变红——那是测试对仓库
+    /// 历史的隐式依赖，不是被验代码的缺陷（2026-11-21 由 `8d24199` 暴露）。
+    ///
+    /// `plan` 要验的是排序与预算截断，本就不该读外部状态；真实 git 链路
+    /// 由 `xtask impact` / `xtask revalidate` 的实跑覆盖。
     fn sample_run_for_tests() -> SampleRun {
-        crate::impact_sample::run(&crate::workspace_root(), "HEAD~1", "HEAD", 0)
-            .expect("应能读取真实提交")
+        use bod_app::impact_revalidation::{
+            ArtifactKind as ImpactKind, AssessmentInput, ChangeKind, ChangeTrigger, RevisionId,
+            assess,
+        };
+        use crate::impact_sample::{ChangedRegion, ScanStats};
+
+        let pairs = [
+            (
+                "bod-app::capacity_evaluation",
+                "crates/bod-app/src/capacity_evaluation.rs",
+            ),
+            ("bod-core::model", "crates/bod-core/src/model.rs"),
+        ];
+        let changes: Vec<ChangedRegion> = pairs
+            .iter()
+            .map(|(module, path)| ChangedRegion {
+                region: RevisionId::new(ImpactKind::Source, module),
+                module: (*module).to_string(),
+                path: (*path).to_string(),
+                kind: ChangeKind::Source,
+                public_items: Vec::new(),
+            })
+            .collect();
+        let count = changes.len();
+        let known: Vec<RevisionId> = changes.iter().map(|change| change.region.clone()).collect();
+        let assessments = changes
+            .iter()
+            .map(|change| {
+                let trigger = ChangeTrigger {
+                    change_id: format!("synthetic:{}", change.module),
+                    revision: change.region.clone(),
+                    kind: change.kind,
+                    description: "合成样本".to_string(),
+                };
+                let input = AssessmentInput {
+                    old_baseline: "aaa",
+                    new_baseline: "bbb",
+                    rule_version: "test",
+                    known_regions: &known,
+                    edges: &[],
+                };
+                (change.clone(), assess(&trigger, &input, 0))
+            })
+            .collect();
+        SampleRun {
+            from: "aaa".to_string(),
+            to: "bbb".to_string(),
+            commit_subject: "合成样本".to_string(),
+            stats: ScanStats {
+                regions: count,
+                edges: 0,
+                files: count,
+            },
+            changes,
+            assessments,
+            edges: Vec::new(),
+        }
     }
 }

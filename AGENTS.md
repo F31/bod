@@ -512,6 +512,18 @@
     在另一平台上是**空白**，不是通过。P2 僵尸缺陷即此例：`kill -0` 把僵尸判为存活，
     Windows 走 `OpenProcess` 永远测不出来。是否必须跑第二个平台由
     `cargo run -p xtask -- cross` 机械判定，不得目测、凭印象或为省事放宽。
+11. **禁止手写 JSON 字符串转义**：一律走 `bod_app::json_text::json_string`。
+    手写实现只处理 `\\`、`"`、`\n` 一类常见字符，漏掉 `\r`、`\t` 与其余 U+0000—U+001F 控制字符，
+    而 RFC 8259 §7 要求全部转义——`--json` 输出里出现裸 `\r` 就是非法 JSON，且接收方是机器。
+    这个缺陷曾以几乎逐字相同的代码存在三份（`main.rs`、`smoke.rs`、`conformance_report.rs`），
+    正是「复制粘贴各改一份」造成的；`crates/bod-app/tests/json_literal_guard.rs` 会拦住第四份。
+    例外只有 `canonical_json.rs`：规范编码需要字节级控制，必须自带转义，理由见该模块文档注释。
+12. **禁止控制面请求绕过 Host/Origin 校验**：`HostServer::handle` 在路由与鉴权之前统一校验
+    （`crates/bod-app/src/host_guard.rs`），新增路由**不得**另开入口或跳过这一步。
+    Host 必须恰有一个且为回环名 + 实际监听端口，Origin 若存在必须命中白名单（Tauri 两种来源，
+    dev 来源需显式 `allow_origin`）。`null` Origin 一律拒。这条不是可选的加固：
+    `POST /_bod/handshake` 走描述文件令牌而非 Bearer，Host 校验是那条路径上唯一的网络层防线
+    （DNS rebinding 场景）。
 
 ## 验证与完成规则
 
@@ -520,6 +532,10 @@
 - 编译检查：`cargo check --workspace --all-targets`，测试：`cargo test --workspace`。
 - 里程碑出口：相关 I/G 门禁有真实证据后才勾选 tasks.md；每个阶段 Change 在自己出口证据齐全后归档，P0 已于 2026-11-19 归档，后续阶段不回溯修改 P0 历史约定。
 - 工具链调用前先 `export PATH="$CARGO_HOME/bin:$PATH"`（详见 `docs/compat/toolchain.md`）。
+- **架构决策必须落地**：实现与 V2.9.6 规格冲突（尤其 §3 技术栈）时，要么改代码，
+  要么在 `adr/` 新增 ADR 记录「为什么推翻 + 代价 + 可机械判断的撤销条件」，
+  两者必有其一。当前已记录：ADR-0001（保留同步传输栈，不引 Tokio/Axum）、
+  ADR-0002（工作台暂不引前端框架）。`docs/` 被 gitignore，决策记录不得放在那里。
 - **跨平台验证触发条件**：改完代码跑 `cargo run -p xtask -- cross`（默认比较 `HEAD~1..HEAD`；
   提交前用 `--worktree` 或 `--staged`）。退出码即结论：
   `0` 可以只跑单平台，`1` 必须跨平台，`2` 无法判定——**2 按必须跨平台处理，不得当作放行**。

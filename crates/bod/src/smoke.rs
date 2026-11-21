@@ -16,6 +16,7 @@ use bod_app::domain::model::{
 use bod_app::domain::{DomainId, Phase, Version};
 use bod_app::fake_executor::{FakeExecutor, FakeScenario};
 use bod_app::invocation::{StartVerdict, submit_start};
+use bod_app::json_text::json_string;
 use bod_app::store::SqliteStore;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,44 +43,29 @@ impl SmokeReport {
         let notes = self
             .notes
             .iter()
-            .map(|note| format!("\"{}\"", escape(note)))
+            .map(|note| json_string(note))
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"smoke\":\"p0-d5\",\"work_dir\":\"{}\",\"issue\":\"{}\",\"invocation\":\"{}\",\
-             \"execution_id\":\"{}\",\"candidate_revision\":\"{}\",\"verification_state\":\"{}\",\
+            "{{\"smoke\":\"p0-d5\",\"work_dir\":{},\"issue\":{},\"invocation\":{},\
+             \"execution_id\":{},\"candidate_revision\":{},\"verification_state\":{},\
              \"accepted\":{},\"resource_version_before\":{},\"resource_version_after\":{},\
-             \"read_only_dispatches\":{},\"restart_recovered\":{},\"result\":\"{}\",\"notes\":[{}]}}",
-            escape(&self.work_dir),
-            escape(&self.issue),
-            escape(&self.invocation),
-            escape(&self.execution_id),
-            escape(&self.candidate_revision),
-            escape(&self.verification_state),
+             \"read_only_dispatches\":{},\"restart_recovered\":{},\"result\":{},\"notes\":[{}]}}",
+            json_string(&self.work_dir),
+            json_string(&self.issue),
+            json_string(&self.invocation),
+            json_string(&self.execution_id),
+            json_string(&self.candidate_revision),
+            json_string(&self.verification_state),
             self.accepted,
             self.resource_version_before,
             self.resource_version_after,
             self.read_only_dispatches,
             self.restart_recovered,
-            self.result,
+            json_string(self.result),
             notes
         )
     }
-}
-
-fn escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 fn now_ms() -> i64 {
