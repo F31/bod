@@ -15,6 +15,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod impact_sample;
+
 /// 依赖违规记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Violation {
@@ -821,7 +823,93 @@ fn print_help() {
     println!("  drill --render PATH  把记录渲染成报告片段（结论固定为未结论）");
     println!("  evidence --check PATH [--audience local|team|external] [--approver A --scope S]");
     println!("  evidence --scrub PATH [--out PATH]  输出脱敏副本（只打印命中类别，不回显原值）");
+    println!("  impact [--from REV] [--to REV] [--out PATH]  P3 G-31：用真实提交跑影响评估");
     println!("  --self-test         违例注入自测");
+}
+
+/// P3 2.6：真实提交 → 真实模块图 → G-31 影响评估。只输出读数，不判通过。
+fn impact(args: &[String]) -> bool {
+    let mut from = "HEAD~1".to_string();
+    let mut to = "HEAD".to_string();
+    let mut out: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let value = args.get(index + 1);
+        match args[index].as_str() {
+            "--from" => match value {
+                Some(text) => {
+                    from = text.clone();
+                    index += 2;
+                }
+                None => {
+                    println!("[impact] FAIL --from 缺少参数");
+                    return false;
+                }
+            },
+            "--to" => match value {
+                Some(text) => {
+                    to = text.clone();
+                    index += 2;
+                }
+                None => {
+                    println!("[impact] FAIL --to 缺少参数");
+                    return false;
+                }
+            },
+            "--out" => match value {
+                Some(text) => {
+                    out = Some(text.clone());
+                    index += 2;
+                }
+                None => {
+                    println!("[impact] FAIL --out 缺少参数");
+                    return false;
+                }
+            },
+            other => {
+                println!("[impact] FAIL 未知参数 {other}");
+                return false;
+            }
+        }
+    }
+
+    let root = workspace_root();
+    let run = match impact_sample::run(&root, &from, &to, now_ms()) {
+        Ok(run) => run,
+        Err(err) => {
+            println!("[impact] FAIL {err}");
+            return false;
+        }
+    };
+    let report = impact_sample::render(&run);
+    if let Some(path) = out {
+        if let Some(parent) = Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(err) = fs::create_dir_all(parent)
+        {
+            println!("[impact] FAIL 创建目录失败：{err}");
+            return false;
+        }
+        if let Err(err) = fs::write(&path, &report) {
+            println!("[impact] FAIL 写入失败：{err}");
+            return false;
+        }
+        println!("[impact] 已写入 {path}");
+    } else {
+        print!("{report}");
+    }
+    let certain: usize = run.assessments.iter().map(|(_, a)| a.certain.len()).sum();
+    let possible: usize = run.assessments.iter().map(|(_, a)| a.possible.len()).sum();
+    let unknown: usize = run.assessments.iter().map(|(_, a)| a.unknown.len()).sum();
+    println!(
+        "[impact] {} 个变化点；确定 {} / 可能 {} / 未知 {}；规则 {}；判定由评审给出",
+        run.changes.len(),
+        certain,
+        possible,
+        unknown,
+        impact_sample::RULE_VERSION
+    );
+    true
 }
 
 /// 列出真实演练案件：只打印需要离开本机才能证明的那些，避免"演练做完了其实没验证"。
@@ -972,6 +1060,7 @@ fn main() -> ExitCode {
         [cmd, flag, path] if cmd == "drill" && flag == "--check" => drill_check(path),
         [cmd, flag, path] if cmd == "drill" && flag == "--render" => drill_render(path),
         [cmd, rest @ ..] if cmd == "evidence" => evidence(rest),
+        [cmd, rest @ ..] if cmd == "impact" => impact(rest),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {
             verify_stage_p0(&root)
         }

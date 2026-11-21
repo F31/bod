@@ -635,9 +635,10 @@
   kind: gate
   requirement: 接口变化触发对应检查，不相关元数据不全部重跑；关系缺失明确 unknown
   module: bod-app::impact_revalidation
-  status: planned
-  evidence: cargo test -p bod-app impact_revalidation
-  note: P3 出口 2.6 真实接口样本未取得，门禁保持 planned
+  tests: xtask::impact_sample::tests::real_commit_sample_is_selective_and_keeps_unknown
+  status: implemented
+  evidence: cargo test -p xtask impact_sample && cargo run -p xtask -- impact --from a9c80d5~1 --to a9c80d5
+  note: 真实样本取自本仓库提交 a9c80d5 与 157298b（接口变化 3+1，确定 61+9，候选占已知区域 5.3%）；报告 docs/reports/p3-interface-impact.md 只列确定/可能/未知、重验依据与未执行项。静态 import 图会漏 use super / 花括号多导入 / pub use 重导出（见 docs/spec-notes/p3-impact-sample.md §6），故不宣称"只有这些受影响"
 - id: G-32
   kind: gate
   requirement: 在固定包/环境运行真实场景，工具失败与应用失败区分，拒绝假通过

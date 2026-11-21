@@ -5,30 +5,28 @@ use std::collections::BTreeSet;
 const TASKS: &str = include_str!("../../../openspec/changes/p3-change-collaboration/tasks.md");
 
 #[test]
-fn tasks_2_1_to_2_5_are_checked_while_2_6_waits_for_the_real_sample() {
+fn tasks_2_1_to_2_6_are_checked_with_a_real_sample_for_2_6() {
     let mut checked = BTreeSet::new();
-    let mut unchecked = BTreeSet::new();
     for line in TASKS.lines() {
         let trimmed = line.trim_start();
         let Some(rest) = trimmed.strip_prefix("- [") else {
             continue;
         };
-        let is_checked = rest.starts_with('x');
-        let body = rest.get(3..).unwrap_or_default().trim();
-        let Some(id) = body.split_whitespace().next() else {
+        if !rest.starts_with('x') {
             continue;
-        };
-        if is_checked {
+        }
+        let body = rest.get(3..).unwrap_or_default().trim();
+        if let Some(id) = body.split_whitespace().next() {
             checked.insert(id.to_string());
-        } else {
-            unchecked.insert(id.to_string());
         }
     }
     for id in ["2.1", "2.2", "2.3", "2.4", "2.5"] {
         assert!(checked.contains(id), "任务 {id} 应已勾选");
     }
+    // 2.6 已用本仓库真实提交跑出 G-31 报告（docs/reports/p3-interface-impact.md），
+    // 但报告本身不含通过结论；勾选只表示"样本已取得"，门禁判定仍由评审给出。
     assert!(
-        unchecked.contains("2.6"),
-        "2.6 需要真实接口变化样本跑 G-31，未取得前不得勾选"
+        checked.contains("2.6"),
+        "2.6 已取得真实接口变化样本，应勾选"
     );
 }

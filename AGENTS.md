@@ -278,14 +278,18 @@
   协议见 `p2-handoff-samples.md` §6，设计见 `p2-handoff-drill.md`。
   P2 的 I/G 绑定仍全部 planned，
   `gates.yaml` 与 `BINDING_SOURCES` 留到 P2 出口按权威语义统一补齐。
-- **P3 进行中（2026-11-21）**：`openspec/changes/p3-change-collaboration` 24/26 任务已勾选。
+- **P3 进行中（2026-11-21）**：`openspec/changes/p3-change-collaboration` 25/26 任务已勾选。
   四个能力各有模块与 spec note：`openspec_integration`（规格修订/任务稳定身份/拆分检查/进度投影/
   归档串行）、`impact_revalidation`（显式与推测边分离/影响评估/有界重验/维护提案）、
   `merge_queue`（三道门：队首/基线/证据，契约冲突先到先得，worktree 只能算协作隔离）、
   `collaboration_plan`（答疑零副作用/顾问命令被拒/执行图准入/在途 Run 保护/会话键六分量）。
-  **2.6 与 5.2 未勾选**：G-31 与「共享接口变化从发现到再次接受」需要真实项目样本，
-  机器造不出来。出口结论 `blocked`（`docs/reports/p3-exit-evidence.md`），支持矩阵 §9 无 Supported 行，
-  P3 的 I/G 绑定同样全部保持 planned。CI 见 `.github/workflows/ci.yml`（Linux + Windows + workbench + openspec）。
+  **2.6 已勾选**：`xtask impact --from/--to` 从本仓库真实提交（`a9c80d5`、`157298b`）与真实
+  模块图跑 G-31，接口变化 3+1 处、确定 61+9 个、候选占已知区域 5.3%，G-31 已升 implemented。
+  报告只给确定/可能/未知与未执行项；**静态图会漏** `use super::`、`use crate::{a,b}` 多导入、
+  `pub use` 重导出，宏与动态派发不可见（`docs/spec-notes/p3-impact-sample.md` §6），
+  故不宣称"只有这些受影响"。**5.2 未勾选**：「共享接口变化从发现到再次接受」的完整演示仍未做。
+  出口结论 `blocked`（`docs/reports/p3-exit-evidence.md`），支持矩阵 §9 无 Supported 行。
+  CI 见 `.github/workflows/ci.yml`（Linux + Windows + workbench + openspec）。
 - **P4 进行中（2026-11-21）**：`openspec/changes/p4-runtime-delivery` 任务 1.1—1.6、2.1—2.6 已勾选。
   `bod-app::runtime_verification` 把运行验收拆成五件事：计划必须覆盖五个面且 API/浏览器/Agent
   三类检查必须指名已有工具（自建引擎被拒）；报告绑定 commit/digest、规格与规则修订、环境、

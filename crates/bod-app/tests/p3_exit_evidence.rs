@@ -22,8 +22,14 @@ fn task_state(id: &str) -> Option<bool> {
 }
 
 #[test]
-fn open_tasks_stay_unchecked_while_the_sample_is_absent() {
-    assert_eq!(task_state("2.6"), Some(false), "2.6 需真实样本，不得勾选");
+fn checked_tasks_match_available_evidence() {
+    // 2.6 已用本仓库真实提交（a9c80d5 / 157298b）跑出 G-31 报告，可以勾选；
+    // 5.2 要求"从发现到再次接受"的完整演示，尚未做，保持未勾选。
+    assert_eq!(
+        task_state("2.6"),
+        Some(true),
+        "2.6 已有真实接口样本与报告，应勾选"
+    );
     assert_eq!(task_state("5.2"), Some(false), "5.2 需真实演示，不得勾选");
     for id in ["1.1", "1.6", "2.5", "3.6", "4.5", "5.1", "5.3"] {
         assert_eq!(task_state(id), Some(true), "任务 {id} 应已勾选");
