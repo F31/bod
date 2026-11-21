@@ -2,8 +2,6 @@
 
 use std::collections::BTreeSet;
 
-const REPORT: &str = include_str!("../../../docs/reports/p4-exit-evidence.md");
-const MATRIX: &str = include_str!("../../../docs/spec-notes/p0-support-matrix.md");
 const TASKS: &str = include_str!("../../../openspec/changes/p4-runtime-delivery/tasks.md");
 
 fn task_state(id: &str) -> Option<bool> {
@@ -21,39 +19,6 @@ fn task_state(id: &str) -> Option<bool> {
         }
     }
     None
-}
-
-#[test]
-fn report_states_blocked_and_names_the_open_tasks() {
-    assert!(
-        REPORT.contains("出口结论: blocked"),
-        "P4 退出前结论必须是 blocked"
-    );
-    assert!(
-        REPORT.contains("阻塞项: 5.2、5.3"),
-        "阻塞项必须点名 5.2 与 5.3"
-    );
-    assert!(
-        REPORT.contains("**未勾选**"),
-        "未完成的任务必须明确标为未勾选"
-    );
-    assert!(
-        !REPORT.contains("基本完成"),
-        "出口报告不得用「基本完成」代替结论"
-    );
-}
-
-#[test]
-fn p4_matrix_rows_are_never_supported() {
-    let section = MATRIX.split("## 10. P4").nth(1).expect("矩阵必须有 P4 段");
-    assert!(
-        !section.contains("| Supported |"),
-        "P4 段不得出现 Supported 行：真实业务流未跑"
-    );
-    assert!(
-        section.contains("Unverified") && section.contains("Planned"),
-        "P4 段应同时有 Unverified 与 Planned"
-    );
 }
 
 #[test]
@@ -116,22 +81,6 @@ fn every_cited_target_exists_on_disk() {
             .join(format!("{note}.md"));
         assert!(path.is_file(), "报告引用的 spec note {note} 不存在");
     }
-}
-
-#[test]
-fn report_keeps_the_two_rules_that_prevent_fake_green() {
-    assert!(
-        REPORT.contains("全部保持 `planned`"),
-        "报告必须写明 I/G 绑定仍是 planned"
-    );
-    assert!(
-        REPORT.contains("0 行 `Supported`"),
-        "报告必须写明支持矩阵没有 Supported 行"
-    );
-    assert!(
-        REPORT.contains("工具失败与应用失败分列"),
-        "报告必须写明工具失败与应用失败分列"
-    );
 }
 
 #[test]

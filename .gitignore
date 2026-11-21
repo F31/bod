@@ -46,3 +46,9 @@ secrets/
 
 # 真实演练记录（含演练者姓名与真实任务内容，只在本机留存；报告里只贴读数与摘要）
 drills/
+
+# CodeGraph 本地索引（junction 到 C:\bod-codegraph，不随源码提交）
+.codegraph/
+
+# 文档与规格手册只保留在本机，不进入版本库（含 reports / spec-notes / 方案文档）
+docs/

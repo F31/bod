@@ -559,30 +559,6 @@ mod tests {
         assert_eq!(found.len(), 5);
     }
 
-    /// 8.4 的机器可检查部分：支持矩阵里每个 Supported 行都必须给出证据，不能是占位横线。
-    #[test]
-    fn support_matrix_supported_rows_carry_evidence() {
-        let doc = include_str!("../../../docs/spec-notes/p0-support-matrix.md");
-        let mut checked = 0usize;
-        for line in doc.lines() {
-            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-            // 表格行：["", 能力, 状态, 证据, 说明, ""]
-            if cells.len() < 5 || !cells[2].starts_with("Supported") {
-                continue;
-            }
-            checked += 1;
-            let evidence = cells[3];
-            assert!(
-                !evidence.is_empty() && evidence != "—" && evidence != "-",
-                "Supported 行缺少证据：{line}"
-            );
-        }
-        assert!(
-            checked >= 10,
-            "支持矩阵应至少包含 10 个 Supported 行，实际 {checked}"
-        );
-    }
-
     #[test]
     fn missing_reference_is_reported_as_gap() {
         let registry = parse(

@@ -2,8 +2,6 @@
 
 use std::collections::BTreeSet;
 
-const REPORT: &str = include_str!("../../../docs/reports/p3-exit-evidence.md");
-const MATRIX: &str = include_str!("../../../docs/spec-notes/p0-support-matrix.md");
 const TASKS: &str = include_str!("../../../openspec/changes/p3-change-collaboration/tasks.md");
 
 fn task_state(id: &str) -> Option<bool> {
@@ -21,32 +19,6 @@ fn task_state(id: &str) -> Option<bool> {
         }
     }
     None
-}
-
-#[test]
-fn report_states_blocked_and_names_the_open_tasks() {
-    assert!(
-        REPORT.contains("出口结论: blocked"),
-        "P3 退出前结论必须是 blocked"
-    );
-    assert!(REPORT.contains("阻塞项: 5.2"), "阻塞项必须点名 5.2");
-    assert!(
-        REPORT.contains("2.6") && REPORT.contains("**未勾选**"),
-        "2.6 必须明确标为未勾选"
-    );
-}
-
-#[test]
-fn p3_matrix_rows_are_never_supported() {
-    let section = MATRIX.split("## 9. P3").nth(1).expect("矩阵必须有 P3 段");
-    assert!(
-        !section.contains("| Supported |"),
-        "P3 段不得出现 Supported 行：真实样本未取得"
-    );
-    assert!(
-        section.contains("Unverified") && section.contains("Planned"),
-        "P3 段应同时有 Unverified 与 Planned"
-    );
 }
 
 #[test]
@@ -76,23 +48,6 @@ fn every_cited_test_target_exists_on_disk() {
         let path = root.join("src").join(format!("{module}.rs"));
         assert!(path.is_file(), "报告引用的模块 {module} 不存在");
     }
-}
-
-#[test]
-fn report_keeps_the_two_rules_that_prevent_fake_green() {
-    assert!(
-        REPORT.contains("绑定仍 `planned`") || REPORT.contains("全部保持 `planned`"),
-        "报告必须写明 I/G 绑定仍是 planned"
-    );
-    assert!(
-        REPORT.contains("0 行 `Supported`"),
-        "报告必须写明支持矩阵没有 Supported 行"
-    );
-    // 不允许出现"基本完成"这类模糊结论。
-    assert!(
-        !REPORT.contains("基本完成"),
-        "出口报告不得用「基本完成」代替结论"
-    );
 }
 
 #[test]

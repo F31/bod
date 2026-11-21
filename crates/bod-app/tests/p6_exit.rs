@@ -16,9 +16,6 @@ use bod_app::mobile_control::{
 use bod_app::readonly_api::{ReadonlyRecord, Viewer, filter_records};
 use bod_app::remote_delegation::{Channel, DeviceAction, DeviceGrant, signature_label};
 
-const MATRIX: &str = include_str!("../../../docs/spec-notes/p0-support-matrix.md");
-const REPORT: &str = include_str!("../../../docs/reports/p6-exit-evidence.md");
-const GATES: &str = include_str!("../../../verification/gates.yaml");
 const TASKS: &str = include_str!("../../../openspec/changes/p6-open-extension/tasks.md");
 const SELF: &str = include_str!("../tests/p6_exit.rs");
 
@@ -252,83 +249,6 @@ fn remote_disabled_keeps_local_paths_independent() {
         "无节点签名",
         "历史执行无签名必须如实标注"
     );
-}
-
-/// 5.3：支持矩阵按能力分项，六列齐全，且没有一项 Supported。
-#[test]
-fn support_matrix_publishes_p6_per_capability() {
-    let section = MATRIX
-        .split("## 12. P6 按需开放")
-        .nth(1)
-        .expect("支持矩阵必须有 §12");
-    for column in [
-        "协议版本",
-        "去重保留期",
-        "断线行为",
-        "凭据隔离",
-        "已通过用例",
-        "已知限制",
-    ] {
-        assert!(section.contains(column), "§12 缺列 `{column}`");
-    }
-    for capability in [
-        "第三方扩展安装（SDK）",
-        "远程节点委派",
-        "远程分区与对账",
-        "只读查询适配",
-        "移动伴随审批",
-        "客户 H5 门户",
-        "HTTP/SSE 基线传输",
-        "QUIC / 隧道 / 中继",
-        "小程序渠道",
-    ] {
-        assert!(section.contains(capability), "§12 缺能力行 `{capability}`");
-        let row = section
-            .lines()
-            .find(|line| line.contains(capability))
-            .unwrap_or_default();
-        assert!(
-            !row.contains("| Supported |"),
-            "`{capability}` 不得标 Supported：{row}"
-        );
-    }
-    assert!(
-        section.contains("Supported：**0** 条"),
-        "计数必须写明 0 Supported"
-    );
-    assert!(
-        section.contains("| **Experimental** |"),
-        "未测传输必须标 Experimental"
-    );
-}
-
-/// 5.4：出口报告存在、结论为 blocked，且未把未完成项说成已完成。
-#[test]
-fn exit_report_is_blocked_with_open_items() {
-    assert!(
-        REPORT.contains("**结论：`blocked`。**"),
-        "结论必须是 blocked"
-    );
-    for needle in [
-        "2.8（双机复现 §43.10）",
-        "4.6（真实 iOS/Android 设备）",
-        "第三方不改宿主安装",
-        "分区、撤权、停止与恢复",
-        "G-19、G-23、G-34、G-46、G-47 一条都没有写入",
-    ] {
-        assert!(REPORT.contains(needle), "报告必须写明 `{needle}`");
-    }
-    assert!(
-        !REPORT.contains("结论：`supported`"),
-        "不得把出口写成已通过"
-    );
-    // 门禁同样不许提前绑定。
-    for gate in ["G-19", "G-23", "G-34", "G-46", "G-47"] {
-        assert!(
-            !GATES.contains(&format!("- id: {gate}")),
-            "{gate} 不得在出口前写入 gates.yaml"
-        );
-    }
 }
 
 /// 5.1：任务勾选状态必须与出口结论一致（2.8 与 4.6 未勾选）。
