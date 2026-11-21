@@ -55,6 +55,7 @@ pub mod maintenance;
 pub mod manager_transfer;
 pub mod merge_queue;
 pub mod migration_safety;
+pub mod mobile_control;
 pub mod notification_channel;
 pub mod observation_redaction;
 pub mod openspec_integration;
