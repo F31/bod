@@ -51,6 +51,7 @@ pub mod handoff_package;
 pub mod handoff_sample;
 pub mod handoff_snapshot;
 pub mod history_continuity;
+pub mod host_api;
 pub mod host_guard;
 pub mod host_handshake;
 pub mod http_router;

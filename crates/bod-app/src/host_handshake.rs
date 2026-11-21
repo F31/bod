@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::host_api::{self, ErrorResponse, HandshakeResponse, HealthResponse, ShutdownResponse};
 use crate::http_router::{
     Auth, EndpointRequest, Method, Outcome, Reply, Request, Route, RouteError, token_eq,
 };
@@ -281,11 +282,11 @@ impl HostServer {
         let hosts = request.header_values("host");
         let origins = request.header_values("origin");
         if let Err(rejection) = self.policy.check(&hosts, &origins) {
-            let body = serde_json::json!({
-                "error": rejection.code(),
-                "reason": rejection.explain(),
-            });
-            respond(&mut stream, 403, &body.to_string())?;
+            respond_dto(
+                &mut stream,
+                403,
+                &ErrorResponse::with_reason(rejection.code(), rejection.explain()),
+            )?;
             return Ok(!self.stopping.load(Ordering::SeqCst));
         }
 
@@ -299,27 +300,15 @@ impl HostServer {
                 std::thread::spawn(move || handle(stream));
             }
             Outcome::Failed(err) => {
-                respond(
-                    &mut stream,
-                    err.status,
-                    &serde_json::json!({ "error": err.code }).to_string(),
-                )?;
+                respond_dto(&mut stream, err.status, &ErrorResponse::code(err.code))?;
             }
             Outcome::Unauthorized(code) => {
-                respond(
-                    &mut stream,
-                    401,
-                    &serde_json::json!({ "error": code }).to_string(),
-                )?;
+                respond_dto(&mut stream, 401, &ErrorResponse::code(code))?;
             }
             // 方法不对与路径不存在对外同答 404：既有客户端按 404 处理，
             // 本次不引入 405，以免改变可观测行为（理由见 spec-note）。
             Outcome::MethodNotAllowed | Outcome::NotFound => {
-                respond(
-                    &mut stream,
-                    404,
-                    &serde_json::json!({ "error": "BOD_NOT_FOUND" }).to_string(),
-                )?;
+                respond_dto(&mut stream, 404, &ErrorResponse::code("BOD_NOT_FOUND"))?;
             }
         }
         Ok(!self.stopping.load(Ordering::SeqCst))
@@ -364,12 +353,12 @@ static ROUTES: &[Route<HostServer>] = &[
 ];
 
 fn route_health(state: &HostServer, _endpoint: EndpointRequest) -> Result<Reply, RouteError> {
-    Ok(Reply::ok(serde_json::json!({
-        "ok": true,
-        "protocol": PROTOCOL,
-        "instance_id": state.descriptor.instance_id,
-        "pid": state.descriptor.pid,
-    })))
+    Ok(Reply::ok(host_api::encode(&HealthResponse {
+        ok: true,
+        protocol: PROTOCOL,
+        instance_id: state.descriptor.instance_id.clone(),
+        pid: state.descriptor.pid,
+    })?))
 }
 
 fn route_events(state: &HostServer, endpoint: EndpointRequest) -> Result<Reply, RouteError> {
@@ -395,12 +384,12 @@ fn route_handshake(state: &HostServer, endpoint: EndpointRequest) -> Result<Repl
         });
     match token {
         Some(token) if token_eq(&token, &state.descriptor.handshake_token) => {
-            Ok(Reply::ok(serde_json::json!({
-                "protocol": PROTOCOL,
-                "instance_id": state.descriptor.instance_id,
-                "pid": state.descriptor.pid,
-                "session_key": state.session_key,
-            })))
+            Ok(Reply::ok(host_api::encode(&HandshakeResponse {
+                protocol: PROTOCOL,
+                instance_id: state.descriptor.instance_id.clone(),
+                pid: state.descriptor.pid,
+                session_key: state.session_key.clone(),
+            })?))
         }
         _ => Err(RouteError::new(401, "BOD_HANDSHAKE_DENIED")),
     }
@@ -408,7 +397,9 @@ fn route_handshake(state: &HostServer, endpoint: EndpointRequest) -> Result<Repl
 
 fn route_shutdown(state: &HostServer, _endpoint: EndpointRequest) -> Result<Reply, RouteError> {
     state.stopping.store(true, Ordering::SeqCst);
-    Ok(Reply::ok(serde_json::json!({ "stopping": true })))
+    Ok(Reply::ok(host_api::encode(&ShutdownResponse {
+        stopping: true,
+    })?))
 }
 
 /// `GET /_bod/events` 的实现：把补齐计划写成 SSE 帧，必要时保活并继续推送增量。
@@ -435,11 +426,11 @@ fn stream_events(
         token_eq,
     );
     if !auth.is_authorized() {
-        let body = serde_json::json!({
-            "error": "BOD_STREAM_DENIED",
-            "reason": auth.explain(),
-        });
-        respond(&mut stream, 401, &body.to_string())?;
+        respond_dto(
+            &mut stream,
+            401,
+            &ErrorResponse::with_reason("BOD_STREAM_DENIED", auth.explain()),
+        )?;
         return Ok(());
     }
 
@@ -590,6 +581,21 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, HostError> {
     }
     request.body = String::from_utf8_lossy(&body[..body.len().min(length)]).to_string();
     Ok(request)
+}
+
+/// 用 DTO 写响应。
+///
+/// 序列化失败按 500 处理：DTO 写错是服务端缺陷，不能冒充请求错误；
+/// 且这条路径上不能 panic——`run` 只捕获 `Err`，panic 会带走整个宿主。
+fn respond_dto<T: serde::Serialize>(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &T,
+) -> Result<(), HostError> {
+    match serde_json::to_string(body) {
+        Ok(text) => respond(stream, status, &text),
+        Err(_) => respond(stream, 500, r#"{"error":"BOD_ENCODE_FAILED"}"#),
+    }
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), HostError> {
