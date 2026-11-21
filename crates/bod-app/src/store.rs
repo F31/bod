@@ -7,6 +7,11 @@
 use crate::audit_log::{AuditDecision, AuditEvent, AuditRecord};
 use crate::authorization::StageAction;
 use crate::config::BodConfig;
+use crate::coverage_receipt::VerificationConclusion;
+use crate::delivery_tracking::{
+    DeliveryError, ObservationKind, ObservationRow, TargetRow, TrackingRow, TrackingView,
+    evidence_stamps, project_target, verification_conclusion,
+};
 use crate::domain::artifact::{
     AcceptanceBinding, AcceptanceDecision, AcceptanceRecord, Artifact, ArtifactKind,
     ArtifactRevision, ArtifactVisibility, DependencyKind, Digest, DigestAlgorithm,
@@ -46,7 +51,8 @@ use std::path::Path;
 /// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图，
 /// 010 为 P2 管理委任/作用域头/命令审计，011 为 P2 检查点与接管确认，
 /// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据，
-/// 014 为 decisions 不可变 trigger（P2 3.4 加固），015 为业务审计事件（CR-002）；
+/// 014 为 decisions 不可变 trigger（P2 3.4 加固），015 为业务审计事件（CR-002），
+/// 016 为 §11 交付跟踪（P8 3.1：跟踪项/目标/追加式观察）；
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 /// P7 基准统一页缓存：负数按 KiB 解释，64 MiB；避免依赖 SQLite 默认 2 MiB。
 const BENCH_CACHE_SIZE_KIB: i64 = 65_536;
@@ -67,6 +73,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/013_scope_org.sql"),
     include_str!("../migrations/014_history_triggers.sql"),
     include_str!("../migrations/015_audit.sql"),
+    include_str!("../migrations/016_delivery_tracking.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -86,6 +93,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "013_scope_org.sql",
     "014_history_triggers.sql",
     "015_audit.sql",
+    "016_delivery_tracking.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -145,6 +153,114 @@ fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
             decided_at: row.get(11)?,
         },
         recorded_at_ms: row.get(12)?,
+    })
+}
+
+/// 交付跟踪的读取列顺序。集中一处，避免多处查询各写一份列清单后互相错位。
+const TRACKING_SELECT: &str = "SELECT tracking_id, company_id, project_id, title, requirement,
+            owner_id, state, issue_uid, run_uid, attempt_id, resource_version,
+            created_at_ms, updated_at_ms
+     FROM delivery_tracking";
+
+const TARGET_SELECT: &str = "SELECT target_id, company_id, tracking_id, customer_id, environment,
+            deployment_unit, acceptance, switch_state, population_known,
+            created_at_ms, updated_at_ms
+     FROM delivery_targets";
+
+const OBSERVATION_SELECT: &str = "SELECT observation_id, company_id, tracking_id, target_id, kind,
+            source_kind, source_ref, artifact_revision, digest, revision, note, actor_id,
+            authorized, observed_at, observed_at_ms, recorded_at_ms
+     FROM delivery_observations";
+
+/// 交付跟踪的读侧取值错误。与审计一致：库里出现表外取值就炸，不静默回退。
+fn delivery_row_error(
+    index: usize,
+    err: crate::delivery_tracking::DeliveryError,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            err.explain(),
+        )),
+    )
+}
+
+fn map_tracking_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackingRow> {
+    use crate::delivery_tracking::TrackingState;
+    let state_text: String = row.get(6)?;
+    let state = TrackingState::parse(&state_text).map_err(|err| delivery_row_error(6, err))?;
+    Ok(TrackingRow {
+        tracking_id: row.get(0)?,
+        company_id: row.get(1)?,
+        project_id: row.get(2)?,
+        title: row.get(3)?,
+        requirement: row.get(4)?,
+        owner_id: row.get(5)?,
+        state,
+        issue_uid: row.get(7)?,
+        run_uid: row.get(8)?,
+        attempt_id: row.get(9)?,
+        resource_version: row.get(10)?,
+        created_at_ms: row.get(11)?,
+        updated_at_ms: row.get(12)?,
+    })
+}
+
+fn map_target_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TargetRow> {
+    use crate::coverage_receipt::SwitchState;
+    use crate::delivery_tracking::DeliveryError;
+    let switch_text: String = row.get(7)?;
+    let switch_state = match switch_text.as_str() {
+        "synced" => SwitchState::Synced,
+        "not-synced" => SwitchState::NotSynced,
+        "unknown" => SwitchState::Unknown,
+        other => {
+            return Err(delivery_row_error(
+                7,
+                DeliveryError::UnknownSwitchState(other.to_string()),
+            ));
+        }
+    };
+    Ok(TargetRow {
+        target_id: row.get(0)?,
+        company_id: row.get(1)?,
+        tracking_id: row.get(2)?,
+        customer_id: row.get(3)?,
+        environment: row.get(4)?,
+        deployment_unit: row.get(5)?,
+        acceptance: row.get(6)?,
+        switch_state,
+        population_known: row.get::<_, i64>(8)? != 0,
+        created_at_ms: row.get(9)?,
+        updated_at_ms: row.get(10)?,
+    })
+}
+
+fn map_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationRow> {
+    use crate::delivery_tracking::{ObservationKind, parse_source_kind};
+    let kind_text: String = row.get(4)?;
+    let kind = ObservationKind::parse(&kind_text).map_err(|err| delivery_row_error(4, err))?;
+    let source_text: String = row.get(5)?;
+    let source_kind = parse_source_kind(&source_text).map_err(|err| delivery_row_error(5, err))?;
+    Ok(ObservationRow {
+        observation_id: row.get(0)?,
+        company_id: row.get(1)?,
+        tracking_id: row.get(2)?,
+        target_id: row.get(3)?,
+        kind,
+        source_kind,
+        source_ref: row.get(6)?,
+        artifact_revision: row.get(7)?,
+        digest: row.get(8)?,
+        revision: row.get(9)?,
+        note: row.get(10)?,
+        actor_id: row.get(11)?,
+        authorized: row.get::<_, i64>(12)? != 0,
+        observed_at: row.get(13)?,
+        observed_at_ms: row.get(14)?,
+        recorded_at_ms: row.get(15)?,
     })
 }
 
@@ -255,6 +371,9 @@ pub enum StoreError {
     /// 审计事件未通过落库前校验（字段为空、决策与原因不一致、含凭据形态）。
     /// 单独一档而不是塞进 `Sql`：这是调用方的编程或安全问题，不是数据库故障。
     Audit(crate::audit_log::AuditRejection),
+    /// 交付跟踪的读写出错：表外取值、跨跟踪项引用目标、人工补证缺备注。
+    /// 同样单独一档——这些是数据或调用方错误，重试没有意义。
+    Delivery(crate::delivery_tracking::DeliveryError),
 }
 
 impl fmt::Display for StoreError {
@@ -270,6 +389,7 @@ impl fmt::Display for StoreError {
                 write!(f, "usage_key 已入账，重复上报被去重: {usage_key}")
             }
             Self::Audit(rejection) => write!(f, "审计事件被拒绝: {}", rejection.explain()),
+            Self::Delivery(err) => write!(f, "交付跟踪失败: {}", err.explain()),
         }
     }
 }
@@ -285,6 +405,12 @@ impl From<std::io::Error> for StoreError {
 impl From<rusqlite::Error> for StoreError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Sql(value)
+    }
+}
+
+impl From<crate::delivery_tracking::DeliveryError> for StoreError {
+    fn from(value: crate::delivery_tracking::DeliveryError) -> Self {
+        Self::Delivery(value)
     }
 }
 
@@ -438,6 +564,134 @@ impl SqliteStore {
         ))?;
         let rows = stmt.query_map(params![company_id, limit as i64], map_audit_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 读一个跟踪项的完整视图（P8 3.1）：跟踪项 + 目标 + 观察 + 各目标的验证结论。
+    ///
+    /// 查询条数固定（4 条），不随目标数量增长：观察与验证记录一次 JOIN 取回，
+    /// 再在内存里按目标归并。**不写库**：读路径不产生审计、不改任何状态。
+    ///
+    /// 覆盖结论在这里算出（`project_target` → `judge_coverage`），不从表里读——
+    /// 库里只有事实，结论永远由同一处判定产生（design D1）。
+    pub fn delivery_tracking_view(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+    ) -> Result<Option<TrackingView>, StoreError> {
+        let tracking = self
+            .conn
+            .query_row(
+                &format!("{TRACKING_SELECT} WHERE company_id = ?1 AND tracking_id = ?2"),
+                params![company_id, tracking_id],
+                map_tracking_row,
+            )
+            .optional()?;
+        let Some(tracking) = tracking else {
+            return Ok(None);
+        };
+
+        let mut stmt = self.conn.prepare(&format!(
+            "{TARGET_SELECT} WHERE company_id = ?1 AND tracking_id = ?2
+             ORDER BY customer_id ASC, environment ASC, deployment_unit ASC"
+        ))?;
+        let targets = stmt
+            .query_map(params![company_id, tracking_id], map_target_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut stmt = self.conn.prepare(&format!(
+            "{OBSERVATION_SELECT} WHERE company_id = ?1 AND tracking_id = ?2
+             ORDER BY observed_at_ms DESC, recorded_at_ms DESC, observation_id DESC"
+        ))?;
+        let observations = stmt
+            .query_map(params![company_id, tracking_id], map_observation_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let conclusions = self.delivery_verification_conclusions(company_id, tracking_id)?;
+        let mut projected = Vec::with_capacity(targets.len());
+        for target in &targets {
+            // 克隆只为让投影不与连接共享借用；条数按目标计，不做全表扫描。
+            let related: Vec<ObservationRow> = observations
+                .iter()
+                .filter(|observation| observation.target_id == target.target_id)
+                .cloned()
+                .collect();
+            let conclusion = conclusions
+                .get(&target.target_id)
+                .copied()
+                .unwrap_or(VerificationConclusion::Unknown);
+            projected.push(project_target(
+                &tracking.project_id,
+                target,
+                &related,
+                conclusion,
+            ));
+        }
+
+        let evidence = evidence_stamps(&observations);
+        Ok(Some(TrackingView {
+            tracking,
+            targets: projected,
+            evidence,
+        }))
+    }
+
+    /// 列出某 Company 的跟踪项与目标数量。
+    ///
+    /// 列表刻意**不带覆盖结论**：结论离开证据没有意义，而列表里塞不下证据；
+    /// 列出来就会被当成可以引用的结论。要结论请读单个跟踪项。
+    pub fn list_delivery_tracking(
+        &self,
+        company_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(TrackingRow, i64)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.tracking_id, t.company_id, t.project_id, t.title, t.requirement,
+                    t.owner_id, t.state, t.issue_uid, t.run_uid, t.attempt_id,
+                    t.resource_version, t.created_at_ms, t.updated_at_ms,
+                    COUNT(g.target_id)
+             FROM delivery_tracking t
+             LEFT JOIN delivery_targets g
+               ON g.company_id = t.company_id AND g.tracking_id = t.tracking_id
+             WHERE t.company_id = ?1
+             GROUP BY t.tracking_id
+             ORDER BY t.created_at_ms DESC, t.tracking_id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![company_id, limit as i64], |row| {
+            Ok((map_tracking_row(row)?, row.get::<_, i64>(13)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 每个目标的验证结论：取「最近一条带制品修订的观察」对应的最新验证记录。
+    ///
+    /// 没带修订的观察不参与——「没给修订」不是否定证据，不该把已有的验证结论抹掉。
+    /// `waived` 仍映射为 `Unknown`（见 `verification_conclusion`）。
+    fn delivery_verification_conclusions(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+    ) -> Result<std::collections::HashMap<String, VerificationConclusion>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT o.target_id, v.state
+             FROM delivery_observations o
+             JOIN verification_records v
+               ON v.company_id = o.company_id AND v.revision_id = o.artifact_revision
+             WHERE o.company_id = ?1 AND o.tracking_id = ?2
+             ORDER BY o.observed_at_ms DESC, o.recorded_at_ms DESC, v.observed_at_ms DESC",
+        )?;
+        let rows = stmt.query_map(params![company_id, tracking_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut conclusions = std::collections::HashMap::new();
+        for row in rows {
+            let (target_id, state) = row?;
+            if conclusions.contains_key(&target_id) {
+                continue;
+            }
+            conclusions.insert(target_id, verification_conclusion(&state)?);
+        }
+        Ok(conclusions)
     }
 
     /// 只读列出 (Issue uid, 工作包修订) 关联，供工作台把首次使用的交付证据归属到任务页。
@@ -2787,6 +3041,109 @@ impl<'a> UnitOfWork<'a> {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 登记一个跟踪项（P8 3.1 的写入原语，不是导入端点）。
+    ///
+    /// 幂等键、来源身份去重与目标追加语义分别在 3.3 / 3.4 / 3.5 落地；这里只保证
+    /// 「一行能按约束写进去」，且内部引用（issue/run/attempt）缺省时**不伪造运行**（D3）。
+    pub fn insert_delivery_tracking(&self, row: &TrackingRow) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO delivery_tracking (
+                tracking_id, company_id, project_id, title, requirement, owner_id, state,
+                issue_uid, run_uid, attempt_id, resource_version, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                row.tracking_id,
+                row.company_id,
+                row.project_id,
+                row.title,
+                row.requirement,
+                row.owner_id,
+                row.state.as_str(),
+                row.issue_uid,
+                row.run_uid,
+                row.attempt_id,
+                row.resource_version,
+                row.created_at_ms,
+                row.updated_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 登记一个客户目标（同一跟踪项下「客户 × 环境 × 单元」唯一）。
+    pub fn insert_delivery_target(&self, row: &TargetRow) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO delivery_targets (
+                target_id, company_id, tracking_id, customer_id, environment, deployment_unit,
+                acceptance, switch_state, population_known, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                row.target_id,
+                row.company_id,
+                row.tracking_id,
+                row.customer_id,
+                row.environment,
+                row.deployment_unit,
+                row.acceptance,
+                row.switch_state.as_str(),
+                row.population_known as i64,
+                row.created_at_ms,
+                row.updated_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 追加一条观察。**只追加，不改写**——回滚是新的观察（3.1 的两条核心语义之一）。
+    ///
+    /// 两道显式校验先于库里约束，为的是给出可读原因：
+    /// 人工补证没有授权范围与复验依据（`note` 为空）直接拒绝；
+    /// 目标不属于该跟踪项直接拒绝（复合外键会拦，但报错信息读不出来）。
+    pub fn append_delivery_observation(&self, row: &ObservationRow) -> Result<(), StoreError> {
+        if row.kind == ObservationKind::ManualEvidence && row.note.trim().is_empty() {
+            return Err(DeliveryError::EmptyManualEvidenceNote.into());
+        }
+        let belongs: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM delivery_targets
+             WHERE company_id = ?1 AND tracking_id = ?2 AND target_id = ?3",
+            params![row.company_id, row.tracking_id, row.target_id],
+            |line| line.get(0),
+        )?;
+        if belongs == 0 {
+            return Err(DeliveryError::TargetNotInTracking {
+                target_id: row.target_id.clone(),
+                tracking_id: row.tracking_id.clone(),
+            }
+            .into());
+        }
+        self.conn.execute(
+            "INSERT INTO delivery_observations (
+                observation_id, company_id, tracking_id, target_id, kind, source_kind, source_ref,
+                artifact_revision, digest, revision, note, actor_id, authorized,
+                observed_at, observed_at_ms, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                row.observation_id,
+                row.company_id,
+                row.tracking_id,
+                row.target_id,
+                row.kind.as_str(),
+                row.source_kind,
+                row.source_ref,
+                row.artifact_revision,
+                row.digest,
+                row.revision,
+                row.note,
+                row.actor_id,
+                row.authorized as i64,
+                row.observed_at,
+                row.observed_at_ms,
+                row.recorded_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn get_appointment(
         &self,
         company_id: &str,
@@ -5098,6 +5455,345 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // 交付跟踪（P8 3.1）
+    // -----------------------------------------------------------------------
+
+    fn delivery_tracking(company: &str, id: &str) -> TrackingRow {
+        TrackingRow {
+            tracking_id: id.to_string(),
+            company_id: company.to_string(),
+            project_id: "project-1".to_string(),
+            title: "客户 A 的修复".to_string(),
+            requirement: "登录失败".to_string(),
+            owner_id: "alice".to_string(),
+            state: crate::delivery_tracking::TrackingState::Open,
+            issue_uid: None,
+            run_uid: None,
+            attempt_id: None,
+            resource_version: 1,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn delivery_target(tracking_id: &str, id: &str, customer: &str, unit: &str) -> TargetRow {
+        TargetRow {
+            target_id: id.to_string(),
+            company_id: "company-default".to_string(),
+            tracking_id: tracking_id.to_string(),
+            customer_id: customer.to_string(),
+            environment: "prod".to_string(),
+            deployment_unit: unit.to_string(),
+            acceptance: "冒烟通过".to_string(),
+            switch_state: crate::coverage_receipt::SwitchState::Synced,
+            population_known: true,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn delivery_observation(
+        id: &str,
+        target_id: &str,
+        kind: ObservationKind,
+        at_ms: i64,
+        revision: &str,
+        digest: &str,
+        note: &str,
+    ) -> ObservationRow {
+        ObservationRow {
+            observation_id: id.to_string(),
+            company_id: "company-default".to_string(),
+            tracking_id: "dt-1".to_string(),
+            target_id: target_id.to_string(),
+            kind,
+            source_kind: if kind == ObservationKind::ManualEvidence {
+                "manual"
+            } else {
+                "connector"
+            },
+            source_ref: "acme/repo#318".to_string(),
+            artifact_revision: Some(revision.to_string()),
+            digest: digest.to_string(),
+            revision: format!("deploy-{id}"),
+            note: note.to_string(),
+            actor_id: "alice".to_string(),
+            authorized: false,
+            observed_at: format!("2026-11-21T10:00:{:02}Z", at_ms % 60),
+            observed_at_ms: at_ms,
+            recorded_at_ms: at_ms,
+        }
+    }
+
+    fn insert_verification(
+        store: &SqliteStore,
+        record_id: &str,
+        revision: &str,
+        state: &str,
+        at_ms: i64,
+    ) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO verification_records (record_id, company_id, revision_id, state,
+                    actor_id, reason, evidence_refs, verification_rules, environment, observed_at_ms)
+                 VALUES (?1, 'company-default', ?2, ?3, 'ci', '', '[]', 'smoke', 'prod', ?4)",
+                params![record_id, revision, state, at_ms],
+            )
+            .expect("验证记录应可写入");
+    }
+
+    /// 三个目标，覆盖三种结论来源：连接器部署、未授权人工补证、豁免验证。
+    fn seed_delivery(store: &mut SqliteStore) {
+        with_uow(store, |uow| {
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-1"))
+                .expect("跟踪项应可写入");
+            for (id, customer, unit) in [
+                ("t-1", "acme", "web"),
+                ("t-2", "beta", ""),
+                ("t-3", "gamma", ""),
+            ] {
+                uow.insert_delivery_target(&delivery_target("dt-1", id, customer, unit))
+                    .expect("目标应可写入");
+            }
+            uow.append_delivery_observation(&delivery_observation(
+                "o-1",
+                "t-1",
+                ObservationKind::Deployment,
+                100,
+                "rev-1",
+                "sha256:abc",
+                "部署到客户 A 生产环境",
+            ))
+            .expect("部署观察应可写入");
+            // 未授权的人工补证：能证明「现场装了」，但不能据此声称已覆盖。
+            uow.append_delivery_observation(&delivery_observation(
+                "o-2",
+                "t-2",
+                ObservationKind::ManualEvidence,
+                110,
+                "rev-2",
+                "sha256:abc",
+                "离线安装，现场核对完成，授权单尚未登记",
+            ))
+            .expect("人工补证应可写入");
+            uow.append_delivery_observation(&delivery_observation(
+                "o-3",
+                "t-3",
+                ObservationKind::Deployment,
+                120,
+                "rev-3",
+                "sha256:def",
+                "部署到客户 C 生产环境",
+            ))
+            .expect("部署观察应可写入");
+        });
+        insert_verification(store, "vr-1", "rev-1", "verified", 100);
+        insert_verification(store, "vr-2", "rev-2", "verified", 110);
+        insert_verification(store, "vr-3", "rev-3", "waived", 120);
+    }
+
+    /// 读路径：结论从事实算出来，且**读不写库**。
+    #[test]
+    fn delivery_view_derives_coverage_and_writes_nothing() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        seed_delivery(&mut store);
+        let before: i64 = store
+            .read_connection()
+            .query_row("SELECT COUNT(*) FROM delivery_observations", [], |row| {
+                row.get(0)
+            })
+            .expect("应能计数");
+
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("读取应成功")
+            .expect("跟踪项应存在");
+
+        assert_eq!(view.targets.len(), 3);
+        // 目标按客户名排序，输出稳定。
+        assert_eq!(view.targets[0].target.customer_id, "acme");
+        assert!(
+            view.targets[0].verdict.is_covered(),
+            "{:?}",
+            view.targets[0]
+        );
+        assert_eq!(view.targets[0].evidence_revision.as_deref(), Some("o-1"));
+
+        // 未授权补证：待补安装，缺口同时说明「没观察到部署」与「回执未授权」。
+        assert!(matches!(
+            view.targets[1].verdict,
+            crate::coverage_receipt::CoverageVerdict::PendingInstall { .. }
+        ));
+        assert_eq!(
+            view.targets[1].gaps,
+            vec![
+                crate::delivery_tracking::GAP_DEPLOYMENT_NOT_OBSERVED,
+                crate::delivery_tracking::GAP_INSTALL_RECEIPT_UNAUTHORIZED
+            ]
+        );
+
+        // 豁免不等于验过：仍然停在待核实。
+        assert!(matches!(
+            view.targets[2].verdict,
+            crate::coverage_receipt::CoverageVerdict::PendingVerification { .. }
+        ));
+        assert_eq!(
+            view.targets[2].gaps,
+            vec![crate::delivery_tracking::GAP_VERIFICATION_NOT_PASSED]
+        );
+
+        assert_eq!(view.evidence.len(), 3, "三条观察都是证据");
+
+        let after: i64 = store
+            .read_connection()
+            .query_row("SELECT COUNT(*) FROM delivery_observations", [], |row| {
+                row.get(0)
+            })
+            .expect("应能计数");
+        assert_eq!(before, after, "读路径不得写入任何观察");
+    }
+
+    /// 观察是历史：UPDATE / DELETE 由触发器直接拒绝。
+    #[test]
+    fn delivery_observations_are_append_only() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        seed_delivery(&mut store);
+        let update = store.execute_batch_for_test(
+            "UPDATE delivery_observations SET note = '改一下' WHERE observation_id = 'o-1'",
+        );
+        assert!(update.is_err(), "改写观察必须被拒绝");
+        let delete = store.execute_batch_for_test(
+            "DELETE FROM delivery_observations WHERE observation_id = 'o-1'",
+        );
+        assert!(delete.is_err(), "删除观察必须被拒绝");
+    }
+
+    /// 人工补证没有授权范围与复验依据：写入前就拒绝，不等库层 CHECK。
+    #[test]
+    fn manual_evidence_without_note_is_rejected() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-1"))
+                .expect("跟踪项应可写入");
+            uow.insert_delivery_target(&delivery_target("dt-1", "t-1", "acme", "web"))
+                .expect("目标应可写入");
+        });
+        let err = with_uow(&mut store, |uow| {
+            uow.append_delivery_observation(&delivery_observation(
+                "o-1",
+                "t-1",
+                ObservationKind::ManualEvidence,
+                100,
+                "rev-1",
+                "",
+                "   ",
+            ))
+        })
+        .expect_err("空备注的人工补证必须被拒绝");
+        assert!(err.to_string().contains("授权范围"), "{err}");
+    }
+
+    /// 观察不能挂到别的跟踪项的目标上：跨跟踪项引用是掩盖错误的捷径。
+    #[test]
+    fn observation_cannot_claim_another_trackings_target() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-1"))
+                .expect("跟踪项应可写入");
+            uow.insert_delivery_target(&delivery_target("dt-1", "t-1", "acme", "web"))
+                .expect("目标应可写入");
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-2"))
+                .expect("第二个跟踪项应可写入");
+        });
+        let mut observation = delivery_observation(
+            "o-1",
+            "t-1",
+            ObservationKind::Deployment,
+            100,
+            "rev-1",
+            "sha256:abc",
+            "部署",
+        );
+        observation.tracking_id = "dt-2".to_string();
+        let err = with_uow(&mut store, |uow| {
+            uow.append_delivery_observation(&observation)
+        })
+        .expect_err("跨跟踪项引用必须被拒绝");
+        assert!(err.to_string().contains("不属于"), "{err}");
+    }
+
+    /// 读按 Company 隔离：别的公司看不到这条跟踪项。
+    #[test]
+    fn delivery_view_is_company_scoped() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        seed_delivery(&mut store);
+        assert!(
+            store
+                .delivery_tracking_view("company-default", "dt-1")
+                .expect("读取应成功")
+                .is_some()
+        );
+        assert!(
+            store
+                .delivery_tracking_view("company-other", "dt-1")
+                .expect("读取应成功")
+                .is_none()
+        );
+    }
+
+    /// 列表只给规模与身份，不给结论；目标计数用一次 GROUP BY，不按行回查。
+    #[test]
+    fn list_delivery_tracking_counts_targets() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        seed_delivery(&mut store);
+        let mut second = delivery_tracking("company-default", "dt-2");
+        second.created_at_ms = 2;
+        with_uow(&mut store, |uow| {
+            uow.insert_delivery_tracking(&second)
+                .expect("跟踪项应可写入");
+        });
+
+        let rows = store
+            .list_delivery_tracking("company-default", 10)
+            .expect("列表应可读");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0.tracking_id, "dt-2", "按创建时间倒序");
+        assert_eq!(rows[0].1, 0);
+        assert_eq!(rows[1].0.tracking_id, "dt-1");
+        assert_eq!(rows[1].1, 3);
+
+        let limited = store
+            .list_delivery_tracking("company-default", 1)
+            .expect("列表应可读");
+        assert_eq!(limited.len(), 1, "limit 必须生效");
+    }
+
+    /// 验证记录取最新一条：先 `waived` 后 `verified`，结论应变成已覆盖。
+    #[test]
+    fn latest_verification_record_decides() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        seed_delivery(&mut store);
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("读取应成功")
+            .expect("跟踪项应存在");
+        assert!(!view.targets[2].verdict.is_covered(), "豁免不算通过");
+
+        insert_verification(&store, "vr-3b", "rev-3", "verified", 200);
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("读取应成功")
+            .expect("跟踪项应存在");
+        assert!(
+            view.targets[2].verdict.is_covered(),
+            "较新的 verified 应覆盖较早的 waived：{:?}",
+            view.targets[2]
+        );
+    }
+
     #[test]
     fn migration_creates_all_d1_tables() {
         let store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
@@ -5110,8 +5806,9 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 50,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表 + 1 张审计表"
+            count, 53,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表 \
+             + 1 张审计表 + 3 张交付跟踪表（016）"
         );
     }
 

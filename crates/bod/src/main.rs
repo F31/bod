@@ -63,6 +63,9 @@ const USAGE: &str = "\
   bod observe --db <path>          读现有表算 §9 观测读数（算不出的项单列，不填 0）
   bod observe --db <path> --company <id>   指定公司（默认 company-default）
   bod observe --db <path> --json   同上，输出机器可读结果
+  bod tracking --db <path>         列交付跟踪项与目标数（只读；结论不在列表里给）
+  bod tracking --db <path> --id <跟踪项>   看单个跟踪项的逐目标结论、证据与缺口
+  bod tracking --db <path> --json [--id <跟踪项>]   机器可读；带 --id 时与 GET 的响应体同形
   bod serve                        启动本地控制面并写出连接描述（受保护握手）
   bod serve --listen <addr>        指定监听地址（默认取 server.listen，可为 127.0.0.1:0）
   bod serve --descriptor <path>    指定连接描述路径（默认 $BOD_HOME/host.endpoint.json）
@@ -286,6 +289,7 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(bod_app::capacity_evaluation::render_markdown(&report, &[]))
         }
         [cmd, rest @ ..] if cmd == "observe" => observe(rest),
+        [cmd, rest @ ..] if cmd == "tracking" => tracking(rest),
         [cmd, sub] if cmd == "adapter" && sub == "describe" => {
             let adapter = adapter_or_err()?;
             Ok(format!("{}\n", descriptor_json(adapter.descriptor())))
@@ -1055,6 +1059,113 @@ fn snapshot_json(snapshot: &bod_app::observability::ObservationSnapshot) -> serd
         },
         "not_measured": not_measured,
     })
+}
+
+/// `bod tracking`：读交付跟踪项与覆盖结论（P8 3.1）。
+///
+/// 只读：打开库后只做 SELECT。覆盖结论由 `coverage_receipt::judge_coverage` 在读取时算出，
+/// 不从表里读——库里没有「覆盖结论」这一列，也不该有（design D1）。
+///
+/// 为什么先给命令行而不是先开放 `GET /api/v1/delivery-tracking/{id}`：那条契约承诺
+/// 「按调用者授权目标过滤对客户不可见的目标」，而 §34.12 的主体判定尚未实现；
+/// 现在开放就是把不该给的客户给出去。命令行是同一台机器上的操作者视图，
+/// 不涉及跨主体过滤，也没有把未实现的判定说成已实现。
+fn tracking(flags: &[String]) -> Result<String, String> {
+    let mut db: Option<std::path::PathBuf> = None;
+    let mut company = "company-default".to_string();
+    let mut id: Option<String> = None;
+    let mut limit = 50usize;
+    let mut json = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--db" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--db 需要一个路径".to_string())?;
+                db = Some(std::path::PathBuf::from(value));
+                index += 2;
+            }
+            "--company" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--company 需要一个 ID".to_string())?;
+                company = value.clone();
+                index += 2;
+            }
+            "--id" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--id 需要一个跟踪项 ID".to_string())?;
+                id = Some(value.clone());
+                index += 2;
+            }
+            "--limit" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--limit 需要一个正整数".to_string())?;
+                limit = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("--limit 需要正整数，收到 {value}"))?;
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            other => return Err(format!("tracking 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+    let db = db.ok_or_else(|| format!("tracking 需要 --db <数据库路径>\n\n{USAGE}"))?;
+    // `open` 会执行幂等迁移（既有行为）：指向旧库时补建新表，除此之外没有写入。
+    let store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
+        .map_err(|err| format!("打开数据库失败：{err}"))?;
+
+    if let Some(tracking_id) = id {
+        let view = store
+            .delivery_tracking_view(&company, &tracking_id)
+            .map_err(|err| format!("读取失败：{err}"))?
+            .ok_or_else(|| format!("{company} 下没有跟踪项 {tracking_id}"))?;
+        if json {
+            let dto = view.to_dto().map_err(|err| format!("投影失败：{err}"))?;
+            let rendered =
+                serde_json::to_string(&dto).map_err(|err| format!("序列化失败：{err}"))?;
+            return Ok(format!("{rendered}\n"));
+        }
+        return Ok(bod_app::delivery_tracking::render_one(&view));
+    }
+
+    let rows = store
+        .list_delivery_tracking(&company, limit)
+        .map_err(|err| format!("读取失败：{err}"))?;
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(tracking, target_count)| {
+                serde_json::json!({
+                    "tracking_id": &tracking.tracking_id,
+                    "project_id": &tracking.project_id,
+                    "owner": if tracking.owner_id.trim().is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(tracking.owner_id.clone())
+                    },
+                    "version": tracking.resource_version,
+                    "state": tracking.state.as_str(),
+                    // 键名带 `_count`：契约里 `targets` 是数组，这里给数字不能同名，
+                    // 否则复用模型的人会以为拿到了目标列表。
+                    "target_count": target_count,
+                })
+            })
+            .collect();
+        let rendered = serde_json::json!({
+            "company_id": &company,
+            "limit": limit,
+            "trackings": items,
+        });
+        return Ok(format!("{rendered}\n"));
+    }
+    Ok(bod_app::delivery_tracking::render_list(&company, &rows))
 }
 
 /// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。

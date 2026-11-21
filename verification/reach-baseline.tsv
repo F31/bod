@@ -1,6 +1,6 @@
-# bod-reach-baseline v1 crate=bod-app modules=84 lines=95861
+# bod-reach-baseline v1 crate=bod-app modules=91 lines=100983
 # name	lines	reach
-store	5000	live
+store	6031	live
 manager_transfer	2678	live
 rebuild_precheck	2418	live
 context_handoff	2360	live
@@ -13,8 +13,8 @@ runtime_verification	1850	test_only
 history_continuity	1849	orphan
 capacity_evaluation	1728	live
 openspec_integration	1703	orphan
+authorization	1688	live
 cleanup_recovery	1659	live
-authorization	1643	live
 clarity_dialogue	1611	live
 perf_probe	1597	live
 adapter_conformance	1499	live
@@ -24,7 +24,7 @@ release_governance	1476	live
 handoff_event	1440	live
 continuation_card	1439	orphan
 handoff_snapshot	1425	live
-coverage_receipt	1424	orphan
+coverage_receipt	1424	live
 workspace_safety	1373	live
 feedback_knowledge	1309	test_only
 impact_revalidation	1308	live
@@ -35,6 +35,7 @@ collaboration_plan	1279	orphan
 scope_boundary	1278	orphan
 durable_process	1263	live
 remote_delegation	1262	live
+host_handshake	1253	live
 extension_sdk	1234	test_only
 isolation_check	1196	live
 effect_reconciliation	1151	orphan
@@ -42,35 +43,38 @@ handoff_manifest	1149	live
 mobile_control	1137	test_only
 workbench_projection	1126	live
 handoff_drill	1064	live
+delivery_tracking	1045	live
 budget_admission	1034	live
 handoff_facts	950	live
+http_router	946	live
 conformance_report	916	live
 readonly_api	912	test_only
 notification_channel	908	test_only
 first_use	901	test_only
 bottleneck	885	live
-host_handshake	884	live
 merge_queue	880	orphan
 delivery_verification	873	test_only
 lifecycle_recovery	827	live
 local_process	819	live
 desktop_lifecycle	810	orphan
-http_router	809	live
 capability_dispatch	785	live
 event_stream	765	live
 invocation	760	live
 canonical_json	757	live
-migration_safety	744	live
+migration_safety	747	live
 config	731	live
+delivery_api	684	live
 cancel_reconciliation	678	live
 verification_registry	653	live
 drill	649	live
 cas	637	live
+openapi	612	live
 evidence_publication	585	live
 remote_partition	571	orphan
 observation_redaction	554	live
 fault_matrix	546	live
 handoff_package	516	live
+observability	500	live
 maintenance	477	orphan
 fake_executor	467	live
 descriptor_schema	457	live
@@ -78,9 +82,12 @@ claim_concurrency	355	live
 protocol_reliability	353	live
 host_guard	352	live
 backoff	349	orphan
+audit_log	345	live
 resource_state	281	orphan
 effect_recovery	267	live
 recovery_models	255	live
 wakeup	249	live
 budget_dispatch_gate	247	live
+host_api	187	live
+telemetry	157	live
 json_text	123	live

@@ -29,8 +29,18 @@
 
 ## 3. 跟踪项与来源身份（`delivery-tracking`）
 
-- [ ] 3.1 跟踪项模型：项目 × 客户目标 × 验收条件 × 负责人 × 缺口；允许内部 Run/Attempt/审批缺省。
+- [x] 3.1 跟踪项模型：项目 × 客户目标 × 验收条件 × 负责人 × 缺口；允许内部 Run/Attempt/审批缺省。
+      **结果**：`016_delivery_tracking.sql` 三张表（`delivery_tracking` / `delivery_targets` /
+      `delivery_observations`），内部引用列全部可空；观察表追加式（trigger 拒绝 UPDATE/DELETE），
+      人工补证空备注由 CHECK 与写入原语双重拒绝。读模型在 `delivery_tracking` 模块：
+      覆盖结论由 `coverage_receipt::judge_coverage` 在读时算出，**库里不存结论**。
+      生产入口是 `bod tracking --db <path> [--id <id>] [--json]`；
+      `GET /api/v1/delivery-tracking/{id}` 仍是 `planned`（契约承诺按授权目标过滤，§34.12 未实现）。
+      14 个单测 + 5 个 CLI 端到端用例。
+      未做：来源身份五元组（3.2）、幂等与去重（3.3）、`expected_version` 追加（3.4）、
+      导入端点（3.5）；摘要冲突判「待核实」需要来源身份区分「冲突」与「新版本取代」，留到 3.5。
 - [ ] 3.2 来源身份五元组与候选机制；内容更新追加来源修订（观察时间、摘要、操作者）。
+
 - [ ] 3.3 去重语义分离：幂等键管命令重放，来源身份管对象重复；同键异载荷返回冲突。
 - [ ] 3.4 目标关联与 `expected_version` 追加语义；共享来源不合并不同客户记录。
 - [ ] 3.5 关联与补证入现有 Company 单写事务；连接器与人工证据冲突保留两者并进待核实。

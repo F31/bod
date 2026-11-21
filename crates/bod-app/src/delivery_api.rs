@@ -209,6 +209,48 @@ pub fn routes() -> &'static [Route<HostServer>] {
 }
 
 // ---------------------------------------------------------------------------
+// 允许动作 ↔ 路由
+// ---------------------------------------------------------------------------
+
+/// `GET /delivery-tracking/{id}` 的 `allowed_actions` 里可能出现的动作码。
+///
+/// 动作码与路由绑在一张表里，是为了让「视图说能做」与「路径真的能做」不能分家：
+/// 读模型只列 `is_served_action(code) == Some(true)` 的动作。
+pub const ACTION_LINK_SOURCE: &str = "link-source";
+pub const ACTION_DRAFT: &str = "draft";
+
+/// 动作码 → 承载它的路由。`send` 暂不在此列：草稿能审完之前它连候选都不该出现。
+const ACTIONS: &[(&str, Method, &str)] = &[
+    (
+        ACTION_LINK_SOURCE,
+        Method::Post,
+        "/api/v1/delivery-tracking/{id}/links",
+    ),
+    (
+        ACTION_DRAFT,
+        Method::Post,
+        "/api/v1/feedback-receipts/{id}/drafts",
+    ),
+];
+
+/// 该动作码是否已有实现（`x-bod-status=served`）。
+///
+/// `None` 表示动作码没有登记路由——拼错的码不该被当成「不允许」而静默通过，
+/// 调用方（与测试）应当把它当错误处理。
+pub fn is_served_action(code: &str) -> Option<bool> {
+    let (_, method, pattern) = ACTIONS.iter().find(|(name, _, _)| *name == code)?;
+    let served = ROUTES.iter().any(|route| {
+        route.method == *method
+            && route.pattern == *pattern
+            && matches!(
+                route.contract.status,
+                crate::http_router::Implementation::Served
+            )
+    });
+    Some(served)
+}
+
+// ---------------------------------------------------------------------------
 // 共用值对象
 // ---------------------------------------------------------------------------
 
@@ -591,6 +633,33 @@ mod tests {
         assert_eq!(rendered, serde_json::json!("draft"));
         let unknown = serde_json::to_value(DeliveryStatus::Unknown).expect("应可序列化");
         assert_eq!(unknown, serde_json::json!("unknown"));
+    }
+
+    /// 动作码必须对得上真实路由：码与路径分家，视图就会推荐一个 404。
+    #[test]
+    fn action_codes_point_at_real_routes() {
+        for (code, method, pattern) in ACTIONS {
+            let found = routes()
+                .iter()
+                .filter(|route| route.method == *method && route.pattern == *pattern)
+                .count();
+            assert_eq!(found, 1, "动作 {code} 指向的路由 {pattern} 不存在或不唯一");
+            assert_eq!(
+                is_served_action(code),
+                Some(false),
+                "{code} 当前应为 planned"
+            );
+        }
+        assert_eq!(
+            is_served_action("send"),
+            None,
+            "未登记的动作码必须返回 None"
+        );
+        assert_eq!(
+            is_served_action("link-soruce"),
+            None,
+            "拼错的码不得当成允许"
+        );
     }
 
     /// 请求体拒绝未知字段：字段拼错时应当是 4xx 而不是被静默忽略。

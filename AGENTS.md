@@ -570,6 +570,14 @@
 18. **禁止在观测报表里把「算不出来」写成 0**：`observability::snapshot` 的
     `not_measured` 必须如实列出缺数据的项与原因。报表里的 0 会被读成「测到了，且是零」，
     比留空更危险。要新增指标，先确认它的数据源是**已落库的事实**，不是内存态。
+19. **禁止在交付跟踪里另立覆盖判定，或把覆盖结论存进库**：§11 的两条入口都只能把事实
+    规范化成 `CoverageInput`，交给 `coverage_receipt::judge_coverage`
+    （`crates/bod-app/src/delivery_tracking.rs` 只做规范化与投影）。表里放事实，
+    结论读时算——存一份结论就一定会与事实漂移，而漂移后没人知道该信哪个。
+    `delivery_observations` 是追加式历史：回滚是**新的观察**，UPDATE/DELETE 由 trigger 拒绝；
+    人工补证缺授权范围与复验依据（`note` 为空）不得入库。
+    视图里的 `allowed_actions` 只列**已实现**端点对应的动作（`delivery_api::is_served_action`），
+    不许让视图承诺一个会回 501 的动作。
 
 ## 验证与完成规则
 
