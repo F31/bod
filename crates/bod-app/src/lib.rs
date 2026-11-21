@@ -37,6 +37,7 @@ pub mod durable_process;
 pub mod effect_reconciliation;
 pub mod effect_recovery;
 pub mod event_stream;
+pub mod evidence_publication;
 pub mod extension_sdk;
 pub mod fake_executor;
 pub mod fault_matrix;

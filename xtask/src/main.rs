@@ -680,6 +680,135 @@ fn freeze(out_dir: Option<&str>) -> bool {
     true
 }
 
+/// 证据发布检查：判定"能不能发"，脱敏命中只报类别与次数，不打印原值。
+///
+/// 外部发布必须显式给 `--approver` 与 `--scope`：工具不代替人批。
+fn evidence(flags: &[String]) -> bool {
+    use bod_app::evidence_publication::{Audience, HumanApproval, prepare, scrub};
+
+    let mut mode: Option<&str> = None;
+    let mut path: Option<&str> = None;
+    let mut out: Option<&str> = None;
+    let mut audience = Audience::TeamArchive;
+    let mut approver: Option<&str> = None;
+    let mut scope: Option<&str> = None;
+
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--check" | "--scrub" => {
+                mode = Some(flags[index].trim_start_matches('-'));
+                path = flags.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "--out" => {
+                out = flags.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "--audience" => {
+                let Some(value) = flags.get(index + 1) else {
+                    println!("[evidence] FAIL --audience 需要一个值");
+                    return false;
+                };
+                match Audience::parse(value) {
+                    Some(parsed) => audience = parsed,
+                    None => {
+                        println!("[evidence] FAIL 未知受众 {value}（local/team/external）");
+                        return false;
+                    }
+                }
+                index += 2;
+            }
+            "--approver" => {
+                approver = flags.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "--scope" => {
+                scope = flags.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            other => {
+                println!("[evidence] FAIL 不支持的参数 {other}");
+                return false;
+            }
+        }
+    }
+
+    let (Some(mode), Some(path)) = (mode, path) else {
+        println!("[evidence] FAIL 需要 --check <path> 或 --scrub <path>");
+        return false;
+    };
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            println!("[evidence] FAIL 读取 {path} 失败：{err}");
+            return false;
+        }
+    };
+
+    if mode == "scrub" {
+        let outcome = scrub(&text);
+        println!(
+            "[evidence] {}：{}",
+            outcome.summary(),
+            if outcome.is_clean() {
+                "无残留"
+            } else {
+                "有残留"
+            }
+        );
+        for finding in &outcome.residual {
+            println!("  - 残留：{finding}");
+        }
+        match out {
+            Some(target) => match fs::write(target, &outcome.body) {
+                Ok(()) => {
+                    println!("[evidence] 已写入脱敏副本 {target}");
+                    true
+                }
+                Err(err) => {
+                    println!("[evidence] FAIL 写入 {target} 失败：{err}");
+                    false
+                }
+            },
+            None => {
+                print!("{}", outcome.body);
+                true
+            }
+        }
+    } else {
+        let approval = match (approver, scope) {
+            (Some(approver), Some(scope)) => Some(HumanApproval::new(approver, scope, now_ms())),
+            _ => None,
+        };
+        match prepare(audience, &text, approval.as_ref()) {
+            Ok(publication) => {
+                println!(
+                    "[evidence] 可发布（{}）：{}",
+                    publication.audience.as_str(),
+                    publication.outcome.summary()
+                );
+                if let Some(by) = publication.approved_by {
+                    println!("[evidence] 批准人：{by}");
+                }
+                println!("[evidence] 注意：本检查只证明机械脱敏完成，业务事实仍需人工判断");
+                true
+            }
+            Err(blockers) => {
+                println!(
+                    "[evidence] 不可发布（{}）：{} 项阻断",
+                    audience.as_str(),
+                    blockers.len()
+                );
+                for blocker in blockers {
+                    println!("  - {blocker}");
+                }
+                false
+            }
+        }
+    }
+}
+
 fn print_help() {
     println!("usage: xtask <command> [options]");
     println!("  verify --stage P0   G-1 依赖方向与 AGENTS.md 声明校验");
@@ -690,6 +819,8 @@ fn print_help() {
     println!("  drill --template CASE [--out PATH]  生成空白记录（填空后仍需人工判定）");
     println!("  drill --check PATH 校验记录完整性（只查是否填完，不给通过结论）");
     println!("  drill --render PATH  把记录渲染成报告片段（结论固定为未结论）");
+    println!("  evidence --check PATH [--audience local|team|external] [--approver A --scope S]");
+    println!("  evidence --scrub PATH [--out PATH]  输出脱敏副本（只打印命中类别，不回显原值）");
     println!("  --self-test         违例注入自测");
 }
 
@@ -840,6 +971,7 @@ fn main() -> ExitCode {
         }
         [cmd, flag, path] if cmd == "drill" && flag == "--check" => drill_check(path),
         [cmd, flag, path] if cmd == "drill" && flag == "--render" => drill_render(path),
+        [cmd, rest @ ..] if cmd == "evidence" => evidence(rest),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {
             verify_stage_p0(&root)
         }
