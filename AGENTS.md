@@ -578,6 +578,14 @@
     人工补证缺授权范围与复验依据（`note` 为空）不得入库。
     视图里的 `allowed_actions` 只列**已实现**端点对应的动作（`delivery_api::is_served_action`），
     不许让视图承诺一个会回 501 的动作。
+20. **禁止用 URL 或「看起来像 ID」的字符串充当来源身份**：身份只能是五元组
+    （Company + Project + 连接实例 + 对象类型 + 提供方稳定对象 ID，
+    `crates/bod-app/src/delivery_source.rs`）。只有定位时走候选，由负责人确认后才成为身份；
+    确认是一次动作两个写入，必须带 `SAVEPOINT`（`UnitOfWork::confirm_source_candidate`）。
+    来源修订按 `(version, digest)` 指纹幂等——**指纹不得含观察时间**，否则重复上报会变成新修订，
+    「同一事件只确认一次」就不成立；同一标签解析出两个摘要必须留两条（§11 可变标签）。
+    改这张表或加列前先看 `017_delivery_sources.sql` 的手记：`open` 每次都会重放全部迁移脚本，
+    脚本必须天然幂等，`ALTER TABLE ADD COLUMN` 不幂等。
 
 ## 验证与完成规则
 

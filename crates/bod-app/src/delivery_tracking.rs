@@ -260,8 +260,12 @@ pub struct ObservationRow {
     pub kind: ObservationKind,
     /// `connector` / `manual` / `internal`，已校验过的稳定取值。
     pub source_kind: &'static str,
-    /// 人类可读定位（如 `owner/repo#318`）。**不参与判定**，来源身份在 3.2 建表。
+    /// 人类可读定位（如 `owner/repo#318`）。**不参与判定**：它没有稳定 ID，
+    /// 只是给人看的坐标；身份在 `delivery_source`（五元组）。
     pub source_ref: String,
+    /// 关联的来源修订（3.2）。`None` 表示这次观察没有来源身份——
+    /// 人工补证可以没有来源；连接器观察必须带，由导入路径在写入时强制（3.5）。
+    pub source_revision_id: Option<String>,
     pub artifact_revision: Option<String>,
     pub digest: String,
     /// 部署修订标识（`DeploymentObservation::Observed.revision`）。
@@ -402,15 +406,24 @@ pub fn verdict_code(verdict: &CoverageVerdict) -> delivery_api::CoverageVerdictC
     }
 }
 
-/// 证据时间线：观察即证据。
+/// 证据引用：优先用来源修订 ID，没有才退回观察 ID。
 ///
-/// `revision` 用观察 ID——它是「哪一版证据」当前最小可引用的标识；3.2 引入来源修订后
-/// 改为引用来源修订 ID，届时草稿的 `evidence_revision` 才能对上同一套编号。
+/// 两套编号并存是刻意的：来源修订是「哪一版来源内容」，观察是「哪一次核对」。
+/// 有修订时用修订，草稿（5.1）的 `evidence_revision` 才能与来源对上同一套编号；
+/// 人工补证没有来源修订，退回观察 ID 至少保证引用非空且唯一。
+pub fn evidence_reference(observation: &ObservationRow) -> &str {
+    observation
+        .source_revision_id
+        .as_deref()
+        .unwrap_or(&observation.observation_id)
+}
+
+/// 证据时间线：观察即证据。
 pub fn evidence_stamps(observations: &[ObservationRow]) -> Vec<EvidenceStamp> {
     observations
         .iter()
         .map(|observation| EvidenceStamp {
-            revision: observation.observation_id.clone(),
+            revision: evidence_reference(observation).to_string(),
             source: observation.source_kind.to_string(),
             observed_at: observation.observed_at.clone(),
         })
@@ -487,7 +500,7 @@ pub fn project_target(
         reason: verdict_reason(&verdict),
         verdict,
         gaps,
-        evidence_revision: decisive.map(|observation| observation.observation_id.clone()),
+        evidence_revision: decisive.map(|observation| evidence_reference(observation).to_string()),
         observed_at: decisive.map(|observation| observation.observed_at.clone()),
     }
 }
@@ -711,6 +724,7 @@ mod tests {
                 "connector"
             },
             source_ref: "acme/web#318".to_string(),
+            source_revision_id: None,
             artifact_revision: Some("rev-1".to_string()),
             digest: digest.to_string(),
             revision: format!("deploy-{id}"),

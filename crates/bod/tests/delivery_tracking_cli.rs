@@ -73,6 +73,8 @@ fn seed(path: &Path) {
             kind: ObservationKind::Deployment,
             source_kind: "connector",
             source_ref: "acme/web#318".to_string(),
+            // 3.1 的观察还没有来源身份（3.2 起连接器观察必须带来源修订，属 3.5 的导入路径）。
+            source_revision_id: None,
             artifact_revision: Some("rev-1".to_string()),
             digest: "sha256:abc".to_string(),
             revision: "deploy-2026-11-21".to_string(),
@@ -218,4 +220,124 @@ fn missing_db_flag_is_refused() {
     let (code, _stdout, stderr) = run(&["tracking"]);
     assert_ne!(code, 0);
     assert!(stderr.contains("--db"), "{stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// `bod sources`（P8 3.2）
+// ---------------------------------------------------------------------------
+
+/// 一个已确认来源 + 一条修订 + 一条待确认候选。
+fn seed_sources(path: &Path) {
+    use bod_app::delivery_source::{
+        CandidateProposal, SourceIdentity, SourceRevisionRow, revision_fingerprint,
+    };
+    let mut store = SqliteStore::open(path, &BodConfig::default()).expect("应可建库");
+    let uow = store.transaction().expect("开启事务");
+    uow.register_source(
+        "src-1",
+        &SourceIdentity {
+            company_id: "company-default".to_string(),
+            project_id: "project-1".to_string(),
+            connection_id: "gh-1".to_string(),
+            object_type: "pull-request".to_string(),
+            provider_object_id: "PR_kw318".to_string(),
+        },
+        "acme/web#318",
+        "alice",
+        100,
+    )
+    .expect("来源应可登记");
+    uow.append_source_revision(&SourceRevisionRow {
+        source_revision_id: "rev-1".to_string(),
+        company_id: "company-default".to_string(),
+        source_id: "src-1".to_string(),
+        version: "v1.4.2".to_string(),
+        digest: "sha256:abc".to_string(),
+        content_fingerprint: revision_fingerprint("v1.4.2", "sha256:abc").expect("指纹"),
+        actor_id: "ci".to_string(),
+        observed_at: "2026-11-21T10:00:00Z".to_string(),
+        observed_at_ms: 1_763_715_600_000,
+        recorded_at_ms: 1_763_715_600_500,
+    })
+    .expect("修订应可写入");
+    uow.propose_source_candidate(
+        "cand-1",
+        &CandidateProposal {
+            company_id: "company-default".to_string(),
+            project_id: "project-1".to_string(),
+            connection_id: "gh-1".to_string(),
+            object_type: String::new(),
+            locator: "https://gitlab.example.com/acme/web/-/merge_requests/7".to_string(),
+        },
+        "bob",
+        200,
+    )
+    .expect("候选应可提交");
+    uow.commit().expect("提交事务");
+}
+
+/// 来源列表给身份坐标与修订条数；没加 `--candidates` 时不该出现候选。
+#[test]
+fn sources_list_shows_identity_and_revision_count() {
+    let path = db_path();
+    seed_sources(&path);
+    let db = path.to_string_lossy().to_string();
+    let (code, stdout, stderr) = run(&["sources", "--db", &db]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("src-1"), "{stdout}");
+    assert!(
+        stdout.contains("company-default/project-1/gh-1/pull-request/PR_kw318"),
+        "五元组坐标要能看懂：{stdout}"
+    );
+    assert!(stdout.contains("修订 1"), "{stdout}");
+    assert!(
+        !stdout.contains("cand-1"),
+        "未加 --candidates 时不列候选：{stdout}"
+    );
+}
+
+/// 候选只有 pending，且 `--json` 如实标出来——不能把候选显示成身份。
+#[test]
+fn sources_json_marks_pending_candidates() {
+    let path = db_path();
+    seed_sources(&path);
+    let db = path.to_string_lossy().to_string();
+    let (code, stdout, stderr) = run(&["sources", "--db", &db, "--candidates", "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(
+        value["sources"][0]["provider_object_id"],
+        serde_json::json!("PR_kw318")
+    );
+    assert_eq!(value["sources"][0]["revision_count"], serde_json::json!(1));
+    assert_eq!(
+        value["candidates"][0]["candidate_id"],
+        serde_json::json!("cand-1")
+    );
+    assert_eq!(
+        value["candidates"][0]["state"],
+        serde_json::json!("pending")
+    );
+    assert!(
+        value["candidates"][0]["resolved_source_id"].is_null(),
+        "待确认候选没有身份：{stdout}"
+    );
+    // 候选不得混进 sources：它没有稳定 ID，也就不是身份。
+    assert_eq!(
+        value["sources"].as_array().map(|items| items.len()),
+        Some(1),
+        "{stdout}"
+    );
+}
+
+/// 按项目过滤：另一个项目的来源不出现。
+#[test]
+fn sources_can_be_scoped_to_one_project() {
+    let path = db_path();
+    seed_sources(&path);
+    let db = path.to_string_lossy().to_string();
+    let (code, stdout, stderr) = run(&["sources", "--db", &db, "--project", "project-2", "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(value["sources"], serde_json::json!([]), "{stdout}");
 }

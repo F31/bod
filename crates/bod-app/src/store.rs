@@ -74,6 +74,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/014_history_triggers.sql"),
     include_str!("../migrations/015_audit.sql"),
     include_str!("../migrations/016_delivery_tracking.sql"),
+    include_str!("../migrations/017_delivery_sources.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -94,6 +95,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "014_history_triggers.sql",
     "015_audit.sql",
     "016_delivery_tracking.sql",
+    "017_delivery_sources.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -167,10 +169,17 @@ const TARGET_SELECT: &str = "SELECT target_id, company_id, tracking_id, customer
             created_at_ms, updated_at_ms
      FROM delivery_targets";
 
-const OBSERVATION_SELECT: &str = "SELECT observation_id, company_id, tracking_id, target_id, kind,
-            source_kind, source_ref, artifact_revision, digest, revision, note, actor_id,
-            authorized, observed_at, observed_at_ms, recorded_at_ms
-     FROM delivery_observations";
+/// 观察读取列。第 17 列是关联表里的来源修订：一条观察最多挂一条修订（3.2）。
+/// 用 LEFT JOIN 而不是给 016 的观察表加列——迁移每次打开都会重放，加列不幂等
+/// （见 `017_delivery_sources.sql` 的说明）。
+const OBSERVATION_SELECT: &str =
+    "SELECT o.observation_id, o.company_id, o.tracking_id, o.target_id,
+            o.kind, o.source_kind, o.source_ref, o.artifact_revision, o.digest, o.revision,
+            o.note, o.actor_id, o.authorized, o.observed_at, o.observed_at_ms,
+            o.recorded_at_ms, l.source_revision_id
+     FROM delivery_observations o
+     LEFT JOIN delivery_observation_sources l
+       ON l.observation_id = o.observation_id AND l.company_id = o.company_id";
 
 /// 交付跟踪的读侧取值错误。与审计一致：库里出现表外取值就炸，不静默回退。
 fn delivery_row_error(
@@ -252,6 +261,7 @@ fn map_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationR
         kind,
         source_kind,
         source_ref: row.get(6)?,
+        source_revision_id: row.get(16)?,
         artifact_revision: row.get(7)?,
         digest: row.get(8)?,
         revision: row.get(9)?,
@@ -262,6 +272,114 @@ fn map_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationR
         observed_at_ms: row.get(14)?,
         recorded_at_ms: row.get(15)?,
     })
+}
+
+// --- 来源身份（P8 3.2）------------------------------------------------------
+
+const SOURCE_SELECT: &str = "SELECT source_id, company_id, project_id, connection_id,
+            object_type, provider_object_id, locator, confirmed_by, confirmed_at_ms, created_at_ms
+     FROM delivery_sources";
+
+const SOURCE_REVISION_SELECT: &str = "SELECT source_revision_id, company_id, source_id, version,
+            digest, content_fingerprint, actor_id, observed_at, observed_at_ms, recorded_at_ms
+     FROM delivery_source_revisions";
+
+const SOURCE_CANDIDATE_SELECT: &str = "SELECT candidate_id, company_id, project_id, connection_id,
+            object_type, locator, proposed_by, proposed_at_ms, state, resolved_source_id,
+            decided_by, decided_at_ms
+     FROM delivery_source_candidates";
+
+fn map_source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::delivery_source::SourceRow> {
+    Ok(crate::delivery_source::SourceRow {
+        source_id: row.get(0)?,
+        company_id: row.get(1)?,
+        project_id: row.get(2)?,
+        connection_id: row.get(3)?,
+        object_type: row.get(4)?,
+        provider_object_id: row.get(5)?,
+        locator: row.get(6)?,
+        confirmed_by: row.get(7)?,
+        confirmed_at_ms: row.get(8)?,
+        created_at_ms: row.get(9)?,
+    })
+}
+
+fn map_source_revision_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::delivery_source::SourceRevisionRow> {
+    Ok(crate::delivery_source::SourceRevisionRow {
+        source_revision_id: row.get(0)?,
+        company_id: row.get(1)?,
+        source_id: row.get(2)?,
+        version: row.get(3)?,
+        digest: row.get(4)?,
+        content_fingerprint: row.get(5)?,
+        actor_id: row.get(6)?,
+        observed_at: row.get(7)?,
+        observed_at_ms: row.get(8)?,
+        recorded_at_ms: row.get(9)?,
+    })
+}
+
+fn map_source_candidate_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::delivery_source::CandidateRow> {
+    use crate::delivery_source::CandidateState;
+    let state_text: String = row.get(8)?;
+    let state = CandidateState::parse(&state_text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            8,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                err.explain(),
+            )),
+        )
+    })?;
+    Ok(crate::delivery_source::CandidateRow {
+        candidate_id: row.get(0)?,
+        company_id: row.get(1)?,
+        project_id: row.get(2)?,
+        connection_id: row.get(3)?,
+        object_type: row.get(4)?,
+        locator: row.get(5)?,
+        proposed_by: row.get(6)?,
+        proposed_at_ms: row.get(7)?,
+        state,
+        resolved_source_id: row.get(9)?,
+        decided_by: row.get(10)?,
+        decided_at_ms: row.get(11)?,
+    })
+}
+
+/// 唯一约束冲突：并发下「先查后插」输的那一方，靠它改成返回已有行。
+fn is_unique_violation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+/// 按五元组查身份。查不到返回 `None`；**不做模糊匹配**——那会让两个来源悄悄合并。
+fn find_source_id(
+    conn: &rusqlite::Connection,
+    identity: &crate::delivery_source::SourceIdentity,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT source_id FROM delivery_sources
+         WHERE company_id = ?1 AND project_id = ?2 AND connection_id = ?3
+           AND object_type = ?4 AND provider_object_id = ?5",
+        params![
+            identity.company_id,
+            identity.project_id,
+            identity.connection_id,
+            identity.object_type,
+            identity.provider_object_id,
+        ],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 /// 修订正文事实（P2 3.4）：历史连续比对要覆盖摘要与大小，不能只看产出者。
@@ -356,6 +474,36 @@ pub struct OrgMetadataRow {
     pub updated_by: String,
 }
 
+/// 登记来源身份的结果。`created=false` 表示五元组已存在，返回的是已有身份——
+/// 调用方据此区分「新认识的来源」与「重复导入同一对象」（3.3 的去重语义靠它）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredSource {
+    pub source_id: String,
+    pub created: bool,
+}
+
+/// 提交来源候选的结果。`created=false` 表示已有同一作用域同一 locator 的待确认候选。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposedCandidate {
+    pub candidate_id: String,
+    pub created: bool,
+}
+
+/// 确认候选的结果。`source_created` 说明这个身份是不是本次确认才建立的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedCandidate {
+    pub candidate_id: String,
+    pub source_id: String,
+    pub source_created: bool,
+}
+
+/// 追加来源修订的结果。`created=false` 表示同一事件已确认过，返回的是已有修订。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendedRevision {
+    pub source_revision_id: String,
+    pub created: bool,
+}
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),
@@ -374,6 +522,9 @@ pub enum StoreError {
     /// 交付跟踪的读写出错：表外取值、跨跟踪项引用目标、人工补证缺备注。
     /// 同样单独一档——这些是数据或调用方错误，重试没有意义。
     Delivery(crate::delivery_tracking::DeliveryError),
+    /// 来源身份/候选/修订的校验错误：五元组不成立、候选已裁决、跨项目引用。
+    /// 与 `Delivery` 分开：它的错误信息要指向「身份」而不是「覆盖结论」。
+    Source(crate::delivery_source::SourceError),
 }
 
 impl fmt::Display for StoreError {
@@ -390,6 +541,7 @@ impl fmt::Display for StoreError {
             }
             Self::Audit(rejection) => write!(f, "审计事件被拒绝: {}", rejection.explain()),
             Self::Delivery(err) => write!(f, "交付跟踪失败: {}", err.explain()),
+            Self::Source(err) => write!(f, "来源身份失败: {}", err.explain()),
         }
     }
 }
@@ -411,6 +563,12 @@ impl From<rusqlite::Error> for StoreError {
 impl From<crate::delivery_tracking::DeliveryError> for StoreError {
     fn from(value: crate::delivery_tracking::DeliveryError) -> Self {
         Self::Delivery(value)
+    }
+}
+
+impl From<crate::delivery_source::SourceError> for StoreError {
+    fn from(value: crate::delivery_source::SourceError) -> Self {
+        Self::Source(value)
     }
 }
 
@@ -599,8 +757,8 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut stmt = self.conn.prepare(&format!(
-            "{OBSERVATION_SELECT} WHERE company_id = ?1 AND tracking_id = ?2
-             ORDER BY observed_at_ms DESC, recorded_at_ms DESC, observation_id DESC"
+            "{OBSERVATION_SELECT} WHERE o.company_id = ?1 AND o.tracking_id = ?2
+             ORDER BY o.observed_at_ms DESC, o.recorded_at_ms DESC, o.observation_id DESC"
         ))?;
         let observations = stmt
             .query_map(params![company_id, tracking_id], map_observation_row)?
@@ -660,6 +818,89 @@ impl SqliteStore {
         let rows = stmt.query_map(params![company_id, limit as i64], |row| {
             Ok((map_tracking_row(row)?, row.get::<_, i64>(13)?))
         })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    // --- 来源身份与候选（P8 3.2，只读）--------------------------------------
+
+    /// 读一个来源身份。查不到返回 `None`——「不知道」与「没有」要分开。
+    pub fn get_source(
+        &self,
+        company_id: &str,
+        source_id: &str,
+    ) -> Result<Option<crate::delivery_source::SourceRow>, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{SOURCE_SELECT} WHERE company_id = ?1 AND source_id = ?2"),
+                params![company_id, source_id],
+                map_source_row,
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    /// 列出已确认的来源身份与各自的修订条数。
+    ///
+    /// 不返回「哪一版是最新」：那要比较版本语义（commit 序、语义化版本），
+    /// 不同连接器的比较规则不同，本段不猜。时间线请读单个来源。
+    pub fn list_sources(
+        &self,
+        company_id: &str,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(crate::delivery_source::SourceRow, i64)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.source_id, s.company_id, s.project_id, s.connection_id,
+                    s.object_type, s.provider_object_id, s.locator, s.confirmed_by,
+                    s.confirmed_at_ms, s.created_at_ms, COUNT(r.source_revision_id)
+             FROM delivery_sources s
+             LEFT JOIN delivery_source_revisions r
+               ON r.company_id = s.company_id AND r.source_id = s.source_id
+             WHERE s.company_id = ?1 AND (?2 IS NULL OR s.project_id = ?2)
+             GROUP BY s.source_id
+             ORDER BY s.created_at_ms DESC, s.source_id ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![company_id, project_id, limit as i64], |row| {
+            Ok((map_source_row(row)?, row.get::<_, i64>(10)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 一个来源的修订时间线，**按观察时间升序**（可变标签要看前后顺序）。
+    pub fn list_source_revisions(
+        &self,
+        company_id: &str,
+        source_id: &str,
+    ) -> Result<Vec<crate::delivery_source::SourceRevisionRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{SOURCE_REVISION_SELECT} WHERE company_id = ?1 AND source_id = ?2
+             ORDER BY observed_at_ms ASC, recorded_at_ms ASC, source_revision_id ASC"
+        ))?;
+        let rows = stmt.query_map(params![company_id, source_id], map_source_revision_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 列出来源候选。`pending_only` 时只给待确认的——它们才是需要动作的那一类。
+    pub fn list_source_candidates(
+        &self,
+        company_id: &str,
+        project_id: Option<&str>,
+        pending_only: bool,
+        limit: usize,
+    ) -> Result<Vec<crate::delivery_source::CandidateRow>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{SOURCE_CANDIDATE_SELECT}
+             WHERE company_id = ?1 AND (?2 IS NULL OR project_id = ?2)
+               AND (?3 = 0 OR state = 'pending')
+             ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END,
+                      proposed_at_ms DESC, candidate_id ASC
+             LIMIT ?4"
+        ))?;
+        let rows = stmt.query_map(
+            params![company_id, project_id, pending_only as i64, limit as i64],
+            map_source_candidate_row,
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
@@ -3116,6 +3357,41 @@ impl<'a> UnitOfWork<'a> {
             }
             .into());
         }
+        // 观察挂来源修订时，来源必须存在且属于同一项目：跨项目的来源不得挂到本项目交付上。
+        // 复合外键只能保证「修订存在」，它读不出「项目不同」这件事。
+        if let Some(revision_id) = &row.source_revision_id {
+            let source_project: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT s.project_id
+                     FROM delivery_source_revisions r
+                     JOIN delivery_sources s
+                       ON s.company_id = r.company_id AND s.source_id = r.source_id
+                     WHERE r.company_id = ?1 AND r.source_revision_id = ?2",
+                    params![row.company_id, revision_id],
+                    |line| line.get(0),
+                )
+                .optional()?;
+            let Some(source_project) = source_project else {
+                return Err(crate::delivery_source::SourceError::SourceRevisionNotFound(
+                    revision_id.clone(),
+                )
+                .into());
+            };
+            let tracking_project: String = self.conn.query_row(
+                "SELECT project_id FROM delivery_tracking
+                 WHERE company_id = ?1 AND tracking_id = ?2",
+                params![row.company_id, row.tracking_id],
+                |line| line.get(0),
+            )?;
+            if source_project != tracking_project {
+                return Err(crate::delivery_source::SourceError::SourceProjectMismatch {
+                    source_project,
+                    tracking_project,
+                }
+                .into());
+            }
+        }
         self.conn.execute(
             "INSERT INTO delivery_observations (
                 observation_id, company_id, tracking_id, target_id, kind, source_kind, source_ref,
@@ -3141,7 +3417,308 @@ impl<'a> UnitOfWork<'a> {
                 row.recorded_at_ms,
             ],
         )?;
+        if let Some(revision_id) = &row.source_revision_id {
+            self.conn.execute(
+                "INSERT INTO delivery_observation_sources (
+                    observation_id, company_id, source_revision_id, linked_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    row.observation_id,
+                    row.company_id,
+                    revision_id,
+                    row.recorded_at_ms,
+                ],
+            )?;
+        }
         Ok(())
+    }
+
+    // --- 来源身份（P8 3.2）--------------------------------------------------
+
+    /// 登记一个来源身份（五元组）。**幂等**：五元组已存在时返回已有 ID，
+    /// 不覆盖首个确认人——「谁先把这个 ID 认成那个对象」是历史事实。
+    ///
+    /// `source_id` 只在新建时使用。ID 生成留给导入路径（3.5）：本函数与 3.1 的
+    /// 写入原语一致，由调用方给主键，测试因此能确定地引用同一行。
+    pub fn register_source(
+        &self,
+        source_id: &str,
+        identity: &crate::delivery_source::SourceIdentity,
+        locator: &str,
+        confirmed_by: &str,
+        now_ms: i64,
+    ) -> Result<RegisteredSource, StoreError> {
+        use crate::delivery_source::SourceError;
+        identity.validate()?;
+        if confirmed_by.trim().is_empty() {
+            return Err(SourceError::MissingConfirmer.into());
+        }
+        if let Some(existing) = find_source_id(self.conn, identity)? {
+            return Ok(RegisteredSource {
+                source_id: existing,
+                created: false,
+            });
+        }
+        let result = self.conn.execute(
+            "INSERT INTO delivery_sources (
+                source_id, company_id, project_id, connection_id, object_type,
+                provider_object_id, locator, confirmed_by, confirmed_at_ms, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                source_id,
+                identity.company_id,
+                identity.project_id,
+                identity.connection_id,
+                identity.object_type,
+                identity.provider_object_id,
+                locator.trim(),
+                confirmed_by,
+                now_ms,
+                now_ms,
+            ],
+        );
+        match result {
+            Ok(_) => Ok(RegisteredSource {
+                source_id: source_id.to_string(),
+                created: true,
+            }),
+            // 并发下两次登记同一身份：后到者拿已有行，而不是报一个没人看得懂的唯一约束错误。
+            Err(err) if is_unique_violation(&err) => match find_source_id(self.conn, identity)? {
+                Some(existing) => Ok(RegisteredSource {
+                    source_id: existing,
+                    created: false,
+                }),
+                None => Err(err.into()),
+            },
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// 提交一个来源候选。**幂等**：同一作用域下同一 `locator` 的待确认候选只留一条。
+    ///
+    /// 候选不是身份：它没有稳定 ID。重复提交同一 URL 应当得到同一条待办，
+    /// 而不是四条等着同一个人点四次。
+    pub fn propose_source_candidate(
+        &self,
+        candidate_id: &str,
+        proposal: &crate::delivery_source::CandidateProposal,
+        proposed_by: &str,
+        now_ms: i64,
+    ) -> Result<ProposedCandidate, StoreError> {
+        use crate::delivery_source::SourceError;
+        if proposal.locator.trim().is_empty() {
+            return Err(SourceError::EmptyLocator.into());
+        }
+        if proposed_by.trim().is_empty() {
+            return Err(SourceError::MissingProposer.into());
+        }
+        let lookup = |conn: &rusqlite::Connection| -> rusqlite::Result<Option<String>> {
+            conn.query_row(
+                "SELECT candidate_id FROM delivery_source_candidates
+                 WHERE company_id = ?1 AND project_id = ?2 AND connection_id = ?3
+                   AND locator = ?4 AND state = 'pending'",
+                params![
+                    proposal.company_id,
+                    proposal.project_id,
+                    proposal.connection_id,
+                    proposal.locator.trim(),
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+        };
+        if let Some(existing) = lookup(self.conn)? {
+            return Ok(ProposedCandidate {
+                candidate_id: existing,
+                created: false,
+            });
+        }
+        let result = self.conn.execute(
+            "INSERT INTO delivery_source_candidates (
+                candidate_id, company_id, project_id, connection_id, object_type,
+                locator, proposed_by, proposed_at_ms, state
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')",
+            params![
+                candidate_id,
+                proposal.company_id,
+                proposal.project_id,
+                proposal.connection_id,
+                proposal.object_type,
+                proposal.locator.trim(),
+                proposed_by,
+                now_ms,
+            ],
+        );
+        match result {
+            Ok(_) => Ok(ProposedCandidate {
+                candidate_id: candidate_id.to_string(),
+                created: true,
+            }),
+            Err(err) if is_unique_violation(&err) => match lookup(self.conn)? {
+                Some(id) => Ok(ProposedCandidate {
+                    candidate_id: id,
+                    created: false,
+                }),
+                None => Err(err.into()),
+            },
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// 确认候选：候选 → 身份，两个写入必须同生共死。
+    ///
+    /// 用 `SAVEPOINT` 包住，不是多余：调用方（导入路径）在自己的事务里，若这里
+    /// 「身份登记成功、候选状态没改成」却返回失败，调用方很容易照样提交，
+    /// 于是同一个定位会留下两条待确认候选。函数自己保证原子性。
+    pub fn confirm_source_candidate(
+        &self,
+        company_id: &str,
+        candidate_id: &str,
+        source_id: &str,
+        identity: &crate::delivery_source::SourceIdentity,
+        decided_by: &str,
+        now_ms: i64,
+    ) -> Result<ConfirmedCandidate, StoreError> {
+        use crate::delivery_source::{CandidateState, SourceError, decide, ensure_scope_matches};
+        self.conn
+            .execute_batch("SAVEPOINT confirm_source_candidate")?;
+        let outcome = (|| -> Result<ConfirmedCandidate, StoreError> {
+            let candidate = self
+                .conn
+                .query_row(
+                    &format!(
+                        "{SOURCE_CANDIDATE_SELECT} WHERE company_id = ?1 AND candidate_id = ?2"
+                    ),
+                    params![company_id, candidate_id],
+                    map_source_candidate_row,
+                )
+                .optional()?
+                .ok_or_else(|| SourceError::CandidateNotFound(candidate_id.to_string()))?;
+            decide(candidate.state)?;
+            ensure_scope_matches(&candidate, identity)?;
+            if decided_by.trim().is_empty() {
+                return Err(SourceError::MissingConfirmer.into());
+            }
+            let registered =
+                self.register_source(source_id, identity, &candidate.locator, decided_by, now_ms)?;
+            let changed = self.conn.execute(
+                "UPDATE delivery_source_candidates
+                 SET state = 'confirmed', resolved_source_id = ?1,
+                     decided_by = ?2, decided_at_ms = ?3
+                 WHERE company_id = ?4 AND candidate_id = ?5 AND state = 'pending'",
+                params![
+                    registered.source_id,
+                    decided_by,
+                    now_ms,
+                    company_id,
+                    candidate_id,
+                ],
+            )?;
+            if changed != 1 {
+                // 并发下另一个人先确认了：本次注册的身份随之回滚（savepoint），
+                // 报告「已裁决」而不是留下一个没人引用的身份。
+                return Err(SourceError::CandidateAlreadyDecided(
+                    CandidateState::Confirmed.as_str().to_string(),
+                )
+                .into());
+            }
+            Ok(ConfirmedCandidate {
+                candidate_id: candidate_id.to_string(),
+                source_id: registered.source_id,
+                source_created: registered.created,
+            })
+        })();
+        match outcome {
+            Ok(value) => {
+                self.conn
+                    .execute_batch("RELEASE confirm_source_candidate")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO confirm_source_candidate; RELEASE confirm_source_candidate",
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// 追加一条来源修订。**幂等**：内容指纹相同的事件返回已有修订。
+    ///
+    /// 指纹必须与 `(version, digest)` 重算结果一致——让调用方自己编指纹，
+    /// 幂等键就成了「调用方承诺」，重复上报只要换个指纹就能插进来。
+    pub fn append_source_revision(
+        &self,
+        revision: &crate::delivery_source::SourceRevisionRow,
+    ) -> Result<AppendedRevision, StoreError> {
+        use crate::delivery_source::{SourceError, revision_fingerprint};
+        let derived = revision_fingerprint(&revision.version, &revision.digest)?;
+        if derived != revision.content_fingerprint {
+            return Err(SourceError::FingerprintMismatch {
+                declared: revision.content_fingerprint.clone(),
+                derived,
+            }
+            .into());
+        }
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM delivery_sources WHERE company_id = ?1 AND source_id = ?2",
+            params![revision.company_id, revision.source_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(SourceError::SourceNotFound(revision.source_id.clone()).into());
+        }
+        let lookup = |conn: &rusqlite::Connection| -> rusqlite::Result<Option<String>> {
+            conn.query_row(
+                "SELECT source_revision_id FROM delivery_source_revisions
+                 WHERE company_id = ?1 AND source_id = ?2 AND content_fingerprint = ?3",
+                params![
+                    revision.company_id,
+                    revision.source_id,
+                    revision.content_fingerprint,
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+        };
+        if let Some(existing) = lookup(self.conn)? {
+            return Ok(AppendedRevision {
+                source_revision_id: existing,
+                created: false,
+            });
+        }
+        let result = self.conn.execute(
+            "INSERT INTO delivery_source_revisions (
+                source_revision_id, company_id, source_id, version, digest,
+                content_fingerprint, actor_id, observed_at, observed_at_ms, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                revision.source_revision_id,
+                revision.company_id,
+                revision.source_id,
+                revision.version,
+                revision.digest,
+                revision.content_fingerprint,
+                revision.actor_id,
+                revision.observed_at,
+                revision.observed_at_ms,
+                revision.recorded_at_ms,
+            ],
+        );
+        match result {
+            Ok(_) => Ok(AppendedRevision {
+                source_revision_id: revision.source_revision_id.clone(),
+                created: true,
+            }),
+            Err(err) if is_unique_violation(&err) => match lookup(self.conn)? {
+                Some(id) => Ok(AppendedRevision {
+                    source_revision_id: id,
+                    created: false,
+                }),
+                None => Err(err.into()),
+            },
+            Err(err) => Err(err.into()),
+        }
     }
 
     pub fn get_appointment(
@@ -5515,6 +6092,7 @@ mod tests {
                 "connector"
             },
             source_ref: "acme/repo#318".to_string(),
+            source_revision_id: None,
             artifact_revision: Some(revision.to_string()),
             digest: digest.to_string(),
             revision: format!("deploy-{id}"),
@@ -5771,6 +6349,480 @@ mod tests {
         assert_eq!(limited.len(), 1, "limit 必须生效");
     }
 
+    // -----------------------------------------------------------------------
+    // 来源身份与候选（P8 3.2）
+    // -----------------------------------------------------------------------
+
+    fn source_identity(project: &str, provider_id: &str) -> crate::delivery_source::SourceIdentity {
+        crate::delivery_source::SourceIdentity {
+            company_id: "company-default".to_string(),
+            project_id: project.to_string(),
+            connection_id: "gh-1".to_string(),
+            object_type: "pull-request".to_string(),
+            provider_object_id: provider_id.to_string(),
+        }
+    }
+
+    fn source_proposal(locator: &str) -> crate::delivery_source::CandidateProposal {
+        crate::delivery_source::CandidateProposal {
+            company_id: "company-default".to_string(),
+            project_id: "project-1".to_string(),
+            connection_id: "gh-1".to_string(),
+            // 只有 URL 时对象类型往往还没解析出来：空串表示「未定」，不猜。
+            object_type: String::new(),
+            locator: locator.to_string(),
+        }
+    }
+
+    fn source_revision(
+        id: &str,
+        source_id: &str,
+        version: &str,
+        digest: &str,
+        at_ms: i64,
+    ) -> crate::delivery_source::SourceRevisionRow {
+        let fingerprint =
+            crate::delivery_source::revision_fingerprint(version, digest).expect("指纹应可生成");
+        crate::delivery_source::SourceRevisionRow {
+            source_revision_id: id.to_string(),
+            company_id: "company-default".to_string(),
+            source_id: source_id.to_string(),
+            version: version.to_string(),
+            digest: digest.to_string(),
+            content_fingerprint: fingerprint,
+            actor_id: "ci".to_string(),
+            observed_at: format!("2026-11-21T10:00:{:02}Z", at_ms % 60),
+            observed_at_ms: at_ms,
+            recorded_at_ms: at_ms,
+        }
+    }
+
+    /// 五元组相同 → 只登记一次；首个确认人不被后来的调用覆盖。
+    #[test]
+    fn same_source_identity_is_registered_once() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let identity = source_identity("project-1", "PR_kw1");
+
+        let first = with_uow(&mut store, |uow| {
+            uow.register_source("src-1", &identity, "acme/web#318", "alice", 100)
+        })
+        .expect("首次登记应成功");
+        assert!(first.created);
+        assert_eq!(first.source_id, "src-1");
+
+        let again = with_uow(&mut store, |uow| {
+            uow.register_source("src-2", &identity, "acme/web#318", "bob", 200)
+        })
+        .expect("重复登记应返回已有身份");
+        assert!(!again.created, "重复登记不得新建");
+        assert_eq!(again.source_id, "src-1");
+
+        let row = store
+            .get_source("company-default", "src-1")
+            .expect("读取应成功")
+            .expect("来源应存在");
+        assert_eq!(row.confirmed_by, "alice", "首个确认人是历史事实，不被覆盖");
+        assert_eq!(row.confirmed_at_ms, 100);
+        assert_eq!(
+            store
+                .list_sources("company-default", None, 10)
+                .expect("列表应可读")
+                .len(),
+            1
+        );
+    }
+
+    /// 跨项目同名 PR：五元组里 project 不同就是两个来源，不会因编号相同而合并。
+    #[test]
+    fn same_number_in_two_projects_stay_two_sources() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.register_source(
+                "src-1",
+                &source_identity("project-1", "PR_kw318"),
+                "acme/web#318",
+                "alice",
+                100,
+            )
+            .expect("项目 1 的来源应可登记");
+            uow.register_source(
+                "src-2",
+                &source_identity("project-2", "PR_kw318"),
+                "acme/api#318",
+                "alice",
+                100,
+            )
+            .expect("项目 2 的来源应可登记");
+        });
+
+        assert_eq!(
+            store
+                .list_sources("company-default", Some("project-1"), 10)
+                .expect("列表应可读")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_sources("company-default", None, 10)
+                .expect("列表应可读")
+                .len(),
+            2
+        );
+    }
+
+    /// 同一事件重复上报只确认一次；同一标签两个摘要留两条修订。
+    #[test]
+    fn source_revision_is_idempotent_per_event() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.register_source(
+                "src-1",
+                &source_identity("project-1", "PR_kw1"),
+                "acme/web#318",
+                "alice",
+                100,
+            )
+            .expect("来源应可登记");
+        });
+
+        let first = with_uow(&mut store, |uow| {
+            uow.append_source_revision(&source_revision(
+                "rev-1",
+                "src-1",
+                "v1.4.2",
+                "sha256:aaa",
+                100,
+            ))
+        })
+        .expect("首次修订应可写入");
+        assert!(first.created);
+
+        // 同一 (version, digest) 隔一分钟再报：仍是同一条修订。
+        let duplicate = with_uow(&mut store, |uow| {
+            uow.append_source_revision(&source_revision(
+                "rev-2",
+                "src-1",
+                "v1.4.2",
+                "sha256:aaa",
+                160,
+            ))
+        })
+        .expect("重复事件应返回已有修订");
+        assert!(!duplicate.created, "同一事件不得新增修订");
+        assert_eq!(duplicate.source_revision_id, "rev-1");
+
+        // 可变标签：同一版本换了摘要 → 新的观察，必须留痕。
+        let changed = with_uow(&mut store, |uow| {
+            uow.append_source_revision(&source_revision(
+                "rev-3",
+                "src-1",
+                "v1.4.2",
+                "sha256:bbb",
+                220,
+            ))
+        })
+        .expect("不同摘要应可追加");
+        assert!(changed.created);
+
+        let revisions = store
+            .list_source_revisions("company-default", "src-1")
+            .expect("时间线应可读");
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].source_revision_id, "rev-1", "按观察时间升序");
+        assert_eq!(revisions[1].digest, "sha256:bbb");
+        assert_eq!(
+            crate::delivery_source::digest_history(&revisions).len(),
+            2,
+            "两次解析都要在时间线里"
+        );
+    }
+
+    /// 指纹必须由内容派生：调用方自己编的指纹会让幂等键失效。
+    #[test]
+    fn revision_fingerprint_must_match_content() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.register_source(
+                "src-1",
+                &source_identity("project-1", "PR_kw1"),
+                "acme/web#318",
+                "alice",
+                100,
+            )
+            .expect("来源应可登记");
+        });
+        let mut revision = source_revision("rev-1", "src-1", "v1", "sha256:aaa", 100);
+        revision.content_fingerprint = "forged".to_string();
+        let err = with_uow(&mut store, |uow| uow.append_source_revision(&revision))
+            .expect_err("伪造指纹必须被拒绝");
+        assert!(
+            matches!(
+                err,
+                StoreError::Source(crate::delivery_source::SourceError::FingerprintMismatch { .. })
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// 修订是历史：库里拒绝改写，回滚与新解析都只能追加。
+    #[test]
+    fn source_revisions_are_append_only() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.register_source(
+                "src-1",
+                &source_identity("project-1", "PR_kw1"),
+                "acme/web#318",
+                "alice",
+                100,
+            )
+            .expect("来源应可登记");
+            uow.append_source_revision(&source_revision("rev-1", "src-1", "v1", "sha256:aaa", 100))
+                .expect("修订应可写入");
+        });
+        let update = store.conn.execute(
+            "UPDATE delivery_source_revisions SET digest = 'sha256:bbb' WHERE source_revision_id = 'rev-1'",
+            [],
+        );
+        assert!(update.is_err(), "改写修订必须被触发器拒绝");
+        let delete = store.conn.execute(
+            "DELETE FROM delivery_source_revisions WHERE source_revision_id = 'rev-1'",
+            [],
+        );
+        assert!(delete.is_err(), "删除修订必须被触发器拒绝");
+    }
+
+    /// 候选确认：一次动作两个写入，且只能发生一次。
+    #[test]
+    fn candidate_confirmation_creates_identity_and_is_final() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let proposed = with_uow(&mut store, |uow| {
+            uow.propose_source_candidate(
+                "cand-1",
+                &source_proposal("https://github.com/acme/web/pull/318"),
+                "alice",
+                100,
+            )
+        })
+        .expect("候选应可提交");
+        assert!(proposed.created);
+
+        // 同一 URL 再提一次：还是一条待办，不是第二条。
+        let duplicate = with_uow(&mut store, |uow| {
+            uow.propose_source_candidate(
+                "cand-2",
+                &source_proposal("https://github.com/acme/web/pull/318"),
+                "bob",
+                120,
+            )
+        })
+        .expect("重复候选应返回已有待办");
+        assert!(!duplicate.created);
+        assert_eq!(duplicate.candidate_id, "cand-1");
+
+        let confirmed = with_uow(&mut store, |uow| {
+            uow.confirm_source_candidate(
+                "company-default",
+                "cand-1",
+                "src-1",
+                &source_identity("project-1", "PR_kw1"),
+                "alice",
+                200,
+            )
+        })
+        .expect("确认应成功");
+        assert!(confirmed.source_created);
+        assert_eq!(confirmed.source_id, "src-1");
+
+        let candidates = store
+            .list_source_candidates("company-default", None, false, 10)
+            .expect("候选列表应可读");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].state,
+            crate::delivery_source::CandidateState::Confirmed
+        );
+        assert_eq!(candidates[0].resolved_source_id.as_deref(), Some("src-1"));
+        assert_eq!(candidates[0].decided_by, "alice");
+
+        // 再确认一次：拒绝，且不得留下第二个身份。
+        let err = with_uow(&mut store, |uow| {
+            uow.confirm_source_candidate(
+                "company-default",
+                "cand-1",
+                "src-9",
+                &source_identity("project-1", "PR_kw2"),
+                "bob",
+                300,
+            )
+        })
+        .expect_err("已裁决的候选不得再确认");
+        assert!(
+            matches!(
+                err,
+                StoreError::Source(crate::delivery_source::SourceError::CandidateAlreadyDecided(_))
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            store
+                .list_sources("company-default", None, 10)
+                .expect("列表应可读")
+                .len(),
+            1,
+            "失败的确认不得留下身份"
+        );
+    }
+
+    /// 确认不得把候选挪到别的项目：候选的作用域就是它被提交时的项目。
+    #[test]
+    fn candidate_scope_cannot_move_to_another_project() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.propose_source_candidate(
+                "cand-1",
+                &source_proposal("https://github.com/acme/web/pull/318"),
+                "alice",
+                100,
+            )
+            .expect("候选应可提交");
+        });
+        let err = with_uow(&mut store, |uow| {
+            uow.confirm_source_candidate(
+                "company-default",
+                "cand-1",
+                "src-1",
+                &source_identity("project-2", "PR_kw1"),
+                "alice",
+                200,
+            )
+        })
+        .expect_err("跨项目确认必须拒绝");
+        assert!(
+            matches!(
+                err,
+                StoreError::Source(
+                    crate::delivery_source::SourceError::CandidateScopeMismatch { .. }
+                )
+            ),
+            "{err:?}"
+        );
+        assert!(
+            store
+                .list_sources("company-default", None, 10)
+                .expect("列表应可读")
+                .is_empty()
+        );
+    }
+
+    /// 观察挂来源修订：同项目才允许，且证据引用改用来源修订 ID。
+    #[test]
+    fn observation_links_same_project_source_revision() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        seed_delivery(&mut store);
+        with_uow(&mut store, |uow| {
+            uow.register_source(
+                "src-1",
+                &source_identity("project-1", "PR_kw1"),
+                "acme/web#318",
+                "alice",
+                100,
+            )
+            .expect("来源应可登记");
+            uow.append_source_revision(&source_revision("rev-1", "src-1", "v1", "sha256:abc", 100))
+                .expect("修订应可写入");
+        });
+
+        let mut linked = delivery_observation(
+            "o-9",
+            "t-1",
+            ObservationKind::Deployment,
+            300,
+            "rev-1",
+            "sha256:abc",
+            "",
+        );
+        linked.source_revision_id = Some("rev-1".to_string());
+        with_uow(&mut store, |uow| {
+            uow.append_delivery_observation(&linked)
+                .expect("同项目来源的观察应可写入");
+        });
+
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("读取应成功")
+            .expect("跟踪项应存在");
+        let web = view
+            .targets
+            .iter()
+            .find(|target| target.target.target_id == "t-1")
+            .expect("web 目标应存在");
+        assert_eq!(
+            web.evidence_revision.as_deref(),
+            Some("rev-1"),
+            "证据引用应改用来源修订 ID"
+        );
+
+        // 另一个项目的来源：同一公司也不行，跨项目来源不得挂到本项目交付上。
+        with_uow(&mut store, |uow| {
+            uow.register_source(
+                "src-2",
+                &source_identity("project-2", "PR_kw9"),
+                "acme/api#9",
+                "alice",
+                100,
+            )
+            .expect("另一个项目的来源应可登记");
+            uow.append_source_revision(&source_revision("rev-2", "src-2", "v1", "sha256:abc", 100))
+                .expect("修订应可写入");
+        });
+        let mut cross = delivery_observation(
+            "o-10",
+            "t-1",
+            ObservationKind::Deployment,
+            400,
+            "rev-1",
+            "sha256:abc",
+            "",
+        );
+        cross.source_revision_id = Some("rev-2".to_string());
+        let err = with_uow(&mut store, |uow| uow.append_delivery_observation(&cross))
+            .expect_err("跨项目来源必须拒绝");
+        assert!(
+            matches!(
+                err,
+                StoreError::Source(
+                    crate::delivery_source::SourceError::SourceProjectMismatch { .. }
+                )
+            ),
+            "{err:?}"
+        );
+
+        // 不存在的修订：给出可读原因，而不是外键报错。
+        let mut missing = delivery_observation(
+            "o-11",
+            "t-1",
+            ObservationKind::Deployment,
+            500,
+            "rev-1",
+            "sha256:abc",
+            "",
+        );
+        missing.source_revision_id = Some("rev-404".to_string());
+        let err = with_uow(&mut store, |uow| uow.append_delivery_observation(&missing))
+            .expect_err("不存在的修订必须拒绝");
+        assert!(
+            matches!(
+                err,
+                StoreError::Source(crate::delivery_source::SourceError::SourceRevisionNotFound(
+                    _
+                ))
+            ),
+            "{err:?}"
+        );
+    }
+
     /// 验证记录取最新一条：先 `waived` 后 `verified`，结论应变成已覆盖。
     #[test]
     fn latest_verification_record_decides() {
@@ -5806,9 +6858,9 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 53,
+            count, 57,
             "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表 \
-             + 1 张审计表 + 3 张交付跟踪表（016）"
+             + 1 张审计表 + 3 张交付跟踪表（016）+ 4 张来源表（017：身份/候选/修订/观察关联）"
         );
     }
 

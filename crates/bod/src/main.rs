@@ -66,6 +66,10 @@ const USAGE: &str = "\
   bod tracking --db <path>         列交付跟踪项与目标数（只读；结论不在列表里给）
   bod tracking --db <path> --id <跟踪项>   看单个跟踪项的逐目标结论、证据与缺口
   bod tracking --db <path> --json [--id <跟踪项>]   机器可读；带 --id 时与 GET 的响应体同形
+  bod sources --db <path>          列已确认的来源身份与修订条数（只读；候选不计入）
+  bod sources --db <path> --project <id>   只看某个项目的来源
+  bod sources --db <path> --candidates     附上来源候选（pending 在前，未确认的不能支撑结论）
+  bod sources --db <path> --json   同上，输出机器可读结果
   bod serve                        启动本地控制面并写出连接描述（受保护握手）
   bod serve --listen <addr>        指定监听地址（默认取 server.listen，可为 127.0.0.1:0）
   bod serve --descriptor <path>    指定连接描述路径（默认 $BOD_HOME/host.endpoint.json）
@@ -290,6 +294,7 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         [cmd, rest @ ..] if cmd == "observe" => observe(rest),
         [cmd, rest @ ..] if cmd == "tracking" => tracking(rest),
+        [cmd, rest @ ..] if cmd == "sources" => sources(rest),
         [cmd, sub] if cmd == "adapter" && sub == "describe" => {
             let adapter = adapter_or_err()?;
             Ok(format!("{}\n", descriptor_json(adapter.descriptor())))
@@ -1166,6 +1171,135 @@ fn tracking(flags: &[String]) -> Result<String, String> {
         return Ok(format!("{rendered}\n"));
     }
     Ok(bod_app::delivery_tracking::render_list(&company, &rows))
+}
+
+/// `bod sources`：只读列出已确认的来源身份、修订条数与待确认候选（P8 3.2）。
+///
+/// 为什么先给 CLI 而不是 `POST /delivery-tracking/{id}/links`：那条契约要按 §34.12
+/// 的主体与目标判定授权，而判定还没实现。候选确认是「谁把定位认成身份」的责任动作，
+/// 在没有主体判定前开放写入口，等于让任何本机会话都能替别人认身份。
+/// 只读视图不涉及这个决定，先让人看见「哪些定位还在候选里等着」。
+fn sources(flags: &[String]) -> Result<String, String> {
+    let mut db: Option<std::path::PathBuf> = None;
+    let mut company = "company-default".to_string();
+    let mut project: Option<String> = None;
+    let mut limit = 50usize;
+    let mut with_candidates = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--db" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--db 需要一个路径".to_string())?;
+                db = Some(std::path::PathBuf::from(value));
+                index += 2;
+            }
+            "--company" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--company 需要一个 ID".to_string())?;
+                company = value.clone();
+                index += 2;
+            }
+            "--project" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--project 需要一个项目 ID".to_string())?;
+                project = Some(value.clone());
+                index += 2;
+            }
+            "--limit" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--limit 需要一个正整数".to_string())?;
+                limit = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("--limit 需要正整数，收到 {value}"))?;
+                index += 2;
+            }
+            "--candidates" => {
+                with_candidates = true;
+                index += 1;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            other => return Err(format!("sources 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+    let db = db.ok_or_else(|| format!("sources 需要 --db <数据库路径>\n\n{USAGE}"))?;
+    let store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
+        .map_err(|err| format!("打开数据库失败：{err}"))?;
+
+    let rows = store
+        .list_sources(&company, project.as_deref(), limit)
+        .map_err(|err| format!("读取来源失败：{err}"))?;
+    let candidates = if with_candidates {
+        Some(
+            store
+                .list_source_candidates(&company, project.as_deref(), false, limit)
+                .map_err(|err| format!("读取候选失败：{err}"))?,
+        )
+    } else {
+        None
+    };
+
+    if json {
+        let sources: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(source, revision_count)| {
+                serde_json::json!({
+                    "source_id": &source.source_id,
+                    "project_id": &source.project_id,
+                    "connection_id": &source.connection_id,
+                    "object_type": &source.object_type,
+                    "provider_object_id": &source.provider_object_id,
+                    "locator": &source.locator,
+                    "confirmed_by": &source.confirmed_by,
+                    "confirmed_at_ms": source.confirmed_at_ms,
+                    "revision_count": revision_count,
+                })
+            })
+            .collect();
+        let mut payload = serde_json::json!({
+            "company_id": &company,
+            "project_id": project,
+            "limit": limit,
+            "sources": sources,
+        });
+        if let Some(candidates) = &candidates {
+            payload["candidates"] = serde_json::Value::Array(
+                candidates
+                    .iter()
+                    .map(|candidate| {
+                        serde_json::json!({
+                            "candidate_id": &candidate.candidate_id,
+                            "project_id": &candidate.project_id,
+                            "connection_id": &candidate.connection_id,
+                            "object_type": &candidate.object_type,
+                            "locator": &candidate.locator,
+                            "proposed_by": &candidate.proposed_by,
+                            "proposed_at_ms": candidate.proposed_at_ms,
+                            "state": candidate.state.as_str(),
+                            "resolved_source_id": candidate.resolved_source_id,
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        let rendered =
+            serde_json::to_string(&payload).map_err(|err| format!("序列化失败：{err}"))?;
+        return Ok(format!("{rendered}\n"));
+    }
+
+    let mut out = bod_app::delivery_source::render_sources(&rows);
+    if let Some(candidates) = &candidates {
+        out.push_str(&bod_app::delivery_source::render_candidates(candidates));
+    }
+    Ok(out)
 }
 
 /// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。

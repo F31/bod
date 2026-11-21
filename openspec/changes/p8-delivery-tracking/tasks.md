@@ -39,7 +39,15 @@
       14 个单测 + 5 个 CLI 端到端用例。
       未做：来源身份五元组（3.2）、幂等与去重（3.3）、`expected_version` 追加（3.4）、
       导入端点（3.5）；摘要冲突判「待核实」需要来源身份区分「冲突」与「新版本取代」，留到 3.5。
-- [ ] 3.2 来源身份五元组与候选机制；内容更新追加来源修订（观察时间、摘要、操作者）。
+- [x] 3.2 来源身份五元组与候选机制；内容更新追加来源修订（观察时间、摘要、操作者）。
+      **结果**：`017_delivery_sources.sql` 四张表（`delivery_sources` / `delivery_source_candidates` /
+      `delivery_source_revisions` / `delivery_observation_sources`）。身份唯一索引含 `project_id`，
+      所以跨项目同名 PR 是两个来源；只有定位（URL/纯文本，含「把 URL 填进 ID 字段」）进候选，
+      确认后才有身份；修订按 `(version, digest)` 指纹幂等，**不含观察时间**，因此重复上报只确认一次、
+      同一标签两个摘要留两条。观察与修订用关联表连接（不能给 016 加列：迁移每次打开都会重放，
+      `ALTER TABLE ADD COLUMN` 不幂等）。生产入口是只读的 `bod sources --db <path> [--project]
+      [--candidates] [--json]`；候选确认写入口仍等 §34.12 主体判定。
+      13 个模块单测 + 7 个 store 用例 + 3 个 CLI 端到端用例。
 
 - [ ] 3.3 去重语义分离：幂等键管命令重放，来源身份管对象重复；同键异载荷返回冲突。
 - [ ] 3.4 目标关联与 `expected_version` 追加语义；共享来源不合并不同客户记录。
