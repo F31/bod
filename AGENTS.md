@@ -524,11 +524,14 @@
     dev 来源需显式 `allow_origin`）。`null` Origin 一律拒。这条不是可选的加固：
     `POST /_bod/handshake` 走描述文件令牌而非 Bearer，Host 校验是那条路径上唯一的网络层防线
     （DNS rebinding 场景）。
-13. **禁止在 `handle` 里直接按路径分支**：新增 HTTP 端点一律加进 `host_handshake::ROUTES`
-    路由表，并**必须**声明 `auth` 与 `note`（`crates/bod-app/src/http_router.rs`）。
-    `auth` 无 `Default`，漏写编译不过；`note` 为空则 `route_table_is_well_formed` 测试不过。
+13. **禁止在 `handle` 里直接按路径分支**：新增 HTTP 端点一律加进路由表，并**必须**声明
+    `auth`、`note` 与 `contract.status`（`crates/bod-app/src/http_router.rs`）。
+    表有两张，按前缀分流（`host_handshake::handle`），**不按路径逐条判断**：
+    - 控制面 `/_bod/*` → `host_handshake::ROUTES`（本机会话密钥、Host/Origin 校验）；
+    - 产品接口 `/api/v1/*` → `delivery_api::routes`（§34.12 主体与目标判定，尚为 planned）。
+    `auth` 与 `status` 无 `Default`，漏写编译不过；`note` 为空则测试不过。
     理由：CR-003 之前是 `match (method, path)` 链，加到第 5 个分支时「谁能调、拒绝答什么码」
-    只能靠读每个分支的代码才知道，而 §6 还要再加 5 个业务接口。
+    只能靠读每个分支的代码才知道，而 §6/§11 合计还要再加 10 个业务接口。
     拒绝码按端点保持稳定（`BOD_SHUTDOWN_DENIED` 不等于通用 `BOD_UNAUTHORIZED`），
     客户端按码分支，改码等于改契约。
 14. **禁止让参数路由吃掉已被静态路径占用的路径**：`match_route` 的判定顺序是
@@ -543,12 +546,18 @@
     的漂移检查**不算调用方**——它让 1,424 行的 `coverage_receipt` 在门禁全绿的同时零引用。
     检查用 `cargo run -p xtask -- reach --check verification/reach-baseline.tsv`：
     只对**相对基线新增**的不可达模块报警，既有孤岛不返红（它们是待接线资产或待判定沉淀）。
-16. **禁止手写 OpenAPI 文档或第二份路径表**：契约从 `ROUTES` 投影
-    （`crates/bod-app/src/openapi.rs`），新增端点必须同时写 `contract`（summary / request /
-    query / responses），漏写编译不过。两条绝对不能手写：
+16. **禁止手写 OpenAPI 文档或第二份路径表**：契约从路由表投影
+    （`crates/bod-app/src/openapi.rs`，`document_many` 合并控制面与产品接口两张表），
+    新增端点必须同时写 `contract`（summary / status / request / query / responses），
+    漏写编译不过。三条绝对不能手写：
     - **401**：拒绝码只能来自 `Auth::Bearer(code)` / `Auth::InHandler(code)`，
       在 `contract.responses` 里再写一条 401 会被 `openapi::document` 直接拒绝；
-    - **404**：分发层对所有未匹配请求都答它，由投影统一添加。
+    - **404**：分发层对所有未匹配请求都答它，由投影统一添加；
+    - **组件**：嵌套类型的 `$defs` 由 `register_body` 自动提升成 `components.schemas`
+      并改写引用前缀，别手写 schema、也别加 `#[schemars(inline)]` 复制内容。
+    `contract.status` 区分「路径已冻结」与「已经能用」：`planned` 必须声明 501 且 handler
+    只能是 `not_implemented`，`served` 不得声明 501；实现落地要同时改状态、删 501 响应，
+    测试双向断言（`planned_operations_are_marked_and_explain_the_501`）。
     改 DTO 或路由后必须重生成 `verification/openapi.json`
     （`BOD_BLESS_OPENAPI=1 cargo test -p bod-app --test openapi_contract`）并与代码一起提交，
     否则 `checked_in_document_matches_generated_one` 会红。

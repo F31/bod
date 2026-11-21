@@ -1,6 +1,502 @@
 {
   "components": {
     "schemas": {
+      "ArtifactRef": {
+        "additionalProperties": false,
+        "description": "制品引用。只有摘要、没有修订时也能登记——但覆盖结论会因此停在待补证。",
+        "properties": {
+          "artifact_revision": {
+            "description": "制品修订 ID（`artifact_revisions.revision_id`）。缺省表示尚未建立修订。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "digest": {
+            "description": "制品内容摘要；与修订同时给出时必须一致。",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "CoverageVerdictCode": {
+        "description": "覆盖结论。取值与 `coverage_receipt::CoverageVerdict` 一一对应——\n这里只做线上表示，不做第二套判定。\n\n三个取值的含义：`covered` 部署已观察 + 验证通过 + 开关就绪；\n`pending-verification` 已提供但缺部署观察或验证结论；\n`pending-install` 缺安装回执（离线安装、人群未知）。\n\n变体上不写注释：`schemars` 会把「带注释的变体」编译成 `oneOf` + `const`，\n客户端生成器便得到 union 而不是 enum。说明统一写在类型注释里，\nschema 保持为朴素字符串枚举（ADR-0004 的撤销条件因此仍然不成立）。",
+        "enum": [
+          "covered",
+          "pending-verification",
+          "pending-install"
+        ],
+        "type": "string"
+      },
+      "DeliveryImportRequest": {
+        "additionalProperties": false,
+        "description": "外部导入请求。五项输入与规格 §11 接口表逐项对应。",
+        "properties": {
+          "acceptance": {
+            "description": "验收条件（规则修订或人可读条款）。空串表示尚未提供，覆盖结论必然停在待核实。",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "命令幂等键。同键不同载荷回 409；与来源身份是两个概念，见 design D2。",
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceRef"
+          },
+          "targets": {
+            "description": "本次导入覆盖的客户目标。至少一项：没有目标的导入无法回答「对谁交付了什么」。",
+            "items": {
+              "$ref": "#/components/schemas/TargetRef"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id",
+          "source",
+          "targets",
+          "acceptance",
+          "idempotency_key"
+        ],
+        "title": "DeliveryImportRequest",
+        "type": "object"
+      },
+      "DeliveryImportResponse": {
+        "additionalProperties": false,
+        "description": "导入结果。",
+        "properties": {
+          "created": {
+            "description": "`true` 表示本次新建；`false` 表示幂等重放或来源已登记。",
+            "type": "boolean"
+          },
+          "gaps": {
+            "description": "缺口码（稳定字符串，不随语言变化）。",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetCoverage"
+            },
+            "type": "array"
+          },
+          "tracking_id": {
+            "description": "稳定跟踪 ID。重复导入同一来源时返回同一个 ID。",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tracking_id",
+          "created",
+          "targets",
+          "gaps"
+        ],
+        "title": "DeliveryImportResponse",
+        "type": "object"
+      },
+      "DeliveryLinkRequest": {
+        "additionalProperties": false,
+        "description": "追加关联请求。\n\n`source` 与 `work_package_revision` **恰好给一个**。不用 `oneOf` 表达：\nOAS 外层由本仓维护，多态请求体会让客户端生成器与校验器分叉（ADR-0004）。\n该约束由实现校验并在 422 里说明，不在 schema 里假装已经表达。",
+        "properties": {
+          "expected_version": {
+            "description": "期望的跟踪项版本；不一致回 409 并带当前版本。",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetRef"
+            },
+            "type": "array"
+          },
+          "work_package_revision": {
+            "description": "后来补入的内部工作包修订；只追加关联，不建 Attempt。",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "targets",
+          "expected_version",
+          "idempotency_key"
+        ],
+        "title": "DeliveryLinkRequest",
+        "type": "object"
+      },
+      "DeliveryLinkResponse": {
+        "additionalProperties": false,
+        "description": "追加结果。",
+        "properties": {
+          "appended": {
+            "description": "`false` 表示关系已存在（重复提交），本次没有新增。",
+            "type": "boolean"
+          },
+          "link_id": {
+            "type": "string"
+          },
+          "tracking_id": {
+            "type": "string"
+          },
+          "version": {
+            "description": "追加后的跟踪项版本。",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tracking_id",
+          "link_id",
+          "appended",
+          "version"
+        ],
+        "title": "DeliveryLinkResponse",
+        "type": "object"
+      },
+      "DeliveryObservationRequest": {
+        "additionalProperties": false,
+        "description": "观察入站请求。",
+        "properties": {
+          "artifact": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ObservationKind"
+          },
+          "note": {
+            "description": "观察正文或说明；人工补证必须写清授权范围与复验依据。",
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceRef",
+            "description": "来源事件。`observed_at` 即本次观察时间；`source_sequence` 用于乱序重排。"
+          },
+          "source_sequence": {
+            "description": "来源内的单调序号，从 1 开始。重复序号回 409，不回 200。",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetRef"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id",
+          "targets",
+          "source",
+          "source_sequence",
+          "kind",
+          "note",
+          "idempotency_key"
+        ],
+        "title": "DeliveryObservationRequest",
+        "type": "object"
+      },
+      "DeliveryObservationResponse": {
+        "additionalProperties": false,
+        "description": "观察登记结果。",
+        "properties": {
+          "affected_targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetCoverage"
+            },
+            "type": "array"
+          },
+          "applied": {
+            "description": "`false` 表示该序号已处理过（重复事件），本次没有改变任何结论。",
+            "type": "boolean"
+          },
+          "observation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "observation_id",
+          "applied",
+          "affected_targets"
+        ],
+        "title": "DeliveryObservationResponse",
+        "type": "object"
+      },
+      "DeliveryStatus": {
+        "description": "渠道送达状态。\n\n只有一个取值是刻意的：受理成功只表示**意图已登记**。渠道是否送达要另查，\n把「已提交」写成 `delivered` 或把「回包丢失」写成 `failed` 都是臆断。",
+        "enum": [
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "DeliveryTrackingView": {
+        "additionalProperties": false,
+        "description": "跟踪项读取视图。",
+        "properties": {
+          "allowed_actions": {
+            "description": "允许动作的稳定码（如 `link-source`、`draft`、`send`）。\n这是服务端判定结果的投影，客户端不得据此自行放宽。",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceStamp"
+            },
+            "type": "array"
+          },
+          "gaps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "owner": {
+            "description": "负责人。未指派时字段缺省——不用空串冒充「有人负责」。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetCoverage"
+            },
+            "type": "array"
+          },
+          "tracking_id": {
+            "type": "string"
+          },
+          "version": {
+            "description": "当前版本；调用方追加关联时应把它作为 `expected_version`。",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tracking_id",
+          "project_id",
+          "version",
+          "targets",
+          "evidence",
+          "gaps",
+          "allowed_actions"
+        ],
+        "title": "DeliveryTrackingView",
+        "type": "object"
+      },
+      "DraftCitation": {
+        "additionalProperties": false,
+        "description": "草稿里的一条引用。",
+        "properties": {
+          "evidence_revision": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "reference": {
+            "description": "引用本身的定位（回执 ID、来源对象 ID、链接）。",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_revision",
+          "reference",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      "DraftCreateRequest": {
+        "additionalProperties": false,
+        "description": "草稿装配请求。保存**不产生任何出站副作用**。",
+        "properties": {
+          "evidence_revision": {
+            "description": "所依据的证据修订。证据变化后这份草稿即失效，需重审。",
+            "type": "string"
+          },
+          "gaps": {
+            "description": "已知缺口；有缺口时草稿不得声称已修复。",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "purpose": {
+            "description": "答复用途（如 `fixed-notice`、`provided-notice`、`correction`）。",
+            "type": "string"
+          },
+          "references": {
+            "description": "逐项引用的证据或回执引用。",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetRef"
+          },
+          "text": {
+            "description": "人工编辑的正文；空串表示按规则摘要装配（无模型路径）。",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "purpose",
+          "evidence_revision",
+          "references",
+          "gaps",
+          "text"
+        ],
+        "title": "DraftCreateRequest",
+        "type": "object"
+      },
+      "DraftResponse": {
+        "additionalProperties": false,
+        "description": "草稿装配结果。",
+        "properties": {
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/DraftCitation"
+            },
+            "type": "array"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "draft_id": {
+            "type": "string"
+          },
+          "evidence_revision": {
+            "type": "string"
+          },
+          "revision": {
+            "description": "草稿修订号。每次保存 +1，发送时必须回传已审的那一版。",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DraftStatus"
+          }
+        },
+        "required": [
+          "draft_id",
+          "revision",
+          "evidence_revision",
+          "citations",
+          "status",
+          "created_at"
+        ],
+        "title": "DraftResponse",
+        "type": "object"
+      },
+      "DraftSendRequest": {
+        "additionalProperties": false,
+        "description": "发送意图请求。回传已审的文本修订与证据修订，两者任一过期即 409。",
+        "properties": {
+          "evidence_revision": {
+            "description": "已审的证据修订；与当前证据不一致时不得发出。",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "target_channel": {
+            "description": "目标通道标识（连接实例或渠道账号引用），不是令牌。",
+            "type": "string"
+          },
+          "text_revision": {
+            "description": "已审的草稿修订号。",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "text_revision",
+          "evidence_revision",
+          "target_channel",
+          "idempotency_key"
+        ],
+        "title": "DraftSendRequest",
+        "type": "object"
+      },
+      "DraftSendResponse": {
+        "additionalProperties": false,
+        "description": "发送受理结果。",
+        "properties": {
+          "delivery_status": {
+            "$ref": "#/components/schemas/DeliveryStatus"
+          },
+          "registered": {
+            "description": "恒为 `true`：走到这个响应就说明意图已登记。",
+            "type": "boolean"
+          },
+          "send_intent_id": {
+            "description": "发送意图 ID（`outbox_deliveries` 侧的稳定键）。用它去对账，不要重发。",
+            "type": "string"
+          }
+        },
+        "required": [
+          "send_intent_id",
+          "registered",
+          "delivery_status"
+        ],
+        "title": "DraftSendResponse",
+        "type": "object"
+      },
+      "DraftStatus": {
+        "description": "草稿状态。只有两种：可编辑与待重审。发送不是状态，是另一个操作。",
+        "enum": [
+          "draft",
+          "pending-review"
+        ],
+        "type": "string"
+      },
       "ErrorResponse": {
         "description": "统一错误体。\n\n两种形态共用一个类型：\n- 带解释：`{\"error\":\"BOD_HOST_REJECTED\",\"reason\":\"...\"}`，用于需要区分\n  「为什么拒」的场景（Host/Origin 校验、事件流授权）；\n- 只有码：`{\"error\":\"BOD_NOT_FOUND\"}`，用于码本身已经说清的场景。\n\n`reason` 用 `skip_serializing_if` 而不是输出 `null`：既有客户端按「字段存在与否」\n判断是否有解释，补一个 `null` 会改变它们的解析结果。",
         "properties": {
@@ -18,6 +514,28 @@
           "error"
         ],
         "title": "ErrorResponse",
+        "type": "object"
+      },
+      "EvidenceStamp": {
+        "additionalProperties": false,
+        "description": "一条证据的时间戳与来源。GET 用它说明「结论是按哪一版证据得出的」。",
+        "properties": {
+          "observed_at": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "source": {
+            "description": "来源类别：`connector` / `manual` / `internal`。",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "source",
+          "observed_at"
+        ],
         "type": "object"
       },
       "HandshakeRequest": {
@@ -87,6 +605,15 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "ObservationKind": {
+        "description": "观察类别。回滚是**新的观察**，不是把部署观察改成失败。\n\n`manual-evidence` 指授权实施人提交的补证（离线安装、现场核对）；\n与连接器证据冲突时两份都保留，并进待核实。",
+        "enum": [
+          "deployment",
+          "rollback",
+          "manual-evidence"
+        ],
+        "type": "string"
+      },
       "ShutdownResponse": {
         "description": "`POST /_bod/shutdown` 的响应。\n\n`stopping: true` 只表示「授权停止已置位」，不表示进程已经退出——\n退出发生在 `run` 的下一轮循环。客户端要确认退出，应看描述文件是否消失。",
         "properties": {
@@ -99,6 +626,115 @@
         ],
         "title": "ShutdownResponse",
         "type": "object"
+      },
+      "SourceRef": {
+        "additionalProperties": false,
+        "description": "外部来源引用，对应来源身份五元组中「连接实例 + 对象类型 + 稳定对象 ID」三项。\n\nCompany 与 Project 不在结构里：前者由主体解析，后者由请求顶层 `project_id` 给出。\n`object_id` 缺省即**候选**——只有 URL 或纯文本时不能成为身份，须负责人确认。",
+        "properties": {
+          "connection_id": {
+            "description": "连接实例引用。凭据只存在连接实例里，请求体**不得**携带令牌。",
+            "type": "string"
+          },
+          "digest": {
+            "description": "内容摘要。可变标签每次解析都记录当次摘要，不覆盖前一次。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "object_id": {
+            "description": "提供方稳定对象 ID（如 PR 的内部 ID 而非编号）。缺省表示进入候选。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "object_type": {
+            "description": "来源对象类型：`pull_request` / `commit` / `build` / `label` / `manual`。",
+            "type": "string"
+          },
+          "observed_at": {
+            "description": "原始观察时间（RFC 3339）。这是来源修订的时间，不是入库时间。",
+            "type": "string"
+          },
+          "url": {
+            "description": "人类可读地址。仅用于候选展示与人工确认，**不参与身份判定**。",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection_id",
+          "object_type",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      "TargetCoverage": {
+        "additionalProperties": false,
+        "description": "单个目标上的覆盖状态。",
+        "properties": {
+          "evidence_revision": {
+            "description": "该结论所依据的证据修订；缺省表示尚无证据。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "description": "该证据的观察时间（RFC 3339）。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "不能给结论时的原因。`covered` 时不出现——给成功补一句原因会让人以为有条件。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetRef"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/CoverageVerdictCode"
+          }
+        },
+        "required": [
+          "target",
+          "verdict"
+        ],
+        "type": "object"
+      },
+      "TargetRef": {
+        "additionalProperties": false,
+        "description": "客户目标：客户 × 环境 ×（可选）部署单元。\n\n没有 `company_id`：Company 由主体解析得出，不由请求体声明——请求体声明归属\n等于允许调用者指定别人的租户。",
+        "properties": {
+          "customer_id": {
+            "description": "客户标识。同名环境分属不同客户时靠它区分。",
+            "type": "string"
+          },
+          "deployment_unit": {
+            "description": "部署单元/客户组；缺省表示整个环境。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environment": {
+            "description": "目标环境标识（客户侧命名，不要求全局唯一）。",
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer_id",
+          "environment"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -110,8 +746,8 @@
     }
   },
   "info": {
-    "description": "本机控制面：只监听回环，校验 Host/Origin，不发 CORS。文档由 ROUTES 与 DTO 生成，不手写。",
-    "title": "bod 控制面",
+    "description": "本机控制面（/_bod/*）与产品接口（/api/v1/*）的同一份契约。文档由路由表与 DTO 生成，不手写。`x-bod-status=planned` 表示路径已冻结、实现未落地，请求会得到 501。",
+    "title": "bod 控制面与产品接口",
     "version": "bod-host/v1"
   },
   "openapi": "3.1.0",
@@ -197,7 +833,8 @@
           }
         },
         "summary": "订阅事件流（SSE）",
-        "x-bod-auth": "in-handler"
+        "x-bod-auth": "in-handler",
+        "x-bod-status": "served"
       }
     },
     "/_bod/handshake": {
@@ -253,7 +890,8 @@
           }
         },
         "summary": "用一次性握手令牌换取会话密钥",
-        "x-bod-auth": "in-handler"
+        "x-bod-auth": "in-handler",
+        "x-bod-status": "served"
       }
     },
     "/_bod/health": {
@@ -286,7 +924,8 @@
           }
         },
         "summary": "存活探测",
-        "x-bod-auth": "public"
+        "x-bod-auth": "public",
+        "x-bod-status": "served"
       }
     },
     "/_bod/shutdown": {
@@ -337,7 +976,483 @@
           }
         ],
         "summary": "授权停止宿主",
-        "x-bod-auth": "bearer"
+        "x-bod-auth": "bearer",
+        "x-bod-status": "served"
+      }
+    },
+    "/api/v1/delivery-observations": {
+      "post": {
+        "description": "只校验本机会话密钥；§34.12 未实现。与 §34.10 的同一路径合并为一处契约：按来源序列处理乱序，重复事件只确认一次；只读接入凭据可登记观察但不可部署或通知",
+        "operationId": "post_api_v1_delivery_observations",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryObservationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryObservationResponse"
+                }
+              }
+            },
+            "description": "观察登记结果与受影响目标的新结论；乱序事件按来源序列落位，不回退已确认结论"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_API_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "契约已冻结、实现未落地：本条请求不会被受理，也不会产生任何写入；错误码固定为 BOD_NOT_IMPLEMENTED"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "接收部署、回滚或人工补证观察",
+        "x-bod-auth": "bearer",
+        "x-bod-status": "planned"
+      }
+    },
+    "/api/v1/delivery-tracking/imports": {
+      "post": {
+        "description": "只校验本机会话密钥；§34.12 的主体与目标判定未实现。导入权限与发布执行权限分开：凭此不能部署、不能通知客户。同幂等键不同载荷回 409，重放返回原跟踪项",
+        "operationId": "post_api_v1_delivery_tracking_imports",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryImportResponse"
+                }
+              }
+            },
+            "description": "已建立（或幂等重放命中）的跟踪项：稳定 ID、已关联目标与缺口；`created` 区分首次与重放"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_API_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "契约已冻结、实现未落地：本条请求不会被受理，也不会产生任何写入；错误码固定为 BOD_NOT_IMPLEMENTED"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "导入外部来源并建立交付跟踪项",
+        "x-bod-auth": "bearer",
+        "x-bod-status": "planned"
+      }
+    },
+    "/api/v1/delivery-tracking/{id}": {
+      "get": {
+        "description": "只校验本机会话密钥；§34.12 未实现。读取按授权目标过滤：对调用者不可见的客户不出现在 targets 里，不是返回空结论",
+        "operationId": "get_api_v1_delivery_tracking_id",
+        "parameters": [
+          {
+            "description": "路径参数原样透传，不做百分号解码；不得直接拼路径或 SQL",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryTrackingView"
+                }
+              }
+            },
+            "description": "覆盖结论、证据版本与来源时间、缺口、负责人与允许动作"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_API_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "契约已冻结、实现未落地：本条请求不会被受理，也不会产生任何写入；错误码固定为 BOD_NOT_IMPLEMENTED"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "读取跟踪项的覆盖结论与允许动作",
+        "x-bod-auth": "bearer",
+        "x-bod-status": "planned"
+      }
+    },
+    "/api/v1/delivery-tracking/{id}/links": {
+      "post": {
+        "description": "只校验本机会话密钥；§34.12 未实现。追加来源或内部工作包关系，按 expected_version 防覆盖；重复提交返回已有关系而不是第二条",
+        "operationId": "post_api_v1_delivery_tracking_id_links",
+        "parameters": [
+          {
+            "description": "路径参数原样透传，不做百分号解码；不得直接拼路径或 SQL",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryLinkResponse"
+                }
+              }
+            },
+            "description": "追加结果：关系 ID、是否新建与追加后的版本；重复提交时 `appended=false`"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_API_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "契约已冻结、实现未落地：本条请求不会被受理，也不会产生任何写入；错误码固定为 BOD_NOT_IMPLEMENTED"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "给跟踪项追加来源或内部工作包关联",
+        "x-bod-auth": "bearer",
+        "x-bod-status": "planned"
+      }
+    },
+    "/api/v1/feedback-receipts/{id}/drafts": {
+      "post": {
+        "description": "只校验本机会话密钥；§34.12 未实现。保存草稿**不产生任何出站动作**：要实现时不得在此路径上调用渠道",
+        "operationId": "post_api_v1_feedback_receipts_id_drafts",
+        "parameters": [
+          {
+            "description": "路径参数原样透传，不做百分号解码；不得直接拼路径或 SQL",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftResponse"
+                }
+              }
+            },
+            "description": "草稿修订、所依据的证据修订与逐项引用；状态为 draft 或 pending-review"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_API_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "契约已冻结、实现未落地：本条请求不会被受理，也不会产生任何写入；错误码固定为 BOD_NOT_IMPLEMENTED"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "为客户目标装配答复草稿（不外发）",
+        "x-bod-auth": "bearer",
+        "x-bod-status": "planned"
+      }
+    },
+    "/api/v1/feedback-receipts/{id}/drafts/{draft_id}/send": {
+      "post": {
+        "description": "只校验本机会话密钥；§34.12 未实现。发送必须在命令受理点与出站点各重验一次；证据失效回 409 并给出可见差异。受理成功只表示意图已登记，渠道结果另查",
+        "operationId": "post_api_v1_feedback_receipts_id_drafts_draft_id_send",
+        "parameters": [
+          {
+            "description": "路径参数原样透传，不做百分号解码；不得直接拼路径或 SQL",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "路径参数原样透传，不做百分号解码；不得直接拼路径或 SQL",
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftSendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftSendResponse"
+                }
+              }
+            },
+            "description": "已登记的发送意图；`delivery_status` 只能是 unknown——提交成功不等于送达"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_API_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "契约已冻结、实现未落地：本条请求不会被受理，也不会产生任何写入；错误码固定为 BOD_NOT_IMPLEMENTED"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "提交草稿发送意图（渠道结果另查）",
+        "x-bod-auth": "bearer",
+        "x-bod-status": "planned"
       }
     }
   }

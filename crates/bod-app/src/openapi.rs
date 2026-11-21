@@ -55,6 +55,22 @@ pub struct Info {
 /// 悬空的组件引用。这些必须能被测试单独构造出来验证检查不是空转，
 /// 所以用返回值而不是 `panic`。
 pub fn document<S>(routes: &[Route<S>], info: Info) -> Result<Value, String> {
+    document_many(routes.iter(), info)
+}
+
+/// 从多个路由表生成**一份**文档。
+///
+/// 为什么不是两份文档：客户端只该读一份契约。控制面（`/_bod/*`）与产品接口
+/// （`/api/v1/*`）是同一份契约里的两组路径，鉴权级别由各自的 `Auth` 声明，
+/// 拆成两个文件只会让「这条路径归谁」变成两处维护。
+///
+/// 跨表的重复 method+pattern、operationId 冲突、同名组件内容不同都会被拒绝，
+/// 所以「两张表拼起来」不会静默覆盖。
+pub fn document_many<'a, S, I>(routes: I, info: Info) -> Result<Value, String>
+where
+    S: 'a,
+    I: IntoIterator<Item = &'a Route<S>>,
+{
     let mut paths: Map<String, Value> = Map::new();
     // 组件名 → schema。同名不同内容视为冲突：说明有人给两个类型起了同一个名字。
     let mut schemas: Map<String, Value> = Map::new();
@@ -85,7 +101,7 @@ pub fn document<S>(routes: &[Route<S>], info: Info) -> Result<Value, String> {
 
         // 请求体 schema
         if let Some(ContractBody::Json { component, schema }) = route.contract.request {
-            register(&mut schemas, component, schema())?;
+            register_body(&mut schemas, component, schema())?;
         }
 
         // 声明的响应
@@ -101,7 +117,7 @@ pub fn document<S>(routes: &[Route<S>], info: Info) -> Result<Value, String> {
                 ));
             }
             if let Some(ContractBody::Json { component, schema }) = declared.body {
-                register(&mut schemas, component, schema())?;
+                register_body(&mut schemas, component, schema())?;
             }
             responses.insert(
                 declared.status.to_string(),
@@ -114,7 +130,7 @@ pub fn document<S>(routes: &[Route<S>], info: Info) -> Result<Value, String> {
             Auth::Public => {}
             Auth::Bearer(code) | Auth::InHandler(code) => {
                 uses_bearer |= matches!(route.auth, Auth::Bearer(_));
-                register(
+                register_body(
                     &mut schemas,
                     "ErrorResponse",
                     schema_of::<crate::host_api::ErrorResponse>(),
@@ -130,7 +146,7 @@ pub fn document<S>(routes: &[Route<S>], info: Info) -> Result<Value, String> {
         }
 
         // 404：分发层对所有未匹配请求都答这个，属于每个端点的真实行为。
-        register(
+        register_body(
             &mut schemas,
             "ErrorResponse",
             schema_of::<crate::host_api::ErrorResponse>(),
@@ -144,6 +160,11 @@ pub fn document<S>(routes: &[Route<S>], info: Info) -> Result<Value, String> {
         operation.insert("operationId".to_string(), json!(operation_id));
         operation.insert("summary".to_string(), json!(route.contract.summary));
         operation.insert("description".to_string(), json!(route.note));
+        // 「路径已冻结」与「已经能用」必须分开说：客户端据此决定是否接线。
+        operation.insert(
+            "x-bod-status".to_string(),
+            json!(route.contract.status.as_str()),
+        );
         operation.insert(
             "x-bod-auth".to_string(),
             json!(match route.auth {
@@ -226,6 +247,67 @@ fn register(
         }
         Some(existing) if existing == &schema => Ok(()),
         Some(_) => Err(format!("组件 {component} 被两个不同的 schema 占用")),
+    }
+}
+
+/// 登记一个 schema，并把它内部引用的子类型一并登记。
+///
+/// 为什么需要这一步：`schemars` 对**嵌套类型**不会就地展开，而是写成
+/// `{"$ref":"#/$defs/TargetRef"}` 并把定义放进根上的 `$defs`。而 OAS 文档里
+/// 合法的引用是 `#/components/schemas/...`——不转换的话，文档里会出现
+/// 「$ref 指向一个不存在的组件」，客户端解析即失败。
+///
+/// 做法是把 `$defs` 提升为组件，并改写引用前缀。这样既有共享（`TargetRef`
+/// 只出现一次），也不需要每个 DTO 手写 `#[schemars(inline)]` 去重复内容。
+fn register_body(
+    schemas: &mut Map<String, Value>,
+    component: &str,
+    schema: Value,
+) -> Result<(), String> {
+    let (root, defs) = lift_defs(schema);
+    for (name, definition) in defs {
+        register(schemas, &name, definition)?;
+    }
+    register(schemas, component, root)
+}
+
+/// 把根上的 `$defs` 摘出来，并改写所有 `#/$defs/X` 引用。
+///
+/// 只处理一层：`schemars` 把一次派生里的所有子类型都放在同一个 `$defs` 里，
+/// 子定义内部也只会引用同一张表。若将来出现嵌套 `$defs`，引用会留在文档里
+/// 变成不可解析的 `$ref`，`every_reference_resolves_to_a_component` 会当场失败。
+fn lift_defs(mut schema: Value) -> (Value, Vec<(String, Value)>) {
+    let mut defs = Vec::new();
+    if let Value::Object(map) = &mut schema
+        && let Some(Value::Object(inner)) = map.remove("$defs")
+    {
+        defs.extend(inner);
+    }
+    rewrite_defs_refs(&mut schema);
+    for (_, definition) in defs.iter_mut() {
+        rewrite_defs_refs(definition);
+    }
+    (schema, defs)
+}
+
+fn rewrite_defs_refs(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(target)) = map.get_mut("$ref")
+                && let Some(name) = target.strip_prefix("#/$defs/")
+            {
+                *target = format!("#/components/schemas/{name}");
+            }
+            for nested in map.values_mut() {
+                rewrite_defs_refs(nested);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_defs_refs(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -330,6 +412,7 @@ mod tests {
             auth,
             note: "测试用路由",
             contract: Contract {
+                status: crate::http_router::Implementation::Served,
                 summary: "测试",
                 request: None,
                 query: &[],
@@ -383,6 +466,7 @@ mod tests {
             auth: Auth::Bearer("BOD_X_DENIED"),
             note: "测试用",
             contract: Contract {
+                status: crate::http_router::Implementation::Served,
                 summary: "测试",
                 request: None,
                 query: &[],
@@ -459,6 +543,7 @@ mod tests {
             auth: Auth::Bearer("BOD_STREAM_DENIED"),
             note: "测试用",
             contract: Contract {
+                status: crate::http_router::Implementation::Served,
                 summary: "事件流",
                 request: None,
                 query: &[],
@@ -485,5 +570,43 @@ mod tests {
         let err = register(&mut schemas, "X", json!({ "type": "integer" }))
             .expect_err("内容不同必须报错");
         assert!(err.contains("占用"), "{err}");
+    }
+
+    /// schemars 把嵌套类型写进 `$defs`。不提升进 components 的话，文档里会出现
+    /// 指向不存在组件的 `$ref`——客户端解析即失败，而生成侧毫无察觉。
+    #[test]
+    fn nested_types_are_lifted_out_of_defs() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Inner {
+            value: String,
+        }
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Outer {
+            inner: Inner,
+        }
+
+        let mut schemas = Map::new();
+        register_body(&mut schemas, "Outer", schema_of::<Outer>()).expect("应能登记");
+
+        assert!(schemas.contains_key("Inner"), "子类型必须成为组件");
+        assert!(
+            schemas["Outer"].get("$defs").is_none(),
+            "根上不应再留 $defs：它不会被 OAS 客户端解析"
+        );
+        assert_eq!(
+            schemas["Outer"]["properties"]["inner"]["$ref"],
+            json!("#/components/schemas/Inner")
+        );
+    }
+
+    /// 没有嵌套类型时不得凭空多出组件，也不得改动 schema 本身。
+    #[test]
+    fn plain_schemas_pass_through_unchanged() {
+        let original = json!({ "type": "object", "properties": { "a": { "type": "string" } } });
+        let (root, defs) = lift_defs(original.clone());
+        assert!(defs.is_empty());
+        assert_eq!(root, original);
     }
 }

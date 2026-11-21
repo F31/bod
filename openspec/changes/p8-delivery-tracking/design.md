@@ -60,9 +60,21 @@
 
 ### D5 端点先冻结再实现
 
-§11 的 6 个操作先进 `ROUTES`（带 `contract`）并重生成 `verification/openapi.json`，
+§11 的 6 个操作先带 `contract` 进路由表并重生成 `verification/openapi.json`，
 路径冻结后才写 handler。理由：路径改名对客户端的破坏远大于实现顺序调整；
 而冻结的成本是一条命令（ADR-0004 的黄金比对）。
+
+冻结时定下的两点（实施后补记）：
+
+- **产品接口单独一张表**（`delivery_api::routes`，前缀 `/api/v1`），不并入控制面
+  `ROUTES`。分发层按前缀分流。理由是鉴权语义不同：控制面凭据是本机会话密钥，
+  §11 要按 §34.12 的主体与目标判定；混在一张表里，文档会把两者写成同一种鉴权。
+- **`x-bod-status`**：每条操作声明 `served` 或 `planned`（`Contract.status`，无默认值）。
+  计划中操作一律 `planned` + 声明 501，handler 只有 `not_implemented` 一个；
+  测试断言「planned 必须声明 501、served 不得声明 501」，实现落地时必须改状态。
+
+当前鉴权只到会话级（`Auth::Bearer(BOD_API_DENIED)`），§34.12 未实现——
+这一点写在每条路由的 `note` 里，也写进文档的 operation description。
 
 ## Risks / Trade-offs
 
@@ -75,11 +87,36 @@
 
 ## Migration Plan
 
-1. 盘点（只读）：现有表/DAO/查询/UI 对内部 Attempt 的依赖点。
-2. 路径冻结：6 个端点进 `ROUTES` + 重生成 `verification/openapi.json`。
+### 2.1 盘点结果（只读，2026-11-21；不改代码）
+
+盘查范围：15 个迁移（50 张表）、`store.rs` 的 171 个查询函数、`apps/*` 全部前端源码。
+结论先说：**没有任何外键指向 `attempts`/`runs`**，所以 D3 不需要靠迁移来「解绑」；
+真正的阻断点只有一处——接受记录表把内部工作包修订写成了 `NOT NULL`。
+
+| 检查项 | 实测 | 对 D3 的影响 |
+|---|---|---|
+| 外键约束 | 全库仅 1 条：`wake_receipts` → `work_queue(company_id, queue_key)`；**无一条指向 `attempts`/`runs`** | 跟踪项可独立成立，无需放宽或删除约束 |
+| 强制内部身份的列 | `attempts.run_uid`、`invocations.run_id/attempt_id/binding_id/fencing_token`、`handoff_snapshots.source_attempt_id`、`takeover_intents.from_attempt_id` 均 `NOT NULL` | 这四张表只能装内部运行；外部导入不得借用（借了就得编 ID） |
+| 接受记录 | `acceptances.work_package_revision` / `input_baseline` / `artifact_revision` 均 `NOT NULL`；`work_package_states` 主键为 `(issue_uid, revision_id)` | **阻断点**：外部交付没有内部工作包，写入必须编一个 WPR——正是 D3 禁止的路径。因此外部回执不复用 `acceptances`，另表承载 |
+| 制品 | `artifacts.project_id NOT NULL`，无 attempt 列；`artifact_revisions.produced_by` 是自由文本 | 可复用：外部制品按项目归属登记，`produced_by` 记来源 |
+| 验证记录 | `verification_records.revision_id NOT NULL`，指向制品修订 | 可复用：外部证据挂在制品修订上 |
+| 查询/JOIN | `list_project_invocations`、`list_run_invocation_states` 经 `JOIN runs ON … JOIN issues` 过滤；`list_project_acceptances` 经 `JOIN artifacts` 取项目 | 前两条只对内部运行成立，外部跟踪项不得复用；后者不依赖 Attempt |
+| 计数 | `count_attempts` 只数 `attempts` 表 | 外部记录本就不该进 `attempts`，现有计数语义天然正确，无需改 |
+| UI | `apps/workbench` 只有 `connection.ts` / `main.ts` / `connection.test.ts`，无 attempt/run/acceptance 引用；`apps/desktop` 无相关查询 | 没有 UI 在强制「必须来自内部运行」 |
+| 发送意图 | `outbox_deliveries.status` 已含 `unknown`，主键 `(event_or_command_id, destination_id)`，以 `queue_key` 关联 `work_queue`（该表无外键） | 可复用登记发送意图；`work_queue` 是通用持久队列，不是内部运行，建一条队列不算造假 |
+
+**结论**：走「增量迁移 + 显式关联表」，不新增外键、不改既有列。
+新增迁移只放跟踪项/来源身份/目标关联/草稿四类表，内部引用列全部可空；
+制品与证据复用 005 的三张表；发送意图复用 002 的 `outbox_deliveries`。
+旧运行可追溯性不受影响：既有表和查询一行未改，回归靠现有 1280+ 用例兜住。
+
+### 步骤
+
+1. ~~盘点（只读）~~：见上（2.1）。
+2. 路径冻结：6 个端点进路由表 + 重生成 `verification/openapi.json`（2.2）。
 3. 读路径：跟踪项与覆盖结论（可查询、不写入）。
-4. 写路径：导入、关联、补证入现有 Company 单写事务。
-5. 草稿与发送：保存 → 重审 → 发送 → 对账。
+4. 写路径：导入、关联、补证入现有 Company 单写事务；落点为新增表，不复用 `acceptances`。
+5. 草稿与发送：保存 → 重审 → 发送（复用 `outbox_deliveries`）→ 对账。
 
 每步独立可回滚；第 2 步之后路径不能再改，实现顺序可以改。
 

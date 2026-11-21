@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use bod_app::host_api::{ErrorResponse, HandshakeResponse, HealthResponse, ShutdownResponse};
-use bod_app::host_handshake::{contract_routes, openapi_document};
+use bod_app::host_handshake::{contract_routes, documented_routes, openapi_document};
 use bod_app::http_router::Auth;
 
 fn document() -> Value {
@@ -101,7 +101,7 @@ fn paths_and_methods_match_the_route_table() {
         }
     }
 
-    let mut in_table: Vec<(String, String)> = contract_routes()
+    let mut in_table: Vec<(String, String)> = documented_routes()
         .iter()
         .map(|route| {
             (
@@ -120,7 +120,7 @@ fn paths_and_methods_match_the_route_table() {
 #[test]
 fn rejection_codes_come_from_the_route_itself() {
     let doc = document();
-    for route in contract_routes() {
+    for route in documented_routes() {
         let code = match route.auth {
             Auth::Public => continue,
             Auth::Bearer(code) | Auth::InHandler(code) => code,
@@ -136,7 +136,7 @@ fn rejection_codes_come_from_the_route_itself() {
 #[test]
 fn every_operation_documents_the_dispatch_404() {
     let doc = document();
-    for route in contract_routes() {
+    for route in documented_routes() {
         let operation = &doc["paths"][route.pattern][route.method.as_str().to_ascii_lowercase()];
         assert_eq!(
             operation["responses"]["404"]["content"]["application/json"]["example"]["error"],
@@ -167,12 +167,100 @@ fn security_scheme_follows_the_auth_kind() {
     }
 }
 
+/// 产品接口与控制面按前缀分表并存，且两张表之间没有重复路由。
+///
+/// 分发层按 `delivery_api::PREFIX` 选表。前缀与路由表一旦不一致，请求会被交给
+/// 错误的表：要么 404，要么用错鉴权级别——所以这条断言查的是机制，不是排版。
+#[test]
+fn surfaces_are_split_by_prefix_without_overlap() {
+    use bod_app::delivery_api::{PREFIX, routes as product_routes};
+
+    assert!(!product_routes().is_empty(), "产品接口路由表不应为空");
+    for route in product_routes() {
+        assert!(
+            route.pattern.starts_with(PREFIX),
+            "{} 不在 {PREFIX} 下，分发层不会把它交给产品接口表",
+            route.pattern
+        );
+    }
+    for route in contract_routes() {
+        assert!(
+            !route.pattern.starts_with(PREFIX),
+            "控制面路由 {} 落在产品接口前缀下，会被错误地交出去",
+            route.pattern
+        );
+    }
+
+    // 两张表拼起来不得出现同一个 (方法, 路径)：否则后写入的会静默覆盖前者。
+    let mut all: Vec<(String, String)> = contract_routes()
+        .iter()
+        .chain(product_routes().iter())
+        .map(|route| {
+            (
+                route.method.as_str().to_ascii_lowercase(),
+                route.pattern.to_string(),
+            )
+        })
+        .collect();
+    let before = all.len();
+    all.sort();
+    all.dedup();
+    assert_eq!(before, all.len(), "两张路由表出现重复的 (方法, 路径)");
+}
+
+/// 文档必须把「路径已冻结」与「已经能用」分开：计划中操作标 `planned` 且给 501，
+/// 已服务操作不得出现 501。这条挡住「把未实现悄悄当已实现」。
+#[test]
+fn planned_operations_are_marked_and_explain_the_501() {
+    use bod_app::http_router::Implementation;
+
+    let doc = document();
+    let mut planned = 0;
+    for route in documented_routes() {
+        let operation = &doc["paths"][route.pattern][route.method.as_str().to_ascii_lowercase()];
+        assert_eq!(
+            operation["x-bod-status"],
+            route.contract.status.as_str(),
+            "{} 的 x-bod-status 与路由表不符",
+            route.pattern
+        );
+        let has_501 = operation["responses"].get("501").is_some();
+        assert_eq!(
+            has_501,
+            matches!(route.contract.status, Implementation::Planned),
+            "{} 的 501 声明与落地状态不一致",
+            route.pattern
+        );
+        if matches!(route.contract.status, Implementation::Planned) {
+            planned += 1;
+        }
+    }
+    assert_eq!(planned, 6, "§11 的 6 个操作应全部处于 planned");
+}
+
 /// serde 与 schema 的漂移闸门。
 ///
 /// 三件事一起查：序列化出来的键都在 schema 里；schema 必填的键都真的出现；
 /// 类型一致。手写 schema 时失效的正是这三条。
+///
+/// 字段指向子类型时 schema 里是 `$ref`（不是缺 `type`），所以先按客户端的方式解析。
+fn resolve<'a>(schema: &'a Value, doc: &'a Value) -> &'a Value {
+    let mut current = schema;
+    for _ in 0..8 {
+        let Some(path) = current.get("$ref").and_then(Value::as_str) else {
+            return current;
+        };
+        let name = path.rsplit('/').next().unwrap_or_default();
+        match doc["components"]["schemas"].get(name) {
+            Some(next) => current = next,
+            None => panic!("$ref 指向不存在的组件 {name}"),
+        }
+    }
+    panic!("$ref 嵌套过深：{schema}");
+}
+
 fn assert_shape_matches(name: &str, sample: &Value, doc: &Value) {
-    let schema = &doc["components"]["schemas"][name];
+    let schema = resolve(&doc["components"]["schemas"][name], doc);
     let properties = schema["properties"]
         .as_object()
         .unwrap_or_else(|| panic!("{name} 应有 properties"));
@@ -185,9 +273,12 @@ fn assert_shape_matches(name: &str, sample: &Value, doc: &Value) {
         .unwrap_or_else(|| panic!("{name} 的样本应是对象"));
 
     for (key, value) in sample {
-        let declared = properties
-            .get(key)
-            .unwrap_or_else(|| panic!("{name} 序列化出未声明的字段 {key}"));
+        let declared = resolve(
+            properties
+                .get(key)
+                .unwrap_or_else(|| panic!("{name} 序列化出未声明的字段 {key}")),
+            doc,
+        );
         let expected = match value {
             Value::Bool(_) => "boolean",
             Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
@@ -267,6 +358,180 @@ fn schemas_match_what_the_types_actually_serialize() {
     assert_shape_matches(
         "ErrorResponse",
         &to_value(&ErrorResponse::with_reason("BOD_STREAM_DENIED", "解释")),
+        &doc,
+    );
+}
+
+/// §11 的请求/响应体也要过同一道漂移闸门。
+///
+/// 这些类型尚无 handler，但 schema 已经冻结——冻结的若是错形状，客户端会按错的
+/// 契约生成代码。所以这里用真实值序列化一遍，再与 schema 比。
+#[test]
+fn product_schemas_match_what_the_types_serialize() {
+    use bod_app::delivery_api::{
+        CoverageVerdictCode, DeliveryImportResponse, DeliveryLinkResponse,
+        DeliveryObservationResponse, DeliveryStatus, DeliveryTrackingView, DraftCitation,
+        DraftResponse, DraftSendResponse, DraftStatus, EvidenceStamp, TargetCoverage, TargetRef,
+    };
+
+    let doc = document();
+    let target = TargetRef {
+        customer_id: "cust-a".to_string(),
+        environment: "prod".to_string(),
+        deployment_unit: None,
+    };
+    let coverage = TargetCoverage {
+        target: target.clone(),
+        verdict: CoverageVerdictCode::PendingVerification,
+        reason: Some("缺部署观察".to_string()),
+        evidence_revision: None,
+        observed_at: None,
+    };
+
+    assert_shape_matches(
+        "DeliveryImportResponse",
+        &to_value(&DeliveryImportResponse {
+            tracking_id: "trk-1".to_string(),
+            created: true,
+            targets: vec![coverage.clone()],
+            gaps: vec!["no-artifact-mapping".to_string()],
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DeliveryLinkResponse",
+        &to_value(&DeliveryLinkResponse {
+            tracking_id: "trk-1".to_string(),
+            link_id: "lnk-1".to_string(),
+            appended: false,
+            version: 3,
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DeliveryTrackingView",
+        &to_value(&DeliveryTrackingView {
+            tracking_id: "trk-1".to_string(),
+            project_id: "proj-1".to_string(),
+            version: 3,
+            owner: None,
+            targets: vec![coverage.clone()],
+            evidence: vec![EvidenceStamp {
+                revision: "rev-9".to_string(),
+                source: "connector".to_string(),
+                observed_at: "2026-11-21T00:00:00Z".to_string(),
+            }],
+            gaps: Vec::new(),
+            allowed_actions: vec!["link-source".to_string(), "draft".to_string()],
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DeliveryObservationResponse",
+        &to_value(&DeliveryObservationResponse {
+            observation_id: "obs-1".to_string(),
+            applied: true,
+            affected_targets: vec![coverage.clone()],
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DraftResponse",
+        &to_value(&DraftResponse {
+            draft_id: "draft-1".to_string(),
+            revision: 2,
+            evidence_revision: "rev-9".to_string(),
+            citations: vec![DraftCitation {
+                evidence_revision: "rev-9".to_string(),
+                reference: "receipt-7".to_string(),
+                observed_at: "2026-11-21T00:00:00Z".to_string(),
+            }],
+            status: DraftStatus::PendingReview,
+            created_at: "2026-11-21T00:01:00Z".to_string(),
+        }),
+        &doc,
+    );
+    // 递交成功只表示意图已登记：送达状态只能是 unknown。
+    assert_shape_matches(
+        "DraftSendResponse",
+        &to_value(&DraftSendResponse {
+            send_intent_id: "send-1".to_string(),
+            registered: true,
+            delivery_status: DeliveryStatus::Unknown,
+        }),
+        &doc,
+    );
+
+    // 请求体没有 `Serialize` 之外的构造需求，用等价字面量比对必填面。
+    assert_shape_matches(
+        "DeliveryImportRequest",
+        &json!({
+            "project_id": "proj-1",
+            "source": {
+                "connection_id": "conn-1",
+                "object_type": "pull_request",
+                "object_id": "4711",
+                "observed_at": "2026-11-21T00:00:00Z"
+            },
+            "targets": [{ "customer_id": "cust-a", "environment": "prod" }],
+            "acceptance": "验收条款 v3",
+            "idempotency_key": "key-1"
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DeliveryLinkRequest",
+        &json!({
+            "source": {
+                "connection_id": "conn-1",
+                "object_type": "pull_request",
+                "object_id": "4711",
+                "observed_at": "2026-11-21T00:00:00Z"
+            },
+            "targets": [{ "customer_id": "cust-a", "environment": "prod" }],
+            "expected_version": 3,
+            "idempotency_key": "key-2"
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DeliveryObservationRequest",
+        &json!({
+            "project_id": "proj-1",
+            "targets": [{ "customer_id": "cust-a", "environment": "prod" }],
+            "source": {
+                "connection_id": "conn-1",
+                "object_type": "build",
+                "object_id": "b-9",
+                "observed_at": "2026-11-21T00:00:00Z"
+            },
+            "source_sequence": 7,
+            "kind": "deployment",
+            "note": "部署到 prod",
+            "idempotency_key": "key-3"
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DraftCreateRequest",
+        &json!({
+            "target": { "customer_id": "cust-a", "environment": "prod" },
+            "purpose": "fixed-notice",
+            "evidence_revision": "rev-9",
+            "references": ["receipt-7"],
+            "gaps": [],
+            "text": ""
+        }),
+        &doc,
+    );
+    assert_shape_matches(
+        "DraftSendRequest",
+        &json!({
+            "text_revision": 2,
+            "evidence_revision": "rev-9",
+            "target_channel": "chan-1",
+            "idempotency_key": "key-4"
+        }),
         &doc,
     );
 }

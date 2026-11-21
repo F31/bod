@@ -258,6 +258,8 @@ pub struct Route<S> {
 pub struct Contract {
     /// 一句话说清这个端点做什么（`summary`）；更长的边界说明写 `Route::note`。
     pub summary: &'static str,
+    /// 契约是否已经有实现。**必填**：没有默认值，漏写编译不过。
+    pub status: Implementation,
     pub request: Option<ContractBody>,
     /// 查询参数无法从路径模式推出（handler 自己读），必须显式声明。
     pub query: &'static [QueryParam],
@@ -309,6 +311,28 @@ pub struct QueryParam {
     pub name: &'static str,
     pub description: &'static str,
     pub required: bool,
+}
+
+/// 契约的落地状态。
+///
+/// 存在的理由只有一个：**把「路径已冻结」与「已经能用」分开说**。
+/// §11 的路径要在实现之前定稿，如果文档不区分这两件事，客户端会把 501 当成
+/// 业务失败，运维会把「已冻结」当成「已上线」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Implementation {
+    /// 有真实 handler，文档里的响应码就是它的行为。
+    Served,
+    /// 只有契约：handler 按契约返回 501，不写入任何东西。
+    Planned,
+}
+
+impl Implementation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Served => "served",
+            Self::Planned => "planned",
+        }
+    }
 }
 
 /// 匹配结果。`MethodMismatch` 对外仍是 404（与既有行为一致），
@@ -538,6 +562,7 @@ mod tests {
             auth,
             note,
             contract: Contract {
+                status: crate::http_router::Implementation::Served,
                 summary: "测试路由",
                 request: None,
                 query: &[],
@@ -812,6 +837,7 @@ mod tests {
             auth: Auth::Bearer("BOD_TEST_DENIED"),
             note: "测试用",
             contract: Contract {
+                status: crate::http_router::Implementation::Served,
                 summary: "测试用",
                 request: None,
                 query: &[],

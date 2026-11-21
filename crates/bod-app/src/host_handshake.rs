@@ -311,7 +311,16 @@ impl HostServer {
         }
 
         // CR-003：匹配与鉴权交给 http_router，本函数只剩读请求与写响应。
-        match crate::http_router::dispatch(ROUTES, self, &self.session_key, request) {
+        //
+        // 两张路由表按前缀分流，而不是「先查控制面再查产品接口」：后者要把
+        // `Request` 克隆一份才能重试，且会让「哪些路径归产品接口」变成隐式结果。
+        // 前缀与路由表的一致性由 `openapi_contract` 的测试守着。
+        let routes = if path.starts_with(crate::delivery_api::PREFIX) {
+            crate::delivery_api::routes()
+        } else {
+            ROUTES
+        };
+        match crate::http_router::dispatch(routes, self, &self.session_key, request) {
             Outcome::Reply(Reply::Json { status, value }) => {
                 log_request(
                     &correlation_id,
@@ -478,6 +487,7 @@ static ROUTES: &[Route<HostServer>] = &[
         auth: Auth::Public,
         note: "存活探测只回协议名、实例 ID 与 pid，不含令牌与业务事实",
         contract: Contract {
+            status: crate::http_router::Implementation::Served,
             summary: "存活探测",
             request: None,
             query: &[],
@@ -498,6 +508,7 @@ static ROUTES: &[Route<HostServer>] = &[
         auth: Auth::InHandler("BOD_STREAM_DENIED"),
         note: "令牌在 Authorization 头；额外拒绝查询串令牌与非法游标，需按原因分别说明",
         contract: Contract {
+            status: crate::http_router::Implementation::Served,
             summary: "订阅事件流（SSE）",
             request: None,
             query: &[
@@ -536,6 +547,7 @@ static ROUTES: &[Route<HostServer>] = &[
         auth: Auth::InHandler("BOD_HANDSHAKE_DENIED"),
         note: "客户端此刻还没有会话密钥，令牌在请求体 handshake_token 字段",
         contract: Contract {
+            status: crate::http_router::Implementation::Served,
             summary: "用一次性握手令牌换取会话密钥",
             request: Some(ContractBody::json(
                 "HandshakeRequest",
@@ -559,6 +571,7 @@ static ROUTES: &[Route<HostServer>] = &[
         auth: Auth::Bearer("BOD_SHUTDOWN_DENIED"),
         note: "只认 Authorization: Bearer 会话密钥，分发前统一校验",
         contract: Contract {
+            status: crate::http_router::Implementation::Served,
             summary: "授权停止宿主",
             request: None,
             query: &[],
@@ -575,7 +588,7 @@ static ROUTES: &[Route<HostServer>] = &[
     },
 ];
 
-/// 路由表的只读视图，给契约测试用。
+/// 路由表的只读视图，给契约测试用（**只含控制面**）。
 ///
 /// 不暴露可变入口：路由表是 `static`，`&'static []` 本身不可变，
 /// 这个函数只是把「有哪些路由」变成可断言的公开事实。
@@ -583,18 +596,30 @@ pub fn contract_routes() -> &'static [Route<HostServer>] {
     ROUTES
 }
 
+/// 生成文档时用到的**全部**路由：控制面 + 产品接口（§11 冻结的 6 个操作）。
+///
+/// 与 `contract_routes()` 分开，是因为两者的使用场景不同：
+/// 结构性断言要覆盖整份文档，而「控制面只有这 4 条」这类断言要看单张表。
+pub fn documented_routes() -> Vec<&'static Route<HostServer>> {
+    ROUTES
+        .iter()
+        .chain(crate::delivery_api::routes().iter())
+        .collect()
+}
+
 /// 生成控制面 OpenAPI 3.1 文档。
 ///
 /// 返回 `Err` 表示路由表自身不自洽（重复路由、悬空组件、手写 401），
 /// 属于编程错误——契约测试会先在 CI 里失败，不会等到客户端拿到坏文档。
 pub fn openapi_document() -> Result<serde_json::Value, String> {
-    crate::openapi::document(
-        ROUTES,
+    crate::openapi::document_many(
+        ROUTES.iter().chain(crate::delivery_api::routes().iter()),
         crate::openapi::Info {
-            title: "bod 控制面",
+            title: "bod 控制面与产品接口",
             version: PROTOCOL,
-            description: "本机控制面：只监听回环，校验 Host/Origin，不发 CORS。\
-                          文档由 ROUTES 与 DTO 生成，不手写。",
+            description: "本机控制面（/_bod/*）与产品接口（/api/v1/*）的同一份契约。\
+                          文档由路由表与 DTO 生成，不手写。\
+                          `x-bod-status=planned` 表示路径已冻结、实现未落地，请求会得到 501。",
         },
     )
 }
@@ -851,6 +876,7 @@ fn respond(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), HostEr
         409 => "Conflict",
         422 => "Unprocessable Entity",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         _ => "Error",
     };
     let response = format!(
@@ -1126,6 +1152,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status, 401);
+        request_shutdown(&address, &attached.session_key, Duration::from_secs(2)).unwrap();
+    }
+
+    /// §11 冻结的路径必须真的可路由：先过会话关，再如实回 501。
+    ///
+    /// 这条测的是**分发**，不是契约：如果前缀分流写错，请求会落到控制面表上，
+    /// 结果是 404——客户端会把「契约冻结了」理解成「路径拼错了」。
+    #[test]
+    fn frozen_product_paths_are_routed_and_answer_501() {
+        let (_path, address, attached) = start_host("product-stub");
+        let body = r#"{"project_id":"p1"}"#;
+
+        let (denied, _) = post_json(
+            &address,
+            "/api/v1/delivery-tracking/imports",
+            body,
+            None,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(denied, 401, "没有会话密钥时必须拒绝，而不是泄露 501");
+
+        let (status, response) = post_json(
+            &address,
+            "/api/v1/delivery-tracking/imports",
+            body,
+            Some(&attached.session_key),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(status, 501, "{response}");
+        assert!(
+            response.contains("BOD_NOT_IMPLEMENTED"),
+            "计划中操作必须明确说自己未实现：{response}"
+        );
+
+        // 静态段优先于参数段：`imports` 不能被 `/delivery-tracking/{id}` 吃掉。
+        // 用 GET 验证方法不符（GET 只在 {id} 上注册），对外仍答 404。
+        let (wrong_method, _) = roundtrip(
+            &address,
+            Duration::from_secs(2),
+            &format!(
+                "GET /api/v1/delivery-tracking/imports HTTP/1.1\r\nHost: {address}\r\n\
+                 Authorization: Bearer {}\r\nConnection: close\r\n\r\n",
+                attached.session_key
+            ),
+        )
+        .unwrap();
+        assert_eq!(wrong_method, 404);
+
         request_shutdown(&address, &attached.session_key, Duration::from_secs(2)).unwrap();
     }
 

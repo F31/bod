@@ -95,6 +95,30 @@ OAS 外层结构（paths/operations/security/responses），那部分语义少�
 各有单测覆盖，其中「手写 401 必须被拒绝」与「同名组件内容不同必须报错」是反向用例——
 它们证明检查会失败，而不是只会通过。
 
+## 补充：冻结 §11 时的三个实测发现（P8 2.2，2026-11-21）
+
+冻结 6 个产品接口时，生成链暴露了三个在原 4 个端点下不会出现的问题。三条都改了机制，
+不是改文档绕过去：
+
+1. **嵌套类型走 `$defs`，不在原地展开**。`schemars` 对 `TargetRef` 这类被引用的类型输出
+   `{"$ref":"#/$defs/TargetRef"}`，定义放在根上的 `$defs`——那不是合法的 OAS 引用位置，
+   文档会出现「`$ref` 指向不存在的组件」。现在 `register_body` 把 `$defs` 提升成
+   `components.schemas` 并改写引用前缀（`lift_defs`），子类型因此只出现一次。
+   反向用例：`nested_types_are_lifted_out_of_defs` 与 `plain_schemas_pass_through_unchanged`。
+2. **带注释的枚举变体会变成 `oneOf` + `const`**。客户端生成器会得到 union 而不是 enum。
+   处理方式是把变体说明上移到类型注释（`CoverageVerdictCode` / `ObservationKind`），
+   schema 保持朴素字符串枚举。**撤销条件 2 因此仍不成立**——契约里没有出现
+   `oneOf`/`anyOf`/`discriminator`。
+3. **一份文档、两张路由表**：`document_many` 接收多个路由表并合并成一份契约。
+   控制面（`/_bod/*`，本机会话密钥）与产品接口（`/api/v1/*`，§34.12 主体判定）
+   的鉴权语义不同，混进一张表会让文档把两者写成同一种。分发由
+   `host_handshake::handle` 按 `delivery_api::PREFIX` 分流；测试断言
+   「前缀下的路由都在产品表、控制面一条都不在前缀下、两表无重复 (方法,路径)」。
+
+同一轮还加了 `Contract.status`（`served` / `planned`，无默认值）与文档里的
+`x-bod-status`：§11 的 6 个操作当前是 `planned` + 501，实现落地必须改成 `served`
+并删掉 501，测试双向断言。这是「路径已冻结」与「已经能用」分开说的机械保障。
+
 ## 撤销条件（可机械判断，任一满足即重评）
 
 1. **需要交互式 API 文档或客户端代码生成流水线**（要 Swagger UI、要 `openapi-typescript`
@@ -110,8 +134,10 @@ OAS 外层结构（paths/operations/security/responses），那部分语义少�
 
 - `crates/bod-app/src/openapi.rs`：`schema_of` / `document` / `operation_id` / `parameters_of`。
 - `crates/bod-app/src/http_router.rs`：`Contract`、`ContractBody`、`ContractResponse`、
-  `QueryParam`、`pattern_parameters`。
-- `crates/bod-app/src/host_handshake.rs`：`ROUTES` 每条带 `contract`；`openapi_document()`。
+  `QueryParam`、`Implementation`、`pattern_parameters`。
+- `crates/bod-app/src/host_handshake.rs`：`ROUTES` 每条带 `contract`；`openapi_document()`
+  合并控制面与产品接口两张表；`handle` 按前缀分流。
+- `crates/bod-app/src/delivery_api.rs`：§11 的 6 个操作（`planned`）+ 请求/响应 DTO。
 - `crates/bod-app/src/host_api.rs`：4 个响应体 + `HandshakeRequest`，均 `JsonSchema`。
-- `verification/openapi.json`：入库的生成物（344 行，4 个操作，5 个组件）。
+- `verification/openapi.json`：入库的生成物（1,459 行，10 个操作，26 个组件）。
 - 重生成：`BOD_BLESS_OPENAPI=1 cargo test -p bod-app --test openapi_contract`

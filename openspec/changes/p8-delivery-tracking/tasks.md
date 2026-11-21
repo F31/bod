@@ -16,10 +16,16 @@
 
 ## 2. 盘点与冻结
 
-- [ ] 2.1 只读盘点：现有表/DAO/查询/UI 对内部 Attempt 外键与「内部创建来源」的依赖点，产出清单。
+- [x] 2.1 只读盘点：现有表/DAO/查询/UI 对内部 Attempt 外键与「内部创建来源」的依赖点，产出清单。
       结论写进 `design.md` 的 Migration Plan，不改代码。
-- [ ] 2.2 冻结 §11 的 6 个操作进 `ROUTES`（带 `contract`）并重生成 `verification/openapi.json`，
+      **结果**：50 张表、全库仅 1 条外键（`wake_receipts` → `work_queue`），无一条指向
+      `attempts`/`runs`；唯一阻断点是 `acceptances` 的三个 `NOT NULL` 内部修订列——
+      因此外部回执不复用该表，也不为它编造工作包修订（D3 的禁止路径）。
+- [x] 2.2 冻结 §11 的 6 个操作进路由表（带 `contract`）并重生成 `verification/openapi.json`，
       验证 `openapi_contract` 全绿；此后路径不再改动。
+      **结果**：新增 `delivery_api`（独立 `/api/v1` 表，与控制面 `/_bod/*` 分流），
+      6 条路由全部 `x-bod-status=planned` 且声明 501；`openapi_contract` 11 例、
+      `delivery_api` 4 例、宿主分发用例 1 例。**实现仍未落地**（3.x 起才写 handler）。
 
 ## 3. 跟踪项与来源身份（`delivery-tracking`）
 
