@@ -360,8 +360,11 @@
   验收需要真实多主体（成员 + Agent + 客户 + 连接器）与真实网关，机器不能生成；
   P5 的 I/G 绑定（G-13/G-21/G-22/G-25、I-14/I-19/I-23/I-44）全部保持 planned。
   P4 的 I/G 绑定**全部保持 planned**。
-- **P6 进行中（2026-11-21）**：`openspec/changes/p6-open-extension` 任务 1.1—1.6、2.1—2.7、3.1—3.5、
-  4.1—4.5 已勾选；2.8 与 4.6 未勾选（需双机与真实 iOS/Android 设备），5.x 未开始。
+- **P6 进行中（2026-11-21）**：`openspec/changes/p6-open-extension` 24 项任务中 22 项已勾选；
+  **2.8 与 4.6 未勾选**（需真实双机与真实 iOS/Android 设备）。出口结论 `blocked`，
+  证据见 `docs/reports/p6-exit-evidence.md`，支持矩阵 §12 为 0 Supported / 3 Unverified /
+  5 Planned / 2 Experimental；G-19/G-23/G-34/G-46/G-47 不得写入 `gates.yaml`，
+  由 `tests/p6_gates.rs` 与 `tests/p6_exit.rs` 守。
   `bod-app::extension_sdk` 承接第三方适配的接入边界：描述符带版本/平台/schema 版本/能力分项与
   限制，握手先判协议版本再逐项判必需能力与证据门槛，**拒绝只作用于新扩展任务**（缺 `Delegation`
   的旧适配器仍走原本地路径）；安装按「版本 → digest → 来源 → 许可证 → 协议 → schema → fixture →

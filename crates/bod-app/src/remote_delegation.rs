@@ -238,6 +238,14 @@ impl ApplyOutcome {
     }
 }
 
+/// 历史记录的签名标注。远程关闭前的本地执行没有节点签名，如实标注而不是补造。
+pub fn signature_label(batch: Option<&EventBatch>) -> &'static str {
+    match batch {
+        Some(batch) if !batch.signature.trim().is_empty() => "node_signed",
+        _ => "无节点签名",
+    }
+}
+
 /// 批次台账：只记游标与已入账批次摘要，不保存事件正文。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BatchLedger {
@@ -944,6 +952,25 @@ mod tests {
             ledger.apply(&batch(4, 4, "sha256:events-b"), &[], "sha256:events-b"),
             ApplyOutcome::Rejected(BatchReject::UnknownKey { .. })
         ));
+    }
+
+    /// 5.2：远程关闭前的历史执行没有节点签名，如实标注而不补造。
+    #[test]
+    fn task_5_2_history_without_node_signature_is_labelled() {
+        assert_eq!(signature_label(None), "无节点签名");
+        let unsigned = EventBatch {
+            signature: String::new(),
+            ..batch(1, 1, "sha256:events-h")
+        };
+        assert_eq!(
+            signature_label(Some(&unsigned)),
+            "无节点签名",
+            "空签名不得被当作已签名"
+        );
+        assert_eq!(
+            signature_label(Some(&batch(1, 1, "sha256:events-i"))),
+            "node_signed"
+        );
     }
 
     /// 2.2：缺口不跳序，游标只在连续处推进；签名通过不等于验收通过。

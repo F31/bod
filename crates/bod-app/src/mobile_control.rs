@@ -222,6 +222,58 @@ pub struct SignedReceipt {
     pub artifact_digest: String,
 }
 
+/// 设备侧接受的结果（RM04）：撤权、验签失败都不改变目标状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceAcceptance {
+    Accepted {
+        receipt: SignedReceipt,
+    },
+    /// 设备已撤权或通道已关闭：拒绝旧决定并给原因。
+    RejectedDeviceRevoked {
+        reason: &'static str,
+    },
+    /// 签名本身不成立（撤销/取消/成果或修订变化）。
+    RejectedSignature(SignatureVerdict),
+}
+
+impl DeviceAcceptance {
+    /// 目标状态是否被改变：只有真正接受时才为真。
+    pub const fn target_state_changed(&self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+}
+
+/// 从设备侧接受一项成果。顺序：设备授权 → 验签，两步都过才生成回执。
+pub fn accept_from_device(
+    device: &DeviceGrant,
+    signature: &DeviceSignature,
+    target: &AcceptanceTarget,
+    receipt_id: &str,
+) -> DeviceAcceptance {
+    if !device.paired {
+        return DeviceAcceptance::RejectedDeviceRevoked {
+            reason: "设备已解除配对",
+        };
+    }
+    if !device.enabled_channels.contains(&Channel::Mobile) {
+        return DeviceAcceptance::RejectedDeviceRevoked {
+            reason: "移动通道已关闭",
+        };
+    }
+    if !device
+        .effective_actions(Channel::Mobile)
+        .contains(&DeviceAction::Dispatch)
+    {
+        return DeviceAcceptance::RejectedDeviceRevoked {
+            reason: "当前授权不含交办权",
+        };
+    }
+    match issue_receipt(signature, target, receipt_id) {
+        Ok(receipt) => DeviceAcceptance::Accepted { receipt },
+        Err(verdict) => DeviceAcceptance::RejectedSignature(verdict),
+    }
+}
+
 /// 只有验签通过且重新签署当前修订，才生成有效回执。
 pub fn issue_receipt(
     signature: &DeviceSignature,
@@ -802,6 +854,67 @@ mod tests {
             verify_signature(&revoked_and_stale, &target()),
             SignatureVerdict::RejectedKeyRevoked
         );
+    }
+
+    /// 4.2 / RM04：已签审批入箱后撤销设备，或审批对象更新 → 拒绝旧决定。
+    #[test]
+    fn rm04_revoked_device_cannot_accept_signed_decision() {
+        assert_eq!(
+            accept_from_device(&device(), &signature(), &target(), "receipt-1"),
+            DeviceAcceptance::Accepted {
+                receipt: SignedReceipt {
+                    receipt_id: "receipt-1".to_string(),
+                    device_id: "device-a".to_string(),
+                    revision: 1,
+                    artifact_digest: "sha256:r1".to_string(),
+                }
+            },
+            "授权与签名都成立时应接受"
+        );
+
+        // 撤权：设备还在配对，但当前授权不含交办权。
+        let revoked = DeviceGrant::new("device-a", "user-1", "project-1")
+            .with_device(&[DeviceAction::View, DeviceAction::Dispatch])
+            .with_user(&[DeviceAction::View])
+            .with_channels(&[Channel::Mobile]);
+        let revoked_outcome = accept_from_device(&revoked, &signature(), &target(), "receipt-2");
+        assert_eq!(
+            revoked_outcome,
+            DeviceAcceptance::RejectedDeviceRevoked {
+                reason: "当前授权不含交办权"
+            }
+        );
+        assert!(
+            !revoked_outcome.target_state_changed(),
+            "撤权后目标状态不得改变"
+        );
+
+        // 审批对象更新：签名仍指向 r1。
+        let new_target = AcceptanceTarget {
+            artifact_digest: "sha256:r2".to_string(),
+            revision: 2,
+        };
+        let stale = accept_from_device(&device(), &signature(), &new_target, "receipt-3");
+        assert!(matches!(stale, DeviceAcceptance::RejectedSignature(_)));
+        assert!(!stale.target_state_changed(), "旧签名不得推进目标状态");
+
+        // 通道关闭与解除配对同样拒绝。
+        let closed = DeviceGrant {
+            enabled_channels: Default::default(),
+            ..device()
+        };
+        assert!(matches!(
+            accept_from_device(&closed, &signature(), &target(), "receipt-4"),
+            DeviceAcceptance::RejectedDeviceRevoked { .. }
+        ));
+        let unpaired = DeviceGrant {
+            paired: false,
+            ..device()
+        };
+        assert!(matches!(
+            accept_from_device(&unpaired, &signature(), &target(), "receipt-5"),
+            DeviceAcceptance::RejectedDeviceRevoked { .. }
+        ));
     }
 
     /// 4.3 / RM05、MD03：宿主休眠超窗口后恢复，到期命令返回待投递而非生效。
