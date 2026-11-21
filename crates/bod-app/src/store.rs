@@ -4,6 +4,8 @@
 //! 把命令送进单一写线程（§37.5），此处先建立事务与条件更新的正确语义。
 //! 不在事务内执行网络、Agent 或人工等待。
 
+use crate::audit_log::{AuditDecision, AuditEvent, AuditRecord};
+use crate::authorization::StageAction;
 use crate::config::BodConfig;
 use crate::domain::artifact::{
     AcceptanceBinding, AcceptanceDecision, AcceptanceRecord, Artifact, ArtifactKind,
@@ -44,7 +46,7 @@ use std::path::Path;
 /// 007 为 P2 交接快照，008 为 P2 交接事件与接受，009 为 P2 接管意图，
 /// 010 为 P2 管理委任/作用域头/命令审计，011 为 P2 检查点与接管确认，
 /// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据，
-/// 014 为 decisions 不可变 trigger（P2 3.4 加固）；
+/// 014 为 decisions 不可变 trigger（P2 3.4 加固），015 为业务审计事件（CR-002）；
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 /// P7 基准统一页缓存：负数按 KiB 解释，64 MiB；避免依赖 SQLite 默认 2 MiB。
 const BENCH_CACHE_SIZE_KIB: i64 = 65_536;
@@ -64,6 +66,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/012_history_disputes.sql"),
     include_str!("../migrations/013_scope_org.sql"),
     include_str!("../migrations/014_history_triggers.sql"),
+    include_str!("../migrations/015_audit.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -82,6 +85,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "012_history_disputes.sql",
     "013_scope_org.sql",
     "014_history_triggers.sql",
+    "015_audit.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -90,6 +94,58 @@ pub fn migration_sources() -> impl Iterator<Item = (&'static str, &'static str)>
         .iter()
         .copied()
         .zip(MIGRATIONS.iter().copied())
+}
+
+/// 审计表的读取列顺序。集中一处，避免三处查询各写一份列清单后互相错位。
+const AUDIT_SELECT: &str = "SELECT sequence, company_id, correlation_id, actor_id, action,
+            scope_company, scope_project, scope_issue, basis, decision, reason,
+            decided_at, recorded_at_ms
+     FROM audit_events";
+
+/// 审计行映射。表外动作或表外决策一律报错，不静默回退：
+/// 库里出现应用不认识的取值，说明有人绕过应用写库，读侧必须炸出来。
+fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
+    let action_text: String = row.get(4)?;
+    let action = StageAction::parse(&action_text).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("audit_events.action 出现表外值：{action_text}"),
+            )),
+        )
+    })?;
+    let decision_text: String = row.get(9)?;
+    let decision = AuditDecision::parse(&decision_text).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            9,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("audit_events.decision 出现表外值：{decision_text}"),
+            )),
+        )
+    })?;
+    Ok(AuditRecord {
+        sequence: row.get(0)?,
+        event: AuditEvent {
+            company_id: row.get(1)?,
+            correlation_id: row.get(2)?,
+            actor: DomainId::new(row.get::<_, String>(3)?),
+            action,
+            scope: Scope {
+                company_id: DomainId::new(row.get::<_, String>(5)?),
+                project_id: row.get::<_, Option<String>>(6)?.map(DomainId::new),
+                issue_id: row.get::<_, Option<String>>(7)?.map(DomainId::new),
+            },
+            basis: row.get(8)?,
+            decision,
+            reason: row.get(10)?,
+            decided_at: row.get(11)?,
+        },
+        recorded_at_ms: row.get(12)?,
+    })
 }
 
 /// 修订正文事实（P2 3.4）：历史连续比对要覆盖摘要与大小，不能只看产出者。
@@ -196,6 +252,9 @@ pub enum StoreError {
     DuplicateUsageKey {
         usage_key: String,
     },
+    /// 审计事件未通过落库前校验（字段为空、决策与原因不一致、含凭据形态）。
+    /// 单独一档而不是塞进 `Sql`：这是调用方的编程或安全问题，不是数据库故障。
+    Audit(crate::audit_log::AuditRejection),
 }
 
 impl fmt::Display for StoreError {
@@ -210,6 +269,7 @@ impl fmt::Display for StoreError {
             Self::DuplicateUsageKey { usage_key } => {
                 write!(f, "usage_key 已入账，重复上报被去重: {usage_key}")
             }
+            Self::Audit(rejection) => write!(f, "审计事件被拒绝: {}", rejection.explain()),
         }
     }
 }
@@ -282,6 +342,14 @@ impl SqliteStore {
         UnitOfWork::begin(&mut self.conn)
     }
 
+    /// 只读连接视图：仅供本 crate 的观测读模型（`observability`）使用。
+    ///
+    /// 写路径仍必须走 `UnitOfWork`——绕开事务的写入无法参与回滚与条件更新，
+    /// 那正是 §5 要求的边界。这里开放的是 `&Connection`（不可变），写不进去。
+    pub(crate) fn read_connection(&self) -> &Connection {
+        &self.conn
+    }
+
     /// 仅测试用：直接执行 SQL，用于证明账本 trigger 真的阻断改写/删除。
     #[cfg(test)]
     pub(crate) fn execute_batch_for_test(&self, sql: &str) -> Result<(), StoreError> {
@@ -327,6 +395,49 @@ impl SqliteStore {
                 |row| row.get(0),
             )
             .map_err(StoreError::Sql)
+    }
+
+    /// 按关联 ID 读一条审计链（CR-002）。顺序由自增序号决定：
+    /// 同一毫秒内可能写入多条，按时间戳排会得到不稳定顺序。
+    pub fn list_audit_events(
+        &self,
+        company_id: &str,
+        correlation_id: &str,
+    ) -> Result<Vec<AuditRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{AUDIT_SELECT} WHERE company_id = ?1 AND correlation_id = ?2 ORDER BY sequence ASC"
+        ))?;
+        let rows = stmt.query_map(params![company_id, correlation_id], map_audit_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
+    /// 按决策计数：§9 的拒绝率与审计分布都从这里出。
+    pub fn count_audit_events(
+        &self,
+        company_id: &str,
+        decision: AuditDecision,
+    ) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE company_id = ?1 AND decision = ?2",
+                params![company_id, decision.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)
+    }
+
+    /// 最近的审计行（序号降序）。`limit` 由调用方给，不设默认值——
+    /// 一个「顺手全表读」的默认值会在审计表变大后变成事故。
+    pub fn latest_audit_events(
+        &self,
+        company_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AuditRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{AUDIT_SELECT} WHERE company_id = ?1 ORDER BY sequence DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![company_id, limit as i64], map_audit_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
     /// 只读列出 (Issue uid, 工作包修订) 关联，供工作台把首次使用的交付证据归属到任务页。
@@ -2639,6 +2750,43 @@ impl<'a> UnitOfWork<'a> {
             .map_err(StoreError::Sql)
     }
 
+    /// 追加一条审计事件（CR-002）。
+    ///
+    /// 只有 INSERT：审计不可改写，所以没有 upsert。重复写同一条事件不是幂等问题，
+    /// 而是调用方逻辑问题——去重会把「同一动作被执行了两次」这件事抹掉。
+    ///
+    /// 必须先过 `AuditEvent::validate()`。库层的 CHECK 只兜「决策与原因不一致」，
+    /// 拦不住「理由文本里带令牌」——两道闸门分工不同，别以为有库约束就够了。
+    pub fn append_audit_event(
+        &self,
+        event: &crate::audit_log::AuditEvent,
+        recorded_at_ms: i64,
+    ) -> Result<i64, StoreError> {
+        event.validate().map_err(StoreError::Audit)?;
+        self.conn.execute(
+            "INSERT INTO audit_events (
+                company_id, correlation_id, actor_id, action,
+                scope_company, scope_project, scope_issue,
+                basis, decision, reason, decided_at, recorded_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                event.company_id,
+                event.correlation_id,
+                event.actor.as_str(),
+                event.action.as_str(),
+                event.scope.company_id.as_str(),
+                event.scope.project_id.as_ref().map(DomainId::as_str),
+                event.scope.issue_id.as_ref().map(DomainId::as_str),
+                event.basis,
+                event.decision.as_str(),
+                event.reason,
+                event.decided_at,
+                recorded_at_ms,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     pub fn get_appointment(
         &self,
         company_id: &str,
@@ -4765,6 +4913,192 @@ mod tests {
     }
 
     #[test]
+    fn audit_event_round_trips_and_keeps_write_order() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let allowed = audit_event(AuditDecision::Allowed, None);
+        let denied = audit_event(AuditDecision::Denied, Some("不是该项目成员"));
+        // 两条用同一个业务时刻：读回顺序只能靠自增序号，不能靠时间戳。
+        let (first, second) = with_uow(&mut store, |uow| {
+            let first = uow
+                .append_audit_event(&allowed, 1_763_500_000_000)
+                .expect("放行事件应可写入");
+            let second = uow
+                .append_audit_event(&denied, 1_763_500_000_001)
+                .expect("拒绝事件应可写入");
+            (first, second)
+        });
+        assert!(second > first, "序号必须单调递增");
+
+        let rows = store
+            .list_audit_events("company-default", "req-1")
+            .expect("应可读回");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].event.decision, AuditDecision::Allowed);
+        assert_eq!(rows[1].event.decision, AuditDecision::Denied);
+        assert_eq!(rows[1].event.action, StageAction::Submit);
+        assert_eq!(rows[1].event.basis, "submit:not_a_member");
+        assert_eq!(rows[1].event.reason.as_deref(), Some("不是该项目成员"));
+        assert_eq!(
+            rows[0]
+                .event
+                .scope
+                .project_id
+                .as_ref()
+                .map(DomainId::as_str),
+            Some("project-1")
+        );
+        assert_eq!(rows[0].recorded_at_ms, 1_763_500_000_000);
+    }
+
+    #[test]
+    fn audit_rejects_invalid_event_before_touching_sql() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let invalid = audit_event(AuditDecision::Denied, None);
+        let err = with_uow(&mut store, |uow| {
+            uow.append_audit_event(&invalid, 1_763_500_000_000)
+                .expect_err("拒绝不带原因应被拦下")
+        });
+        assert!(
+            matches!(err, StoreError::Audit(_)),
+            "应为审计校验错误而不是 SQL 错误，实际 {err}"
+        );
+        assert_eq!(
+            store
+                .count_audit_events("company-default", AuditDecision::Denied)
+                .expect("计数应可读"),
+            0,
+            "被拒绝的事件不得落库"
+        );
+    }
+
+    #[test]
+    fn audit_rows_are_immutable() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.append_audit_event(&audit_event(AuditDecision::Allowed, None), 1)
+                .expect("写入应成功");
+        });
+        let update = store
+            .conn
+            .execute("UPDATE audit_events SET basis = '改过'", [])
+            .expect_err("审计不得改写");
+        assert!(update.to_string().contains("immutable"), "{update}");
+        let delete = store
+            .conn
+            .execute("DELETE FROM audit_events", [])
+            .expect_err("审计不得删除");
+        assert!(delete.to_string().contains("immutable"), "{delete}");
+        assert_eq!(
+            store
+                .count_audit_events("company-default", AuditDecision::Allowed)
+                .expect("计数应可读"),
+            1,
+            "被 trigger 拒绝后行数不变"
+        );
+    }
+
+    #[test]
+    fn audit_counts_by_decision_and_reads_newest_first() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            for (index, decision) in [
+                AuditDecision::Allowed,
+                AuditDecision::Denied,
+                AuditDecision::Denied,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let reason = (decision == AuditDecision::Denied).then_some("缺 Grant");
+                uow.append_audit_event(&audit_event(decision, reason), index as i64)
+                    .expect("写入应成功");
+            }
+        });
+        assert_eq!(
+            store
+                .count_audit_events("company-default", AuditDecision::Allowed)
+                .expect("计数应可读"),
+            1
+        );
+        assert_eq!(
+            store
+                .count_audit_events("company-default", AuditDecision::Denied)
+                .expect("计数应可读"),
+            2
+        );
+        let latest = store
+            .latest_audit_events("company-default", 2)
+            .expect("应可读回");
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[0].sequence, 3);
+        assert_eq!(latest[1].sequence, 2);
+        assert_eq!(
+            store
+                .count_audit_events("other-company", AuditDecision::Allowed)
+                .expect("计数应可读"),
+            0,
+            "跨公司不得串读"
+        );
+    }
+
+    /// 读侧严格性：`action` 没有库层 CHECK（动作集合会随 §6/§11 扩展，
+    /// 用 CHECK 锁死会让每次加动作都要写迁移），所以靠读侧拒绝。
+    /// 这条测试证明「绕过应用写库」不会静默变成某个已知动作。
+    #[test]
+    fn audit_reader_rejects_unknown_action() {
+        let store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        store
+            .conn
+            .execute(
+                "INSERT INTO audit_events (company_id, correlation_id, actor_id, action,
+                    scope_company, scope_project, scope_issue, basis, decision, reason,
+                    decided_at, recorded_at_ms)
+                 VALUES ('company-default', 'req-1', 'u-1', 'approve',
+                    'company-default', 'project-1', NULL, 'approve:grant', 'allowed', NULL,
+                    '2026-11-21T10:00:00Z', 1)",
+                [],
+            )
+            .expect("库层不拦表外动作，正是读侧要拦的原因");
+        let err = store
+            .list_audit_events("company-default", "req-1")
+            .expect_err("表外动作必须报错而不是回退");
+        assert!(err.to_string().contains("表外值"), "{err}");
+    }
+
+    /// 审计写入走一次真事务：审计必须在与业务事实同一个事务边界里提交，
+    /// 否则会出现「业务回滚了、审计里却记着发生过」。
+    fn with_uow<T>(store: &mut SqliteStore, body: impl FnOnce(&UnitOfWork<'_>) -> T) -> T {
+        let uow = UnitOfWork::begin(&mut store.conn).expect("开启事务");
+        let out = body(&uow);
+        uow.commit().expect("提交事务");
+        out
+    }
+
+    /// 审计事件的最小合法样本：范围取 project 级（issue 可空）。
+    fn audit_event(decision: AuditDecision, reason: Option<&str>) -> AuditEvent {
+        AuditEvent {
+            company_id: "company-default".to_string(),
+            correlation_id: "req-1".to_string(),
+            actor: DomainId::new("user-owner"),
+            action: StageAction::Submit,
+            scope: Scope {
+                company_id: DomainId::new("company-default"),
+                project_id: Some(DomainId::new("project-1")),
+                issue_id: None,
+            },
+            basis: if decision == AuditDecision::Allowed {
+                "submit:project_membership"
+            } else {
+                "submit:not_a_member"
+            }
+            .to_string(),
+            decision,
+            reason: reason.map(str::to_string),
+            decided_at: "2026-11-21T10:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
     fn migration_creates_all_d1_tables() {
         let store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
         let count: i64 = store
@@ -4776,8 +5110,8 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 49,
-            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表"
+            count, 50,
+            "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表 + 1 张审计表"
         );
     }
 

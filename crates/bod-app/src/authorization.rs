@@ -100,6 +100,27 @@ impl StageAction {
             Self::Reopen => "reopen",
         }
     }
+
+    /// 从落库文本反解。审计表存的是 `as_str` 的结果，读回时必须能还原——
+    /// 否则审计只能看不能算（按动作聚合、按动作过滤都做不了）。
+    ///
+    /// 未知文本返回 `None` 而不是默认值：库里出现表外动作，说明有人绕过应用写库，
+    /// 读侧应该炸出来，不该把它当成某个已知动作。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "submit" => Some(Self::Submit),
+            "manage_scope" => Some(Self::ManageScope),
+            "dispatch" => Some(Self::Dispatch),
+            "develop" => Some(Self::Develop),
+            "review" => Some(Self::Review),
+            "accept" => Some(Self::Accept),
+            "release" => Some(Self::Release),
+            "rollback" => Some(Self::Rollback),
+            "prove" => Some(Self::Prove),
+            "reopen" => Some(Self::Reopen),
+            _ => None,
+        }
+    }
 }
 
 /// 一个动作需要什么才能做。**跨段不派生**：`ScopeApproval` 不等于 `Dispatch`，也不等于预算权。
@@ -1088,6 +1109,30 @@ mod stage_permission_tests {
     }
 
     const AT: &str = "2026-11-21T10:00:00Z";
+
+    /// 审计表存的是 `as_str`，读回必须还原；漏一个会导致审计只能看不能算。
+    #[test]
+    fn stage_action_text_round_trips() {
+        for action in [
+            StageAction::Submit,
+            StageAction::ManageScope,
+            StageAction::Dispatch,
+            StageAction::Develop,
+            StageAction::Review,
+            StageAction::Accept,
+            StageAction::Release,
+            StageAction::Rollback,
+            StageAction::Prove,
+            StageAction::Reopen,
+        ] {
+            assert_eq!(StageAction::parse(action.as_str()), Some(action));
+        }
+        assert_eq!(
+            StageAction::parse("approve"),
+            None,
+            "表外动作不得回退成默认值"
+        );
+    }
 
     /// 2.1 / AZ03：只有范围批准权的人分派或追加预算都被拒，且拒绝留痕。
     #[test]

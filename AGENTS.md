@@ -505,7 +505,7 @@
 6. **禁止假测试报告**：planned 不等于通过；Unknown、跳过、过期报告如实记录，不把设计当证据。
 7. **禁止破坏依赖方向（G-1）**：`bod-core` 不依赖 DB/Web/Tauri/Agent SDK 或上层 crate；
    `bod-app` 不反向依赖 CLI/桌面壳。
-8. **禁止无证据引入重依赖**：新增默认依赖或一级对象须记录复杂度准入理由（§2.4）并锁定版本。当前新增依赖是 `serde`/`toml`（任务 1.2 配置 schema）、`rusqlite`（任务 2.6 单写事务，bundled 避免系统 SQLite）、`serde_json`（任务 5.1 执行协议 JSON 契约，需未知字段拒绝）与 `schemars`（CR-004 从 DTO 派生 JSON Schema，ADR-0004），理由与锁定版本见 `docs/spec-notes/p0-d0-config.md`、`docs/spec-notes/p0-execution-protocol.md`、`adr/0004-openapi-single-source.md`、`docs/compat/toolchain.md`；`bod-core` 仍保持零外部依赖。
+8. **禁止无证据引入重依赖**：新增默认依赖或一级对象须记录复杂度准入理由（§2.4）并锁定版本。当前新增依赖是 `serde`/`toml`（任务 1.2 配置 schema）、`rusqlite`（任务 2.6 单写事务，bundled 避免系统 SQLite）、`serde_json`（任务 5.1 执行协议 JSON 契约，需未知字段拒绝）、`schemars`（CR-004 从 DTO 派生 JSON Schema，ADR-0004）与 `tracing`/`tracing-subscriber`（CR-002 结构化日志，ADR-0006；不用 `env-filter`，避免 regex 进生产依赖树），理由与锁定版本见 `docs/spec-notes/p0-d0-config.md`、`docs/spec-notes/p0-execution-protocol.md`、`adr/0004-openapi-single-source.md`、`adr/0006-structured-logging.md`、`docs/compat/toolchain.md`；`bod-core` 仍保持零外部依赖。
 9. **禁止把 Fake Executor 当生产能力**：它只用于故障 conformance，不写入支持矩阵 Supported。
 10. **禁止以单平台绿灯代替跨平台通过**：`#[cfg(unix)]` / `#[cfg(windows)]` 分支，以及只在这些分支下
     编译的测试（如 `descriptor_file_is_owner_only`、`diff_gate_detects_real_symlink_escape`），
@@ -552,6 +552,15 @@
     改 DTO 或路由后必须重生成 `verification/openapi.json`
     （`BOD_BLESS_OPENAPI=1 cargo test -p bod-app --test openapi_contract`）并与代码一起提交，
     否则 `checked_in_document_matches_generated_one` 会红。
+17. **禁止把凭据写进日志或审计**：控制面日志字段固定为
+    `correlation_id`/method/path/status/outcome/耗时，请求头、请求体与查询串一律不进日志
+    （那里恰好有握手令牌与 Bearer 密钥经过）。审计的 `basis`/`reason` 由
+    `AuditEvent::validate` 拦凭据形态，库层只兜「决策与原因不一致」这一条，
+    拦不住令牌文本——**别以为有库约束就够了**。要新增日志字段，先回答
+    「这个字段会不会把令牌带进来」。
+18. **禁止在观测报表里把「算不出来」写成 0**：`observability::snapshot` 的
+    `not_measured` 必须如实列出缺数据的项与原因。报表里的 0 会被读成「测到了，且是零」，
+    比留空更危险。要新增指标，先确认它的数据源是**已落库的事实**，不是内存态。
 
 ## 验证与完成规则
 
@@ -563,7 +572,8 @@
 - **架构决策必须落地**：实现与 V2.9.6 规格冲突（尤其 §3 技术栈）时，要么改代码，
   要么在 `adr/` 新增 ADR 记录「为什么推翻 + 代价 + 可机械判断的撤销条件」，
   两者必有其一。当前已记录：ADR-0001（保留同步传输栈，不引 Tokio/Axum）、
-  ADR-0002（工作台暂不引前端框架）、ADR-0003（依赖方向用机械守卫）、ADR-0004（OpenAPI 单源：schemars 派生 + 从 `ROUTES` 投影）。
+  ADR-0002（工作台暂不引前端框架）、ADR-0003（依赖方向用机械守卫）、ADR-0004（OpenAPI 单源：schemars 派生 + 从 `ROUTES` 投影）、
+  ADR-0005（分层判据是「零外部依赖」）、ADR-0006（日志与审计分工）。
   `docs/` 被 gitignore，决策记录不得放在那里。
 - **跨平台验证触发条件**：改完代码跑 `cargo run -p xtask -- cross`（默认比较 `HEAD~1..HEAD`；
   提交前用 `--worktree` 或 `--staged`）。退出码即结论：

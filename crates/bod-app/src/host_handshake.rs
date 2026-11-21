@@ -21,8 +21,8 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -264,8 +264,12 @@ impl HostServer {
                 continue;
             };
             if let Err(err) = self.handle(stream) {
-                // 单个连接出错不影响宿主；错误里不含凭据。
-                eprintln!("控制面连接失败：{err}");
+                // 单连接出错不影响宿主；错误里不含凭据。
+                tracing::warn!(
+                    target: "bod.control_plane",
+                    error = %err,
+                    "控制面连接失败"
+                );
             }
             if self.stopping.load(Ordering::SeqCst) {
                 break;
@@ -276,15 +280,28 @@ impl HostServer {
     }
 
     fn handle(&self, mut stream: TcpStream) -> Result<bool, HostError> {
+        let started = Instant::now();
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         let request = read_request(&mut stream)?;
+        // 关联 ID 在读请求之后生成：畸形请求没有可归类的路径，只记连接级错误。
+        let correlation_id = next_correlation_id(&self.descriptor.instance_id);
+        let method = request.method.clone();
+        let path = request.path_only().to_string();
 
         // CR-007：Host/Origin 在路由与鉴权之前先过。拒绝发生在这一层，
         // 后面的 handler 就不会被攻击者可控的请求碰到。
         let hosts = request.header_values("host");
         let origins = request.header_values("origin");
         if let Err(rejection) = self.policy.check(&hosts, &origins) {
+            log_request(
+                &correlation_id,
+                &method,
+                &path,
+                403,
+                RequestOutcome::RejectedHost,
+                started.elapsed(),
+            );
             respond_dto(
                 &mut stream,
                 403,
@@ -296,25 +313,153 @@ impl HostServer {
         // CR-003：匹配与鉴权交给 http_router，本函数只剩读请求与写响应。
         match crate::http_router::dispatch(ROUTES, self, &self.session_key, request) {
             Outcome::Reply(Reply::Json { status, value }) => {
+                log_request(
+                    &correlation_id,
+                    &method,
+                    &path,
+                    status,
+                    outcome_for_json_status(status),
+                    started.elapsed(),
+                );
                 respond(&mut stream, status, &value.to_string())?;
             }
             Outcome::Reply(Reply::Upgrade { handle }) => {
+                log_request(
+                    &correlation_id,
+                    &method,
+                    &path,
+                    101,
+                    RequestOutcome::Upgraded,
+                    started.elapsed(),
+                );
                 // 订阅是长连接：放到独立线程，否则会把健康检查与停止请求堵在队列里。
                 std::thread::spawn(move || handle(stream));
             }
             Outcome::Failed(err) => {
+                log_request(
+                    &correlation_id,
+                    &method,
+                    &path,
+                    err.status,
+                    RequestOutcome::Failed,
+                    started.elapsed(),
+                );
                 respond_dto(&mut stream, err.status, &ErrorResponse::code(err.code))?;
             }
             Outcome::Unauthorized(code) => {
+                log_request(
+                    &correlation_id,
+                    &method,
+                    &path,
+                    401,
+                    RequestOutcome::DeniedAuth,
+                    started.elapsed(),
+                );
                 respond_dto(&mut stream, 401, &ErrorResponse::code(code))?;
             }
             // 方法不对与路径不存在对外同答 404：既有客户端按 404 处理，
             // 本次不引入 405，以免改变可观测行为（理由见 spec-note）。
             Outcome::MethodNotAllowed | Outcome::NotFound => {
+                log_request(
+                    &correlation_id,
+                    &method,
+                    &path,
+                    404,
+                    RequestOutcome::NotFound,
+                    started.elapsed(),
+                );
                 respond_dto(&mut stream, 404, &ErrorResponse::code("BOD_NOT_FOUND"))?;
             }
         }
         Ok(!self.stopping.load(Ordering::SeqCst))
+    }
+}
+
+/// 请求结局。与 HTTP 状态码分开：同一个 403 可能来自 Host 校验或业务拒绝，
+/// 观测时要分得清（§9「分别呈现阻塞原因」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    Allowed,
+    Upgraded,
+    DeniedAuth,
+    RejectedHost,
+    Failed,
+    NotFound,
+}
+
+impl RequestOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Upgraded => "upgraded",
+            Self::DeniedAuth => "denied_auth",
+            Self::RejectedHost => "rejected_host",
+            Self::Failed => "failed",
+            Self::NotFound => "not_found",
+        }
+    }
+}
+
+/// 200 段是成功，其余走 `Reply::Json` 的状态（3xx/1xx）既不是成功也不是失败，按 Failed 记。
+/// 抽成纯函数是为了能直接测：日志写出去就看不见了，断言只能落在算出来的结局上。
+fn outcome_for_json_status(status: u16) -> RequestOutcome {
+    if (200..300).contains(&status) {
+        RequestOutcome::Allowed
+    } else {
+        RequestOutcome::Failed
+    }
+}
+
+/// 请求关联 ID：`req-<实例短号>-<进程内序号>`。
+///
+/// 用序号而不是随机串：同一进程内的顺序可读可排，排查「两条并发请求谁先到」时才有用；
+/// 随机串在那种场景下等于没给。实例短号防止多实例日志汇总到一处时撞号。
+fn next_correlation_id(instance_id: &str) -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let suffix = instance_id.strip_prefix("inst-").unwrap_or(instance_id);
+    // `get` 而不是切片：实例 ID 由本模块生成、必然是 hex，
+    // 但这里是日志路径，不该有 panic 的可能。
+    let short = suffix.get(..8).unwrap_or(suffix);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    format!("req-{short}-{sequence}")
+}
+
+/// 记一条控制面请求日志。
+///
+/// **只允许** method、path、status、outcome、耗时与关联 ID。
+/// 请求头、请求体、查询串都不进日志：日志是最容易泄露令牌的地方，
+/// 而这里恰好有握手令牌与 Bearer 密钥经过。
+fn log_request(
+    correlation_id: &str,
+    method: &str,
+    path: &str,
+    status: u16,
+    outcome: RequestOutcome,
+    elapsed: Duration,
+) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    match outcome {
+        // 拒绝是安全事件：留给 warn，默认级别下也能看到。
+        RequestOutcome::DeniedAuth | RequestOutcome::RejectedHost => tracing::warn!(
+            target: "bod.control_plane",
+            correlation_id,
+            method,
+            path,
+            status,
+            outcome = outcome.as_str(),
+            elapsed_ms,
+            "控制面请求被拒绝"
+        ),
+        _ => tracing::info!(
+            target: "bod.control_plane",
+            correlation_id,
+            method,
+            path,
+            status,
+            outcome = outcome.as_str(),
+            elapsed_ms,
+            "控制面请求"
+        ),
     }
 }
 
@@ -836,6 +981,49 @@ pub fn request_shutdown(
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn correlation_ids_are_unique_and_carry_instance_prefix() {
+        let first = next_correlation_id("inst-0123456789abcdef");
+        let second = next_correlation_id("inst-0123456789abcdef");
+        assert!(first.starts_with("req-01234567-"), "{first}");
+        assert_ne!(first, second, "同进程内序号必须递增，不能重复");
+        let a: u64 = first.rsplit('-').next().unwrap().parse().unwrap();
+        let b: u64 = second.rsplit('-').next().unwrap().parse().unwrap();
+        assert_eq!(b, a + 1, "序号应严格 +1");
+    }
+
+    #[test]
+    fn correlation_id_tolerates_non_ascii_instance_id() {
+        // 正常路径的实例 ID 是 hex，但这里不该有 panic 的可能：它在日志路径上。
+        let id = next_correlation_id("实例-未预期");
+        assert!(id.starts_with("req-"), "{id}");
+    }
+
+    #[test]
+    fn json_status_maps_to_two_outcomes_only() {
+        assert_eq!(outcome_for_json_status(200), RequestOutcome::Allowed);
+        assert_eq!(outcome_for_json_status(204), RequestOutcome::Allowed);
+        assert_eq!(outcome_for_json_status(299), RequestOutcome::Allowed);
+        assert_eq!(outcome_for_json_status(199), RequestOutcome::Failed);
+        assert_eq!(outcome_for_json_status(300), RequestOutcome::Failed);
+        assert_eq!(outcome_for_json_status(500), RequestOutcome::Failed);
+    }
+
+    #[test]
+    fn request_outcome_labels_are_stable() {
+        // 这些字符串进日志与指标，改了等于改观测口径。
+        for (outcome, label) in [
+            (RequestOutcome::Allowed, "allowed"),
+            (RequestOutcome::Upgraded, "upgraded"),
+            (RequestOutcome::DeniedAuth, "denied_auth"),
+            (RequestOutcome::RejectedHost, "rejected_host"),
+            (RequestOutcome::Failed, "failed"),
+            (RequestOutcome::NotFound, "not_found"),
+        ] {
+            assert_eq!(outcome.as_str(), label);
+        }
+    }
 
     fn temp_descriptor(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

@@ -35,3 +35,5 @@
 | 0002 | 工作台暂不引入前端框架 | accepted | CR-004 前置决策 |
 | 0003 | 依赖方向用机械守卫，不靠自觉 | accepted | AGENTS.md 第 7 条（P0 归档时确立） |
 | 0004 | OpenAPI 单源：schemars 派生 + 从 `ROUTES` 投影 | accepted | CR-004 |
+| 0005 | 分层判据是「零外部依赖」，不是「纯不纯」 | accepted | CR-005 前置讨论 |
+| 0006 | 结构化日志与业务审计分工 | accepted | CR-002 |

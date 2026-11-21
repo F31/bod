@@ -8,6 +8,11 @@
 
 - [x] 1.0 契约单源：`ROUTES` 即契约表 + `verification/openapi.json` 黄金比对（ADR-0004）。
       这是 §11「路径在 OpenAPI 冻结时定稿」的前置，已完成于 P8 之外。
+- [x] 1.1 审计与观测底座：`audit_events`（015 迁移）+ `audit_log` 落库前校验 +
+      `tracing` 结构化日志 + `observability` 只读报表（ADR-0006）。
+      **只完成机制，审计当前没有生产写入者**——本 Change 的 3.5 与发送重验落库时
+      必须调用 `UnitOfWork::append_audit_event`，并让 `correlation_id` 贯穿
+      「草稿创建 → 发送时双点重验」两段，否则 §11 的「发送意图可在出站点核对」没有证据。
 
 ## 2. 盘点与冻结
 

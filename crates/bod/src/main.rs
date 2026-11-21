@@ -60,6 +60,9 @@ const USAGE: &str = "\
   bod fault-matrix --json          同上，输出机器可读结果
   bod perf                         实测空闲负担与 §38.2 性能预算可测项
   bod verify-index                 输出 I/G 验证索引与 G-50 结论
+  bod observe --db <path>          读现有表算 §9 观测读数（算不出的项单列，不填 0）
+  bod observe --db <path> --company <id>   指定公司（默认 company-default）
+  bod observe --db <path> --json   同上，输出机器可读结果
   bod serve                        启动本地控制面并写出连接描述（受保护握手）
   bod serve --listen <addr>        指定监听地址（默认取 server.listen，可为 127.0.0.1:0）
   bod serve --descriptor <path>    指定连接描述路径（默认 $BOD_HOME/host.endpoint.json）
@@ -282,6 +285,7 @@ fn run(args: &[String]) -> Result<String, String> {
             let report = bod_app::perf_probe::run(&environment_note(), &commit_note())?;
             Ok(bod_app::capacity_evaluation::render_markdown(&report, &[]))
         }
+        [cmd, rest @ ..] if cmd == "observe" => observe(rest),
         [cmd, sub] if cmd == "adapter" && sub == "describe" => {
             let adapter = adapter_or_err()?;
             Ok(format!("{}\n", descriptor_json(adapter.descriptor())))
@@ -946,6 +950,113 @@ fn case_signal(report: &bod_app::adapter_conformance::ConformanceReport, id: &st
         })
 }
 
+/// `bod observe`：从既有表算 §9 的观测读数（CR-002 第 3 步）。
+///
+/// 只读：打开数据库后只做 SELECT。算不出来的项在输出里单列（`not_measured`），
+/// 不填 0——报表里的 0 会被读成「测到了，且是零」。
+fn observe(flags: &[String]) -> Result<String, String> {
+    let mut db: Option<std::path::PathBuf> = None;
+    let mut company = "company-default".to_string();
+    let mut json = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--db" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--db 需要一个路径".to_string())?;
+                db = Some(std::path::PathBuf::from(value));
+                index += 2;
+            }
+            "--company" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--company 需要一个 ID".to_string())?;
+                company = value.clone();
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            other => return Err(format!("observe 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+    let db = db.ok_or_else(|| format!("observe 需要 --db <数据库路径>\n\n{USAGE}"))?;
+    // `open` 会执行幂等迁移（既有行为）：指向旧库时会把新表补齐，除此之外没有写入。
+    let store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
+        .map_err(|err| format!("打开数据库失败：{err}"))?;
+    let snapshot = bod_app::observability::snapshot(&store, &company, now_ms())
+        .map_err(|err| format!("采集失败：{err}"))?;
+    if json {
+        return Ok(format!("{}\n", snapshot_json(&snapshot)));
+    }
+    Ok(snapshot.render())
+}
+
+/// 观测快照的机器可读形态。字段与 `render` 的段落一一对应，
+/// 不额外加派生指标——派生会让两处口径分叉。
+fn snapshot_json(snapshot: &bod_app::observability::ObservationSnapshot) -> serde_json::Value {
+    let queue = snapshot
+        .queue
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "state": &row.state,
+                "count": row.count,
+                "oldest_due_at_ms": row.oldest_due_at_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    let blocked = snapshot
+        .blocked_reasons
+        .iter()
+        .map(|row| serde_json::json!({ "reason": &row.reason, "count": row.count }))
+        .collect::<Vec<_>>();
+    let deliveries = snapshot
+        .deliveries
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "status": &row.status,
+                "count": row.count,
+                "oldest_created_at_ms": row.oldest_created_at_ms,
+                "max_wait_ms": row.max_wait_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    let reservations = snapshot
+        .reservations
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "dimension": &row.dimension,
+                "reserved": row.reserved,
+                "risk": row.risk,
+                "rows": row.rows,
+            })
+        })
+        .collect::<Vec<_>>();
+    let not_measured = snapshot
+        .not_measured
+        .iter()
+        .map(|item| serde_json::json!({ "item": item.item, "reason": item.reason }))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "company_id": &snapshot.company_id,
+        "captured_at_ms": snapshot.captured_at_ms,
+        "queue": queue,
+        "blocked_reasons": blocked,
+        "deliveries": deliveries,
+        "reservations": reservations,
+        "audit": {
+            "allowed": snapshot.audit_allowed,
+            "denied": snapshot.audit_denied,
+        },
+        "not_measured": not_measured,
+    })
+}
+
 /// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。
 ///
 /// P0 的控制面只做握手与生命周期，不承载业务命令；业务 DB 仍由命令层独占，
@@ -982,6 +1093,11 @@ fn serve(flags: &[String]) -> Result<String, String> {
     }
 
     let config = BodConfig::default();
+    // CR-002：诊断日志装到 stderr（stdout 留给就绪行与命令结果）。
+    // 装不上只报告，不让宿主拒绝启动——日志参数错不该等于服务起不来。
+    if let Err(err) = bod_app::telemetry::init_from_env() {
+        eprintln!("{err}");
+    }
     let listen = listen.unwrap_or_else(|| config.server.listen.clone());
     let descriptor_path = descriptor_path.unwrap_or_else(default_descriptor_path);
     // 事件源就是 `GET /_bod/events` 的 SSE 基线订阅来源；宿主自己发布的事件也走同一条序列。

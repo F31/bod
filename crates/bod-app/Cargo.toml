@@ -22,3 +22,8 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 # CR-004：从 DTO 类型派生 JSON Schema（OpenAPI 3.1 用 draft 2020-12）。
 # 准入理由见 adr/0003-openapi-single-source.md；MSRV 1.74 < 本仓库 1.96。
 schemars = { version = "1.2.3", features = ["derive"] }
+# CR-002 / 规格 §3：结构化诊断日志。准入理由见 adr/0006-structured-logging.md。
+# 不用 env-filter：它会把 regex + aho-corasick 拖进生产依赖树，而本仓只需按级别过滤，
+# 级别由 BOD_LOG 映射到 LevelFilter 即可，不需要按 target 做正则匹配。
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json"] }
