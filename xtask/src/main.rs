@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod impact_sample;
+mod revalidate;
 
 /// 依赖违规记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -824,6 +825,8 @@ fn print_help() {
     println!("  evidence --check PATH [--audience local|team|external] [--approver A --scope S]");
     println!("  evidence --scrub PATH [--out PATH]  输出脱敏副本（只打印命中类别，不回显原值）");
     println!("  impact [--from REV] [--to REV] [--out PATH]  P3 G-31：用真实提交跑影响评估");
+    println!("  revalidate [--from REV] [--to REV] [--out PATH] [--budget N] [--cargo PATH]");
+    println!("               P3 5.2：真跑重验 + rustc 真值核对漏项 + 走一遍再次接受");
     println!("  --self-test         违例注入自测");
 }
 
@@ -910,6 +913,162 @@ fn impact(args: &[String]) -> bool {
         impact_sample::RULE_VERSION
     );
     true
+}
+
+/// P3 5.2：真跑重验、核对漏项、走一遍再次接受。只输出读数，不给通过结论。
+fn revalidate(args: &[String]) -> bool {
+    let root = workspace_root();
+    let mut from = "HEAD~1".to_string();
+    let mut to = "HEAD".to_string();
+    let mut out: Option<String> = None;
+    let mut budget = revalidate::DEFAULT_BUDGET;
+    let mut cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut work: Option<PathBuf> = None;
+    let mut operator = env::var("USERNAME")
+        .or_else(|_| env::var("USER"))
+        .unwrap_or_else(|_| "operator:local".to_string());
+    let mut producer = "agent:workbuddy".to_string();
+
+    let mut index = 0;
+    while index < args.len() {
+        let value = args.get(index + 1).cloned();
+        let take = |value: Option<String>, flag: &str| -> Option<String> {
+            match value {
+                Some(text) => Some(text),
+                None => {
+                    println!("[revalidate] FAIL {flag} 缺少参数");
+                    None
+                }
+            }
+        };
+        match args[index].as_str() {
+            "--from" => match take(value, "--from") {
+                Some(text) => {
+                    from = text;
+                    index += 2;
+                }
+                None => return false,
+            },
+            "--to" => match take(value, "--to") {
+                Some(text) => {
+                    to = text;
+                    index += 2;
+                }
+                None => return false,
+            },
+            "--out" => match take(value, "--out") {
+                Some(text) => {
+                    out = Some(text);
+                    index += 2;
+                }
+                None => return false,
+            },
+            "--budget" => match take(value, "--budget").and_then(|text| text.parse().ok()) {
+                Some(parsed) => {
+                    budget = parsed;
+                    index += 2;
+                }
+                None => {
+                    println!("[revalidate] FAIL --budget 需要正整数");
+                    return false;
+                }
+            },
+            "--cargo" => match take(value, "--cargo") {
+                Some(text) => {
+                    cargo = text;
+                    index += 2;
+                }
+                None => return false,
+            },
+            "--work" => match take(value, "--work") {
+                Some(text) => {
+                    work = Some(PathBuf::from(text));
+                    index += 2;
+                }
+                None => return false,
+            },
+            "--operator" => match take(value, "--operator") {
+                Some(text) => {
+                    operator = text;
+                    index += 2;
+                }
+                None => return false,
+            },
+            "--producer" => match take(value, "--producer") {
+                Some(text) => {
+                    producer = text;
+                    index += 2;
+                }
+                None => return false,
+            },
+            other => {
+                println!("[revalidate] FAIL 未知参数 {other}");
+                return false;
+            }
+        }
+    }
+
+    let sample = match impact_sample::run(&root, &from, &to, now_ms()) {
+        Ok(sample) => sample,
+        Err(err) => {
+            println!("[revalidate] FAIL {err}");
+            return false;
+        }
+    };
+    let work = work.unwrap_or_else(|| root.join("tmp").join("p3-5.2"));
+    let run = revalidate::full(&root, &cargo, &work, &operator, &producer, sample, budget);
+    let report = revalidate::render(&run, impact_sample::RULE_VERSION);
+
+    if let Some(path) = out {
+        if let Some(parent) = Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(err) = fs::create_dir_all(parent)
+        {
+            println!("[revalidate] FAIL 创建目录失败：{err}");
+            return false;
+        }
+        if let Err(err) = fs::write(&path, &report) {
+            println!("[revalidate] FAIL 写入失败：{err}");
+            return false;
+        }
+        println!("[revalidate] 已写入 {path}");
+    } else {
+        print!("{report}");
+    }
+
+    let empty = run
+        .runs
+        .iter()
+        .filter(|item| item.kind == revalidate::RunKind::NoTestsExecuted)
+        .count();
+    let failed = run
+        .runs
+        .iter()
+        .filter(|item| item.kind == revalidate::RunKind::Failed)
+        .count();
+    let build_failed = run
+        .runs
+        .iter()
+        .filter(|item| item.kind == revalidate::RunKind::BuildFailed)
+        .count();
+    let executed: usize = run.runs.iter().map(|item| item.passed).sum();
+    println!(
+        "[revalidate] 提案 {} 条（丢弃 {}）、无效重验 {}、用例失败 {}、构建失败 {}、实际执行用例 {}；漏项 {}；再次接受 {}",
+        run.plan.items.len(),
+        run.plan.dropped.len(),
+        empty,
+        failed,
+        build_failed,
+        executed,
+        run.gaps.missed.len(),
+        run.reaccept
+            .as_ref()
+            .map(|record| record.outcome.as_str())
+            .unwrap_or("未执行"),
+    );
+    println!("[revalidate] 判定由评审给出，本命令只记录读数");
+    // 只把"命令没跑起来"当工具失败；空跑与失败是被记录的事实，不是工具错误。
+    run.reaccept_error.is_none() && failed == 0 && build_failed == 0
 }
 
 /// 列出真实演练案件：只打印需要离开本机才能证明的那些，避免"演练做完了其实没验证"。
@@ -1061,6 +1220,7 @@ fn main() -> ExitCode {
         [cmd, flag, path] if cmd == "drill" && flag == "--render" => drill_render(path),
         [cmd, rest @ ..] if cmd == "evidence" => evidence(rest),
         [cmd, rest @ ..] if cmd == "impact" => impact(rest),
+        [cmd, rest @ ..] if cmd == "revalidate" => revalidate(rest),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {
             verify_stage_p0(&root)
         }

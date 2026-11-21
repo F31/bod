@@ -13,3 +13,5 @@ path = "src/main.rs"
 # G-50 验证索引解析复用产品侧实现，避免两套解析器漂移。
 # 依赖方向：xtask 是开发工具，可以依赖 bod-app；bod-app 不反向依赖 xtask（G-1 已守）。
 bod-app = { path = "../crates/bod-app" }
+# 解析 `cargo check --message-format=json`：漏项核对要靠 rustc 自己的重编事实。
+serde_json = "1.0.154"

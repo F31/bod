@@ -345,6 +345,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "bod-app",
+ "serde_json",
 ]
 
 [[package]]

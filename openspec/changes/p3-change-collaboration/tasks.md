@@ -54,7 +54,12 @@
 ## 5. P3 验证与出口
 
 - [x] 5.1 运行 `bod-app::coding_integration`、`bod-app::impact_revalidation`、`bod-app::workspace_safety` 的 P3 用例，验证 G-7、G-31、G-29 有命名 case 与真实断言。
-- [ ] 5.2 在真实项目上演示一次共享接口变化从发现到再次接受的完整过程，验证记录漏项、无效重验、协调与集成失败数据（`invariant_i_53`、`invariant_i_54`）。
+- [x] 5.2 在真实项目上演示一次共享接口变化从发现到再次接受的完整过程，验证记录漏项、无效重验、协调与集成失败数据（`invariant_i_53`、`invariant_i_54`）。
+  - 入口：`xtask revalidate --from REV --to REV`；样本 `a9c80d5`（P7 口径加固）与 `157298b`（SSE 传输），两平台各跑一次。
+  - 漏项：rustc 真值（`cargo check` 的 `fresh == false`）与静态图对比，两样本均漏 `bod-desktop`、`xtask`（包级重编传播，静态模块图不追踪）。
+  - 无效重验：退出码 0 但零用例即判 `no-tests-executed`；第一版提案用 `--lib`/`--bins` 当"全量"，实测发现 `bod` 的 `sse_stream_e2e` 从未被覆盖，已改为不带 target 参数的全量。
+  - 协调与集成失败：两样本为顺序提交、改动文件集无交集，**实际为 0**；未编造冲突填充该栏。
+  - 口径与限制见 `docs/spec-notes/p3-revalidation.md`（本地）。
 - [x] 5.3 汇总 P3 出口证据与支持矩阵，验证「接口变化跨前后端/测试跟进」「共享 Agent 不串会话」「无强制管理层」三项有可核对报告，未测组合保持 Planned。
 
 ## Workflow follow-up
