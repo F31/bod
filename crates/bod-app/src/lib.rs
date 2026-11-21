@@ -68,6 +68,7 @@ pub mod migration_safety;
 pub mod mobile_control;
 pub mod notification_channel;
 pub mod observation_redaction;
+pub mod openapi;
 pub mod openspec_integration;
 pub mod perf_probe;
 pub mod protocol_reliability;

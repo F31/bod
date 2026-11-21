@@ -19,3 +19,6 @@ toml = "1.2.1"
 serde_json = "1.0.154"
 # D0 任务 2.6：SQLite 持久化与 UnitOfWork。bundled 避免依赖系统 SQLite；不用 ORM/SQLx。
 rusqlite = { version = "0.43.0", features = ["bundled"] }
+# CR-004：从 DTO 类型派生 JSON Schema（OpenAPI 3.1 用 draft 2020-12）。
+# 准入理由见 adr/0003-openapi-single-source.md；MSRV 1.74 < 本仓库 1.96。
+schemars = { version = "1.2.3", features = ["derive"] }

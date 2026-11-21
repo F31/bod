@@ -244,7 +244,71 @@ pub struct Route<S> {
     pub auth: Auth,
     /// 为什么是这种鉴权。空串会被测试拒绝——理由必须写下来才能被复核。
     pub note: &'static str,
+    /// 对外契约（CR-004）。与路由同表，避免「实现」与「文档」两处维护。
+    pub contract: Contract,
     pub handler: Handler<S>,
+}
+
+/// 一条路由的对外契约。
+///
+/// 字段刻意都是 `&'static`/函数指针：路由表是 `static`，契约必须能在编译期
+/// 完成构造。schema 存成 `fn() -> Value` 而不是 `Value`，因为 `serde_json`
+/// 的序列化不能在 `const` 上下文里求值。
+#[derive(Debug, Clone, Copy)]
+pub struct Contract {
+    /// 一句话说清这个端点做什么（`summary`）；更长的边界说明写 `Route::note`。
+    pub summary: &'static str,
+    pub request: Option<ContractBody>,
+    /// 查询参数无法从路径模式推出（handler 自己读），必须显式声明。
+    pub query: &'static [QueryParam],
+    /// 业务响应。**不包含 401/404**：这两个由 `Auth` 与分发层统一产生，
+    /// 在契约里再写一遍会形成第二份拒绝码，`openapi::document` 直接拒绝。
+    pub responses: &'static [ContractResponse],
+}
+
+/// 响应或请求体。
+#[derive(Debug, Clone, Copy)]
+pub enum ContractBody {
+    /// JSON 体。`component` 是 `components.schemas` 里的名字，必须全局唯一。
+    Json {
+        component: &'static str,
+        schema: fn() -> serde_json::Value,
+    },
+    /// `text/event-stream`。不建模成 JSON——否则客户端会去解析 SSE 帧。
+    EventStream,
+}
+
+impl ContractBody {
+    /// `const` 而不是普通构造函数：路由表是 `static`，条目必须在编译期成型。
+    pub const fn json(component: &'static str, schema: fn() -> serde_json::Value) -> Self {
+        Self::Json { component, schema }
+    }
+}
+
+/// 一条业务响应。
+#[derive(Debug, Clone, Copy)]
+pub struct ContractResponse {
+    pub status: u16,
+    pub description: &'static str,
+    pub body: Option<ContractBody>,
+}
+
+impl ContractResponse {
+    pub const fn new(status: u16, description: &'static str, body: Option<ContractBody>) -> Self {
+        Self {
+            status,
+            description,
+            body,
+        }
+    }
+}
+
+/// 查询参数声明。
+#[derive(Debug, Clone, Copy)]
+pub struct QueryParam {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub required: bool,
 }
 
 /// 匹配结果。`MethodMismatch` 对外仍是 404（与既有行为一致），
@@ -302,6 +366,20 @@ fn pattern_segments(pattern: &'static str) -> Vec<Segment> {
 enum Segment {
     Static(&'static str),
     Param(&'static str),
+}
+
+/// 模式里出现的参数名，按出现顺序。
+///
+/// 公开它是为了让 OpenAPI 投影**只从模式取参数**：路径参数再声明一份，
+/// 就等于允许「模式改了、参数没改」这种不一致存在。
+pub fn pattern_parameters(pattern: &'static str) -> Vec<&'static str> {
+    pattern_segments(pattern)
+        .into_iter()
+        .filter_map(|segment| match segment {
+            Segment::Param(name) => Some(name),
+            Segment::Static(_) => None,
+        })
+        .collect()
 }
 
 /// 尝试把路径匹配到某条模式上，成功则返回按出现顺序的参数值。
@@ -444,44 +522,68 @@ mod tests {
         Ok(Reply::ok(serde_json::json!({ "ok": true })))
     }
 
+    /// 测试路由只关心匹配与鉴权，契约字段填最小合法值。
+    ///
+    /// 契约仍是必填字段而不是 `Default`：新增端点时必须明确写出对外响应，
+    /// 「没填」与「没有响应体」在类型上不能是同一件事。
+    fn route_of(
+        method: Method,
+        pattern: &'static str,
+        auth: Auth,
+        note: &'static str,
+    ) -> Route<()> {
+        Route {
+            method,
+            pattern,
+            auth,
+            note,
+            contract: Contract {
+                summary: "测试路由",
+                request: None,
+                query: &[],
+                responses: &[ContractResponse {
+                    status: 200,
+                    description: "ok",
+                    body: None,
+                }],
+            },
+            handler: ping,
+        }
+    }
+
     fn routes() -> Vec<Route<()>> {
         vec![
-            Route {
-                method: Method::Get,
-                pattern: "/_bod/health",
-                auth: Auth::Public,
-                note: "存活探测，不泄露业务信息",
-                handler: ping,
-            },
-            Route {
-                method: Method::Get,
-                pattern: "/_bod/events",
-                auth: Auth::Bearer("BOD_TEST_DENIED"),
-                note: "事件流含业务事实",
-                handler: ping,
-            },
-            Route {
-                method: Method::Post,
-                pattern: "/api/v1/feedback-receipts/{id}/responses",
-                auth: Auth::Bearer("BOD_TEST_DENIED"),
-                note: "补充回执需身份",
-                handler: ping,
-            },
+            route_of(
+                Method::Get,
+                "/_bod/health",
+                Auth::Public,
+                "存活探测，不泄露业务信息",
+            ),
+            route_of(
+                Method::Get,
+                "/_bod/events",
+                Auth::Bearer("BOD_TEST_DENIED"),
+                "事件流含业务事实",
+            ),
+            route_of(
+                Method::Post,
+                "/api/v1/feedback-receipts/{id}/responses",
+                Auth::Bearer("BOD_TEST_DENIED"),
+                "补充回执需身份",
+            ),
             // 静态路径注册在参数路径之后，用来验证「静态优先与顺序无关」。
-            Route {
-                method: Method::Get,
-                pattern: "/api/v1/feedback-receipts/summary",
-                auth: Auth::Bearer("BOD_TEST_DENIED"),
-                note: "汇总视图",
-                handler: ping,
-            },
-            Route {
-                method: Method::Post,
-                pattern: "/_bod/shutdown",
-                auth: Auth::Bearer("BOD_TEST_DENIED"),
-                note: "停机需会话密钥",
-                handler: ping,
-            },
+            route_of(
+                Method::Get,
+                "/api/v1/feedback-receipts/summary",
+                Auth::Bearer("BOD_TEST_DENIED"),
+                "汇总视图",
+            ),
+            route_of(
+                Method::Post,
+                "/_bod/shutdown",
+                Auth::Bearer("BOD_TEST_DENIED"),
+                "停机需会话密钥",
+            ),
         ]
     }
 
@@ -490,20 +592,18 @@ mod tests {
     /// 顺序刻意把参数路由放前面——若实现依赖注册顺序，这里会立刻红。
     fn tracking_routes() -> Vec<Route<()>> {
         vec![
-            Route {
-                method: Method::Get,
-                pattern: "/api/v1/delivery-tracking/{id}",
-                auth: Auth::Bearer("BOD_TEST_DENIED"),
-                note: "跟踪项含客户交付事实",
-                handler: ping,
-            },
-            Route {
-                method: Method::Post,
-                pattern: "/api/v1/delivery-tracking/imports",
-                auth: Auth::Bearer("BOD_TEST_DENIED"),
-                note: "导入需身份，权限与发布执行分开",
-                handler: ping,
-            },
+            route_of(
+                Method::Get,
+                "/api/v1/delivery-tracking/{id}",
+                Auth::Bearer("BOD_TEST_DENIED"),
+                "跟踪项含客户交付事实",
+            ),
+            route_of(
+                Method::Post,
+                "/api/v1/delivery-tracking/imports",
+                Auth::Bearer("BOD_TEST_DENIED"),
+                "导入需身份，权限与发布执行分开",
+            ),
         ]
     }
 
@@ -579,13 +679,12 @@ mod tests {
     #[test]
     fn same_static_path_serves_each_registered_method() {
         let mut routes = tracking_routes();
-        routes.push(Route {
-            method: Method::Get,
-            pattern: "/api/v1/delivery-tracking/imports",
-            auth: Auth::Bearer("BOD_TEST_DENIED"),
-            note: "查询导入批次状态",
-            handler: ping,
-        });
+        routes.push(route_of(
+            Method::Get,
+            "/api/v1/delivery-tracking/imports",
+            Auth::Bearer("BOD_TEST_DENIED"),
+            "查询导入批次状态",
+        ));
         for (method, path) in [
             ("GET", "/api/v1/delivery-tracking/imports"),
             ("POST", "/api/v1/delivery-tracking/imports"),
@@ -712,6 +811,12 @@ mod tests {
             pattern: "/protected",
             auth: Auth::Bearer("BOD_TEST_DENIED"),
             note: "测试用",
+            contract: Contract {
+                summary: "测试用",
+                request: None,
+                query: &[],
+                responses: &[],
+            },
             handler: spy,
         }];
         let request = Request::new("GET", "/protected");
@@ -744,6 +849,12 @@ mod tests {
             assert!(
                 !route.note.trim().is_empty(),
                 "{} {} 缺少鉴权理由",
+                route.method.as_str(),
+                route.pattern
+            );
+            assert!(
+                !route.contract.summary.trim().is_empty(),
+                "{} {} 缺少契约摘要（OpenAPI 的 summary 会直接取它）",
                 route.method.as_str(),
                 route.pattern
             );

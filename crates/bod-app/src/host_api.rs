@@ -1,4 +1,4 @@
-//! 控制面 HTTP 的响应体（CR-004 的共同前置：先有类型，再谈 schema 与 OpenAPI）。
+//! 控制面 HTTP 的请求/响应体（CR-004 的共同前置：先有类型，再谈 schema 与 OpenAPI）。
 //!
 //! 抽出之前，每个 handler 各自用 `serde_json::json!({...})` 拼响应。问题是：
 //! 字段名、顺序、必填/可选只存在于那一行的字面量里——没有类型可以挂
@@ -10,10 +10,10 @@
 //! 不用 `Value` 相等，否则顺序变了也发现不了。
 //!
 //! 尚未覆盖的部分（下一步再做，不在本模块假装完成）：
-//! - 请求体 DTO：`/_bod/handshake` 目前直接从 `Value` 取 `handshake_token` 字段；
 //! - §6/§11 的业务响应：端点还没写，无类型可抽。
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::http_router::RouteError;
 
@@ -21,7 +21,7 @@ use crate::http_router::RouteError;
 ///
 /// 只回存活事实：不含会话密钥、不含业务数据。`ok` 恒为 `true`——探测失败时
 /// 根本没有响应，所以这里不需要「false 的 ok」。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HealthResponse {
     pub ok: bool,
     pub protocol: &'static str,
@@ -29,11 +29,23 @@ pub struct HealthResponse {
     pub pid: u32,
 }
 
+/// `POST /_bod/handshake` 的请求体。
+///
+/// 令牌在**请求体**而不是 `Authorization` 头：调用这一刻客户端还没有会话密钥，
+/// 头部放不进去。缺字段、类型不对、JSON 畸形一律落到同一个 401——不区分原因，
+/// 免得把「令牌错」与「请求畸形」的差别变成探测手段。
+///
+/// 不设 `deny_unknown_fields`：旧客户端可能带多余字段，加严会是破坏性变更。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct HandshakeRequest {
+    pub handshake_token: String,
+}
+
 /// `POST /_bod/handshake` 的响应。
 ///
 /// 这是唯一会把 `session_key` 写进响应体的地方。字段顺序与旧字面量一致，
 /// 但**顺序不是契约**——客户端按名取值。测试锁顺序只是为了证明重构没改字节。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HandshakeResponse {
     pub protocol: &'static str,
     pub instance_id: String,
@@ -45,7 +57,7 @@ pub struct HandshakeResponse {
 ///
 /// `stopping: true` 只表示「授权停止已置位」，不表示进程已经退出——
 /// 退出发生在 `run` 的下一轮循环。客户端要确认退出，应看描述文件是否消失。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShutdownResponse {
     pub stopping: bool,
 }
@@ -59,7 +71,7 @@ pub struct ShutdownResponse {
 ///
 /// `reason` 用 `skip_serializing_if` 而不是输出 `null`：既有客户端按「字段存在与否」
 /// 判断是否有解释，补一个 `null` 会改变它们的解析结果。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ErrorResponse {
     pub error: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]

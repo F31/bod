@@ -10,7 +10,10 @@
 # - status ∈ implemented / planned / unverified；
 #   implemented 必须有 module 与 tests，planned 不得填 tests（避免把计划路径当证据）；
 # - requirement 用 V2.9.6 §39.13 / §39.12 / §39.14 的原文语义，不改写成任务口径；
-# - note 记录编号或范围差异，不隐藏。
+# - note 记录编号或范围差异，不隐藏；
+# - 版本映射：V2.9.8 技术架构规格的 §1—§10 与 V2.9.6 **逐字相同**（整文件 diff 仅 5 行），
+#   因此既有条目继续有效，不随版本号改名；§11（双入口交付与编码现场）为新增，
+#   由 §11 引出的条目在 note 里注明「V2.9.8 §11」。
 
 - id: I-01
   kind: invariant
@@ -204,6 +207,13 @@
   status: implemented
   evidence: cargo test -p bod-app budget_admission
   note: "V2.9.6 §39.7 的权威语义；G-45 复用同一 case 作为 module/tests 目标。P1 tasks.md 4.1/4.6 与 p0-support-matrix.md §5 曾把它误记为 I-10 语义，现独立登记以消除编号缺口；C/R/U 互斥不属于 I-10（I-10 是合并证据对应实际目标与候选组合）"
+- id: I-72
+  kind: invariant
+  requirement: 两条交付入口（外部导入与内部研发）共同使用覆盖投影，同一组有效证据必须得出同一结论
+  module: bod-app::coverage_receipt
+  status: planned
+  evidence: cargo test -p bod-app coverage_receipt
+  note: "V2.9.8 §11 原文：『两条入口共同使用覆盖投影，同一组有效证据应得出同一结论』。现状：`judge_coverage` 是纯函数、结论可复用，但「外部导入」入口尚未实现，因此目前只能保证单入口内部一致；本条**不填 tests**——计划路径不得当证据。待 `p8-delivery-tracking` 首切片接入后补跨入口同结论用例。另注：G-51 的 note 引用了不存在的 I-77（既有悬空引用，未在本条顺手编造内容）"
 - id: G-1
   kind: gate
   requirement: 依赖方向与分层（bod-core 不依赖存储/网络/UI；bod-app 不反向依赖 CLI/桌面）

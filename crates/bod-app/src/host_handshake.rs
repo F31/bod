@@ -26,9 +26,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::host_api::{self, ErrorResponse, HandshakeResponse, HealthResponse, ShutdownResponse};
+use crate::host_api::{
+    self, ErrorResponse, HandshakeRequest, HandshakeResponse, HealthResponse, ShutdownResponse,
+};
 use crate::http_router::{
-    Auth, EndpointRequest, Method, Outcome, Reply, Request, Route, RouteError, token_eq,
+    Auth, Contract, ContractBody, ContractResponse, EndpointRequest, Method, Outcome, QueryParam,
+    Reply, Request, Route, RouteError, token_eq,
 };
 
 /// 控制面协议标识：客户端必须原样确认，避免旧版壳连上新版宿主。
@@ -320,13 +323,28 @@ impl HostServer {
 /// 顺序不敏感：`http_router::match_route` 先扫静态模式再扫参数模式，
 /// 所以将来 `/api/v1/feedback-receipts/summary` 不会被 `{id}` 吃掉。
 ///
-/// 每条都必须声明 `auth` 与 `note`：声明缺失编译不过，理由为空则测试不过。
+/// 每条都必须声明 `auth`、`note` 与 `contract`：声明缺失编译不过，理由为空则
+/// 测试不过。`contract` 与路由同表是刻意的——「实现」与「文档」分开维护时，
+/// 第十个端点之后必然漂移，而 §6/§11 合计还有 10 个端点要落地。
 static ROUTES: &[Route<HostServer>] = &[
     Route {
         method: Method::Get,
         pattern: "/_bod/health",
         auth: Auth::Public,
         note: "存活探测只回协议名、实例 ID 与 pid，不含令牌与业务事实",
+        contract: Contract {
+            summary: "存活探测",
+            request: None,
+            query: &[],
+            responses: &[ContractResponse::new(
+                200,
+                "存活事实：协议名、实例 ID 与 pid",
+                Some(ContractBody::json(
+                    "HealthResponse",
+                    crate::openapi::schema_of::<HealthResponse>,
+                )),
+            )],
+        },
         handler: route_health,
     },
     Route {
@@ -334,6 +352,37 @@ static ROUTES: &[Route<HostServer>] = &[
         pattern: "/_bod/events",
         auth: Auth::InHandler("BOD_STREAM_DENIED"),
         note: "令牌在 Authorization 头；额外拒绝查询串令牌与非法游标，需按原因分别说明",
+        contract: Contract {
+            summary: "订阅事件流（SSE）",
+            request: None,
+            query: &[
+                QueryParam {
+                    name: "cursor",
+                    description: "起始游标；同时带 Last-Event-ID 头时以头为准",
+                    required: false,
+                },
+                QueryParam {
+                    name: "follow",
+                    description: "`0` 表示只回放历史不跟随；缺省跟随",
+                    required: false,
+                },
+                QueryParam {
+                    name: "max_ms",
+                    description: "单次连接最长毫秒数，缺省 30000，夹在 100..=60000",
+                    required: false,
+                },
+                QueryParam {
+                    name: "heartbeat_ms",
+                    description: "心跳间隔毫秒，缺省 1000，夹在 20..=10000",
+                    required: false,
+                },
+            ],
+            responses: &[ContractResponse::new(
+                200,
+                "SSE 帧流；鉴权失败时先回 401 再断开，不会以流内事件表达错误",
+                Some(ContractBody::EventStream),
+            )],
+        },
         handler: route_events,
     },
     Route {
@@ -341,6 +390,22 @@ static ROUTES: &[Route<HostServer>] = &[
         pattern: "/_bod/handshake",
         auth: Auth::InHandler("BOD_HANDSHAKE_DENIED"),
         note: "客户端此刻还没有会话密钥，令牌在请求体 handshake_token 字段",
+        contract: Contract {
+            summary: "用一次性握手令牌换取会话密钥",
+            request: Some(ContractBody::json(
+                "HandshakeRequest",
+                crate::openapi::schema_of::<HandshakeRequest>,
+            )),
+            query: &[],
+            responses: &[ContractResponse::new(
+                200,
+                "会话密钥与控制面身份；密钥只出现在这个响应里",
+                Some(ContractBody::json(
+                    "HandshakeResponse",
+                    crate::openapi::schema_of::<HandshakeResponse>,
+                )),
+            )],
+        },
         handler: route_handshake,
     },
     Route {
@@ -348,9 +413,46 @@ static ROUTES: &[Route<HostServer>] = &[
         pattern: "/_bod/shutdown",
         auth: Auth::Bearer("BOD_SHUTDOWN_DENIED"),
         note: "只认 Authorization: Bearer 会话密钥，分发前统一校验",
+        contract: Contract {
+            summary: "授权停止宿主",
+            request: None,
+            query: &[],
+            responses: &[ContractResponse::new(
+                200,
+                "已置位停止意图；进程退出需另看描述文件是否消失",
+                Some(ContractBody::json(
+                    "ShutdownResponse",
+                    crate::openapi::schema_of::<ShutdownResponse>,
+                )),
+            )],
+        },
         handler: route_shutdown,
     },
 ];
+
+/// 路由表的只读视图，给契约测试用。
+///
+/// 不暴露可变入口：路由表是 `static`，`&'static []` 本身不可变，
+/// 这个函数只是把「有哪些路由」变成可断言的公开事实。
+pub fn contract_routes() -> &'static [Route<HostServer>] {
+    ROUTES
+}
+
+/// 生成控制面 OpenAPI 3.1 文档。
+///
+/// 返回 `Err` 表示路由表自身不自洽（重复路由、悬空组件、手写 401），
+/// 属于编程错误——契约测试会先在 CI 里失败，不会等到客户端拿到坏文档。
+pub fn openapi_document() -> Result<serde_json::Value, String> {
+    crate::openapi::document(
+        ROUTES,
+        crate::openapi::Info {
+            title: "bod 控制面",
+            version: PROTOCOL,
+            description: "本机控制面：只监听回环，校验 Host/Origin，不发 CORS。\
+                          文档由 ROUTES 与 DTO 生成，不手写。",
+        },
+    )
+}
 
 fn route_health(state: &HostServer, _endpoint: EndpointRequest) -> Result<Reply, RouteError> {
     Ok(Reply::ok(host_api::encode(&HealthResponse {
@@ -374,14 +476,11 @@ fn route_events(state: &HostServer, endpoint: EndpointRequest) -> Result<Reply, 
 }
 
 fn route_handshake(state: &HostServer, endpoint: EndpointRequest) -> Result<Reply, RouteError> {
-    let token = serde_json::from_str::<serde_json::Value>(&endpoint.request.body)
+    // 缺字段、类型不对、JSON 畸形都落到同一个 401：不区分原因，
+    // 免得把「令牌错」与「请求畸形」的差别变成探测手段。
+    let token = serde_json::from_str::<HandshakeRequest>(&endpoint.request.body)
         .ok()
-        .and_then(|value| {
-            value
-                .get("handshake_token")
-                .and_then(|token| token.as_str())
-                .map(str::to_string)
-        });
+        .map(|request| request.handshake_token);
     match token {
         Some(token) if token_eq(&token, &state.descriptor.handshake_token) => {
             Ok(Reply::ok(host_api::encode(&HandshakeResponse {

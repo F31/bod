@@ -33,3 +33,5 @@
 |---|---|---|---|
 | 0001 | 保留同步传输栈，不引入 async 运行时 | accepted | CR-003 前置决策 |
 | 0002 | 工作台暂不引入前端框架 | accepted | CR-004 前置决策 |
+| 0003 | 依赖方向用机械守卫，不靠自觉 | accepted | AGENTS.md 第 7 条（P0 归档时确立） |
+| 0004 | OpenAPI 单源：schemars 派生 + 从 `ROUTES` 投影 | accepted | CR-004 |

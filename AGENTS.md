@@ -505,7 +505,7 @@
 6. **禁止假测试报告**：planned 不等于通过；Unknown、跳过、过期报告如实记录，不把设计当证据。
 7. **禁止破坏依赖方向（G-1）**：`bod-core` 不依赖 DB/Web/Tauri/Agent SDK 或上层 crate；
    `bod-app` 不反向依赖 CLI/桌面壳。
-8. **禁止无证据引入重依赖**：新增默认依赖或一级对象须记录复杂度准入理由（§2.4）并锁定版本。当前新增依赖是 `serde`/`toml`（任务 1.2 配置 schema）、`rusqlite`（任务 2.6 单写事务，bundled 避免系统 SQLite）与 `serde_json`（任务 5.1 执行协议 JSON 契约，需未知字段拒绝），理由与锁定版本见 `docs/spec-notes/p0-d0-config.md`、`docs/spec-notes/p0-execution-protocol.md`、`docs/compat/toolchain.md`；`bod-core` 仍保持零外部依赖。
+8. **禁止无证据引入重依赖**：新增默认依赖或一级对象须记录复杂度准入理由（§2.4）并锁定版本。当前新增依赖是 `serde`/`toml`（任务 1.2 配置 schema）、`rusqlite`（任务 2.6 单写事务，bundled 避免系统 SQLite）、`serde_json`（任务 5.1 执行协议 JSON 契约，需未知字段拒绝）与 `schemars`（CR-004 从 DTO 派生 JSON Schema，ADR-0004），理由与锁定版本见 `docs/spec-notes/p0-d0-config.md`、`docs/spec-notes/p0-execution-protocol.md`、`adr/0004-openapi-single-source.md`、`docs/compat/toolchain.md`；`bod-core` 仍保持零外部依赖。
 9. **禁止把 Fake Executor 当生产能力**：它只用于故障 conformance，不写入支持矩阵 Supported。
 10. **禁止以单平台绿灯代替跨平台通过**：`#[cfg(unix)]` / `#[cfg(windows)]` 分支，以及只在这些分支下
     编译的测试（如 `descriptor_file_is_owner_only`、`diff_gate_detects_real_symlink_escape`），
@@ -543,6 +543,15 @@
     的漂移检查**不算调用方**——它让 1,424 行的 `coverage_receipt` 在门禁全绿的同时零引用。
     检查用 `cargo run -p xtask -- reach --check verification/reach-baseline.tsv`：
     只对**相对基线新增**的不可达模块报警，既有孤岛不返红（它们是待接线资产或待判定沉淀）。
+16. **禁止手写 OpenAPI 文档或第二份路径表**：契约从 `ROUTES` 投影
+    （`crates/bod-app/src/openapi.rs`），新增端点必须同时写 `contract`（summary / request /
+    query / responses），漏写编译不过。两条绝对不能手写：
+    - **401**：拒绝码只能来自 `Auth::Bearer(code)` / `Auth::InHandler(code)`，
+      在 `contract.responses` 里再写一条 401 会被 `openapi::document` 直接拒绝；
+    - **404**：分发层对所有未匹配请求都答它，由投影统一添加。
+    改 DTO 或路由后必须重生成 `verification/openapi.json`
+    （`BOD_BLESS_OPENAPI=1 cargo test -p bod-app --test openapi_contract`）并与代码一起提交，
+    否则 `checked_in_document_matches_generated_one` 会红。
 
 ## 验证与完成规则
 
@@ -554,7 +563,8 @@
 - **架构决策必须落地**：实现与 V2.9.6 规格冲突（尤其 §3 技术栈）时，要么改代码，
   要么在 `adr/` 新增 ADR 记录「为什么推翻 + 代价 + 可机械判断的撤销条件」，
   两者必有其一。当前已记录：ADR-0001（保留同步传输栈，不引 Tokio/Axum）、
-  ADR-0002（工作台暂不引前端框架）。`docs/` 被 gitignore，决策记录不得放在那里。
+  ADR-0002（工作台暂不引前端框架）、ADR-0003（依赖方向用机械守卫）、ADR-0004（OpenAPI 单源：schemars 派生 + 从 `ROUTES` 投影）。
+  `docs/` 被 gitignore，决策记录不得放在那里。
 - **跨平台验证触发条件**：改完代码跑 `cargo run -p xtask -- cross`（默认比较 `HEAD~1..HEAD`；
   提交前用 `--worktree` 或 `--staged`）。退出码即结论：
   `0` 可以只跑单平台，`1` 必须跨平台，`2` 无法判定——**2 按必须跨平台处理，不得当作放行**。

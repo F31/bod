@@ -1,0 +1,344 @@
+{
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "description": "统一错误体。\n\n两种形态共用一个类型：\n- 带解释：`{\"error\":\"BOD_HOST_REJECTED\",\"reason\":\"...\"}`，用于需要区分\n  「为什么拒」的场景（Host/Origin 校验、事件流授权）；\n- 只有码：`{\"error\":\"BOD_NOT_FOUND\"}`，用于码本身已经说清的场景。\n\n`reason` 用 `skip_serializing_if` 而不是输出 `null`：既有客户端按「字段存在与否」\n判断是否有解释，补一个 `null` 会改变它们的解析结果。",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "HandshakeRequest": {
+        "description": "`POST /_bod/handshake` 的请求体。\n\n令牌在**请求体**而不是 `Authorization` 头：调用这一刻客户端还没有会话密钥，\n头部放不进去。缺字段、类型不对、JSON 畸形一律落到同一个 401——不区分原因，\n免得把「令牌错」与「请求畸形」的差别变成探测手段。\n\n不设 `deny_unknown_fields`：旧客户端可能带多余字段，加严会是破坏性变更。",
+        "properties": {
+          "handshake_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "handshake_token"
+        ],
+        "title": "HandshakeRequest",
+        "type": "object"
+      },
+      "HandshakeResponse": {
+        "description": "`POST /_bod/handshake` 的响应。\n\n这是唯一会把 `session_key` 写进响应体的地方。字段顺序与旧字面量一致，\n但**顺序不是契约**——客户端按名取值。测试锁顺序只是为了证明重构没改字节。",
+        "properties": {
+          "instance_id": {
+            "type": "string"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "session_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol",
+          "instance_id",
+          "pid",
+          "session_key"
+        ],
+        "title": "HandshakeResponse",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "`GET /_bod/health` 的响应。\n\n只回存活事实：不含会话密钥、不含业务数据。`ok` 恒为 `true`——探测失败时\n根本没有响应，所以这里不需要「false 的 ok」。",
+        "properties": {
+          "instance_id": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "protocol",
+          "instance_id",
+          "pid"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "ShutdownResponse": {
+        "description": "`POST /_bod/shutdown` 的响应。\n\n`stopping: true` 只表示「授权停止已置位」，不表示进程已经退出——\n退出发生在 `run` 的下一轮循环。客户端要确认退出，应看描述文件是否消失。",
+        "properties": {
+          "stopping": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopping"
+        ],
+        "title": "ShutdownResponse",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "控制面会话密钥，由 POST /_bod/handshake 取得；不发 CORS 预检",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "本机控制面：只监听回环，校验 Host/Origin，不发 CORS。文档由 ROUTES 与 DTO 生成，不手写。",
+    "title": "bod 控制面",
+    "version": "bod-host/v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/_bod/events": {
+      "get": {
+        "description": "令牌在 Authorization 头；额外拒绝查询串令牌与非法游标，需按原因分别说明",
+        "operationId": "get_bod_events",
+        "parameters": [
+          {
+            "description": "起始游标；同时带 Last-Event-ID 头时以头为准",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`0` 表示只回放历史不跟随；缺省跟随",
+            "in": "query",
+            "name": "follow",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "单次连接最长毫秒数，缺省 30000，夹在 100..=60000",
+            "in": "query",
+            "name": "max_ms",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "心跳间隔毫秒，缺省 1000，夹在 20..=10000",
+            "in": "query",
+            "name": "heartbeat_ms",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "SSE 帧流；鉴权失败时先回 401 再断开，不会以流内事件表达错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_STREAM_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          }
+        },
+        "summary": "订阅事件流（SSE）",
+        "x-bod-auth": "in-handler"
+      }
+    },
+    "/_bod/handshake": {
+      "post": {
+        "description": "客户端此刻还没有会话密钥，令牌在请求体 handshake_token 字段",
+        "operationId": "post_bod_handshake",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandshakeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandshakeResponse"
+                }
+              }
+            },
+            "description": "会话密钥与控制面身份；密钥只出现在这个响应里"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_HANDSHAKE_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          }
+        },
+        "summary": "用一次性握手令牌换取会话密钥",
+        "x-bod-auth": "in-handler"
+      }
+    },
+    "/_bod/health": {
+      "get": {
+        "description": "存活探测只回协议名、实例 ID 与 pid，不含令牌与业务事实",
+        "operationId": "get_bod_health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "存活事实：协议名、实例 ID 与 pid"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          }
+        },
+        "summary": "存活探测",
+        "x-bod-auth": "public"
+      }
+    },
+    "/_bod/shutdown": {
+      "post": {
+        "description": "只认 Authorization: Bearer 会话密钥，分发前统一校验",
+        "operationId": "post_bod_shutdown",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShutdownResponse"
+                }
+              }
+            },
+            "description": "已置位停止意图；进程退出需另看描述文件是否消失"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_SHUTDOWN_DENIED"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未通过鉴权；`error` 为本端点固定的拒绝码，客户端按码分支"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "BOD_NOT_FOUND"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不存在或方法不匹配；两者对外同答 404"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "授权停止宿主",
+        "x-bod-auth": "bearer"
+      }
+    }
+  }
+}
