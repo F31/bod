@@ -4,11 +4,17 @@
 
 ## 1. 测量基线与工具
 
-- [ ] 1.1 实现 `xtask bench`/诊断命令与样本生成器，记录 OS/CPU/Rust/构建参数/SQLite 同步策略/数据规模/缓存冷热，验证另一次运行能以相同条件复现并列出差异项。
-- [ ] 1.2 建立 headless、可选 Web、Tauri 桌面与移动发布的分形态报告，验证 Web 宿主开销不冒充桌面总内存、headless 数字不直接套用桌面。
-- [ ] 1.3 实现测量项集合（空闲 RSS、冷启动、事务 p99、事件吞吐、候选选择 p95/p99、Web 可见、十万事件重启、包体积），验证每项含样本数、命令、环境与失败原因且不把吞吐与尾延迟合并宣称达标（§38.2）。
-- [ ] 1.4 实现报告归档与状态字段（Target/Measured/Unverified），验证缺样本或命令的报告不进入容量决策且不被记为达标。
-- [ ] 1.5 编写 P7 测量手册到 `docs/spec-notes/p7-measurement.md`，验证手册中每个目标值标为待实测而非承诺。
+- [x] 1.1 实现 `xtask bench`/诊断命令与样本生成器，记录 OS/CPU/Rust/构建参数/SQLite 同步策略/数据规模/缓存冷热，验证另一次运行能以相同条件复现并列出差异项。
+      → `cargo run -p xtask -- bench [--out PATH]`；`perf_probe::environment` 七类字段 + `EnvironmentRecord::diff` 逐字段对照（`note` 不参与比较），差异项写进报告抬头；用例 `task_1_1_environment_diff_lists_reproducibility_gaps`、`task_1_1_measurement_conditions_cover_every_required_field`、`task_1_1_environment_record_is_complete`。
+- [x] 1.2 建立 headless、可选 Web、Tauri 桌面与移动发布的分形态报告，验证 Web 宿主开销不冒充桌面总内存、headless 数字不直接套用桌面。
+      → `FormFactor` 四形态 + `by_form_factor`/`may_claim_form_factor`/`guard_form_factor`；Web/桌面/移动项全部 `Unverified` 并写明缺口；用例 `task_1_2_headless_numbers_never_stand_in_for_desktop`、`task_1_2_gap_items_are_all_unverified_and_per_form_factor`、`task_1_2_manual_declares_per_form_factor_reporting`。
+- [x] 1.3 实现测量项集合（空闲 RSS、冷启动、事务 p99、事件吞吐、候选选择 p95/p99、Web 可见、十万事件重启、包体积），验证每项含样本数、命令、环境与失败原因且不把吞吐与尾延迟合并宣称达标（§38.2）。
+      → 18 项，见 `docs/spec-notes/p7-measurement.md` §3；吞吐拆 `event_throughput_batched`（每批 fsync）与 `event_throughput_durable`（每条 fsync），`may_claim_all_targets` 任一未达即 false、`unresolved()` 点名；用例 `task_1_3_every_item_carries_samples_command_and_failure_reason`、`task_1_3_throughput_and_tail_latency_are_separate_items`、`task_1_3_rendered_report_carries_command_samples_and_status_per_item`、`task_1_3_manual_inventory_matches_probe_inventory`。
+- [x] 1.4 实现报告归档与状态字段（Target/Measured/Unverified），验证缺样本或命令的报告不进入容量决策且不被记为达标。
+      → `MeasureStatus` 三档 + `usable_for_decision()`/`may_claim_target()`；`Target` 项让整份报告退出决策；`bench` 退出码反映报告可用性（漂移信号，不是性能结论）；用例 `task_1_4_incomplete_reports_never_enter_capacity_decisions`、`task_1_4_state_machine_is_three_valued_and_blocks_unmeasured_items`。
+- [x] 1.5 编写 P7 测量手册到 `docs/spec-notes/p7-measurement.md`，验证手册中每个目标值标为待实测而非承诺。
+      → 手册 §3 目标列整体标 `Target（待实测确认）`，每格要么是数值目标要么声明"无冻结目标"；§6 逐条列未取得项与前提；用例 `task_1_4_every_target_in_manual_is_a_pending_measurement_not_a_promise`、`task_1_5_manual_is_linked_from_tasks_and_agents`。
+
 
 ## 2. 瓶颈定位
 

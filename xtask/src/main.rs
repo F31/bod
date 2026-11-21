@@ -3,6 +3,7 @@
 //! 当前实现：
 //! - `verify --stage P0`：G-1 依赖方向守卫 + AGENTS.md 存在性校验。
 //! - `migration-check`：校验全部迁移（D1 领域 + D2 队列）含必需表且不含破坏性 DDL。
+//! - `bench`：跑 P7 容量基线（`perf_probe::run`），输出 Markdown，可选写文件。
 //! - `--self-test`：违例注入测试，证明守卫确实能阻断违例（不是永远返回通过）。
 //!
 //! 守卫规则来自 V2.9.6 §37.2 与 P0 design 决策 11：
@@ -492,10 +493,77 @@ serde = "1"
     }
 }
 
+fn environment_note() -> String {
+    let rustc = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{} / {} / {}", env::consts::OS, env::consts::ARCH, rustc)
+}
+
+fn commit_note() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// P7 容量基线：跑一遍测量，打印 Markdown，可选落到文件。
+///
+/// 返回 `false` 表示**报告本身不可作为容量决策输入**（有 Target 项或某项缺命令/样本），
+/// 这是 bench 的漂移信号，不是性能结论。
+fn bench(out_path: Option<&str>) -> bool {
+    let report = match bod_app::perf_probe::run(&environment_note(), &commit_note()) {
+        Ok(report) => report,
+        Err(err) => {
+            println!("[bench] FAIL 测量未完成：{err}");
+            return false;
+        }
+    };
+    let markdown = bod_app::capacity_evaluation::render_markdown(&report, &[]);
+    if let Some(path) = out_path {
+        if let Err(err) = fs::write(path, &markdown) {
+            println!("[bench] FAIL 报告写入 {path} 失败：{err}");
+            return false;
+        }
+        println!("[bench] 报告已写入 {path}");
+    } else {
+        println!("{markdown}");
+    }
+    println!(
+        "[bench] Measured {} / Unverified {} / Target {}；可作决策输入：{}；全部目标达标：{}",
+        report.measured_count(),
+        report.unverified_count(),
+        report.target_count(),
+        if report.usable_for_decision() {
+            "是"
+        } else {
+            "否"
+        },
+        if report.may_claim_all_targets() {
+            "是"
+        } else {
+            "否"
+        }
+    );
+    let unresolved = report.unresolved();
+    if !unresolved.is_empty() {
+        println!("[bench] 未能宣称达标的项：{}", unresolved.join(", "));
+    }
+    report.usable_for_decision()
+}
+
 fn print_help() {
     println!("usage: xtask <command> [options]");
     println!("  verify --stage P0   G-1 依赖方向与 AGENTS.md 声明校验");
     println!("  migration-check     全部迁移表覆盖与破坏性 DDL 检查");
+    println!("  bench [--out PATH]  P7 容量基线实测（Markdown 报告）");
     println!("  --self-test         违例注入自测");
 }
 
@@ -506,6 +574,8 @@ fn main() -> ExitCode {
     let passed = match args.as_slice() {
         [cmd] if cmd == "--self-test" || cmd == "self-test" => self_test(),
         [cmd] if cmd == "migration-check" => migration_check(&root),
+        [cmd] if cmd == "bench" => bench(None),
+        [cmd, flag, path] if cmd == "bench" && flag == "--out" => bench(Some(path.as_str())),
         [cmd, opt, stage] if cmd == "verify" && opt == "--stage" && stage == "P0" => {
             verify_stage_p0(&root)
         }

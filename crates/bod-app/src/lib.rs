@@ -14,6 +14,7 @@ pub mod budget_dispatch_gate;
 pub mod cancel_reconciliation;
 pub mod canonical_json;
 pub mod capability_dispatch;
+pub mod capacity_evaluation;
 pub mod cas;
 pub mod catalog_upgrade;
 pub mod claim_concurrency;

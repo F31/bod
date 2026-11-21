@@ -412,6 +412,22 @@
   **P6 的 I/G 绑定（G-19/G-23/G-34/G-46/G-47、`invariant_i_15`/`invariant_i_57`）保持 planned**：
   `Supported` 只表示该适配器自己的闸门用例全绿，Fake Executor 即使跑通自己的套件也照样
   `is_production_capable() == false`，自测报告不是生产能力，支持矩阵不因此升 Supported。
+- **P7 容量评估（进行中）**：口径与治理在 `bod-app::capacity_evaluation`，实测在
+  `bod-app::perf_probe`（入口 `cargo run -p xtask -- bench`，可 `--out` 落盘；`cargo run -p bod -- perf`
+  同一份测量）。三条不许松的口径：①状态三档 `Target`/`Measured`/`Unverified`，缺样本或缺命令
+  的报告不进入容量决策，`Target` 项让整份报告退出决策；②形态分报，headless 的空闲 RSS 不得
+  冒充桌面总内存，`may_claim_form_factor` 按形态逐项成立；③吞吐与尾延迟分别是两个口径
+  （`event_throughput_batched` 每批一次 fsync，`event_throughput_durable` 每条一次），
+  任一项未达标 `may_claim_all_targets` 即为 false 且 `unresolved()` 点名。毕业判定只看四类信号
+  （RTO、单写争用、体积压力、多机/容灾），日均事件数只是观察值，`graduation(&[], Some(n))` 直接
+  返回 `RejectedByEventCount`；方案对比必须四类齐备且四项记录不空，DAO 替换一律不算语义兼容；
+  `GraduationDecision` 只追加（`record` 拒覆盖、`revise` 追加并保留历史），缺项进不了日志；
+  容量阶段内任何换引擎/降 `synchronous`/放宽事务/跳门禁都被 `guard_change_in_capacity_stage` 阻断，
+  性能数字也不得扩大支持矩阵（`guard_support_promotion`）。16 条命名用例 + 8 条漂移检查，
+  手册见 `docs/spec-notes/p7-measurement.md`，台账见 `docs/reports/p7-baseline-<platform>.md`。
+  **未取得的部分**：`cold_start_to_api_ready`（bench 不启动宿主监听）、Windows 侧 `idle_rss`
+  （读不到 `/proc/self/status`）、`idle_cpu_ratio`、Web 可见延迟、桌面三项与桌面包体积、移动包体积
+  全部保持 `Unverified` 并写明缺口；`May claim` 因此为 false，报告不会给出"全部达标"。
 - **唯一权威来源**：`docs/bod-V2.9.6-智能体协作开放平台完整产品与开发方案.md`；
   架构规范见 `openspec/config.yaml`。冲突时以方案文档为准并同步修订配置。
 

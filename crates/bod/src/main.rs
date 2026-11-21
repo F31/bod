@@ -283,7 +283,7 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         [cmd] if cmd == "perf" => {
             let report = bod_app::perf_probe::run(&environment_note(), &commit_note())?;
-            Ok(bod_app::perf_probe::render_markdown(&report))
+            Ok(bod_app::capacity_evaluation::render_markdown(&report, &[]))
         }
         [cmd, sub] if cmd == "adapter" && sub == "describe" => {
             let adapter = adapter_or_err()?;
