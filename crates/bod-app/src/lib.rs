@@ -60,6 +60,7 @@ pub mod observation_redaction;
 pub mod openspec_integration;
 pub mod perf_probe;
 pub mod protocol_reliability;
+pub mod readonly_api;
 pub mod rebuild_precheck;
 pub mod recovery_models;
 pub mod release_acceptance;

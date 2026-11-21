@@ -360,8 +360,8 @@
   验收需要真实多主体（成员 + Agent + 客户 + 连接器）与真实网关，机器不能生成；
   P5 的 I/G 绑定（G-13/G-21/G-22/G-25、I-14/I-19/I-23/I-44）全部保持 planned。
   P4 的 I/G 绑定**全部保持 planned**。
-- **P6 进行中（2026-11-21）**：`openspec/changes/p6-open-extension` 任务 1.1—1.6、2.1—2.7 已勾选，
-  2.8 未勾选（需双机真实环境），3.x—5.x 未开始（4.6 需真实 iOS/Android 设备）。
+- **P6 进行中（2026-11-21）**：`openspec/changes/p6-open-extension` 任务 1.1—1.6、2.1—2.7、3.1—3.5
+  已勾选，2.8 未勾选（需双机真实环境），4.x—5.x 未开始（4.6 需真实 iOS/Android 设备）。
   `bod-app::extension_sdk` 承接第三方适配的接入边界：描述符带版本/平台/schema 版本/能力分项与
   限制，握手先判协议版本再逐项判必需能力与证据门槛，**拒绝只作用于新扩展任务**（缺 `Delegation`
   的旧适配器仍走原本地路径）；安装按「版本 → digest → 来源 → 许可证 → 协议 → schema → fixture →
@@ -388,6 +388,15 @@
   外部动作按稳定业务键查询，已生效只补记一次、确认不存在才一次补写、不可查询显示待核实且
   零盲写，目标不能隔离旧写入即阻塞并点名责任人（RM02）。16 条命名用例 + 6 条漂移检查，
   说明见 `docs/spec-notes/p6-remote.md`。
+  `bod-app::readonly_api`（G-34 / I-55）承接只读适配：七类只读动作的副作用计数结构性为 0
+  （不建 Run/Binding、不发 invocation、不启动 Agent），有界上限 200 行且截断如实标记；
+  按钮提示只产 available/hidden 两个字符串，放行只由 `authorize_readonly` 判定；
+  Company→Project→客户→工单四层过滤在返回内容前完成，`total` 只等于可见条数、`withheld`
+  只有数量，导出文件名只含可见行数，附件不可见与不存在给同一答案；订阅每次续传先鉴权再补拉，
+  撤权即拒、游标超保留期读快照基准；投影缓存键含身份/输入/索引/工具四分量，
+  Manifest/账本/租约/幂等回执/ACK 游标永不进可淘汰集合，授权修订或 TTL 变化即 miss 并显示重算中；
+  审计只留 `principal:`/`object:`/`project:` 引用与策略修订，无令牌与密文。8 条命名用例 +
+  6 条漂移检查，说明见 `docs/spec-notes/p6-readonly.md`。
   **P6 的 I/G 绑定（G-19/G-23/G-34/G-46/G-47、`invariant_i_15`/`invariant_i_57`）保持 planned**：
   `Supported` 只表示该适配器自己的闸门用例全绿，Fake Executor 即使跑通自己的套件也照样
   `is_production_capable() == false`，自测报告不是生产能力，支持矩阵不因此升 Supported。
