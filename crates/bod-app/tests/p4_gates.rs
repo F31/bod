@@ -123,9 +123,7 @@ fn p4_gates_are_not_bound_as_implemented_yet() {
     // 继续指向 artifact_acceptance 的既有用例。
     let entry = |gate: &str| {
         let marker = format!("- id: {gate}");
-        let Some(start) = GATES.find(&marker) else {
-            return None;
-        };
+        let start = GATES.find(&marker)?;
         let rest = &GATES[start + marker.len()..];
         Some(&rest[..rest.find("\n- id: ").unwrap_or(rest.len())])
     };

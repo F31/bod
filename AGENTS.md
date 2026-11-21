@@ -43,7 +43,11 @@
   `bod-app::workspace_safety` 提供每 Attempt 独立 worktree/分支、`write_scope` diff 门禁、
   共享资源（migration/API/公共类型等）登记与合并门禁、脏现场保留登记、端口与目录隔离（G-29 implemented）；
   `bod-app::context_handoff` 提供确定装配的 ContextBundle（I-17）、按 revision/digest 的不可变片段缓存与撤权复核、
-  指令优先级与 Question 归口、会话复用与角色/Profile/授权重置（I-36、G-11 implemented；G-48 因容量与热点回源未实现而登记 `unverified`）。
+  指令优先级与 Question 归口、会话复用与角色/Profile/授权重置（I-36、G-11 implemented）；
+  片段缓存已按 `cache.max_entries` / `cache.max_bytes` 有界（LRU、非预分配）并支持被淘汰片段回源，
+  G-48 由 `unverified` 升为 implemented（撤权时拒绝命中且不得借回源绕权）。
+  `bod-app::desktop_lifecycle` 提供连接归属、退出顺序、单宿主租约、sidecar 平台清单与支持等级判定，
+  但 G-51 仍为 `planned`：真机 Tauri/WebView 与平台矩阵 conformance 报告未取得，单测不冒充门禁通过。
   **本切片内存值类型 + 只读装配，未落 `workspaces`/`context_bundles` 表**，落库留到 4.x 直派闭环。
   已完成切片 3「讨论与澄清」（任务 3.1—3.4）——`bod-app::clarity_dialogue` 提供带编辑历史的讨论记录、
   事件→控制命令的唯一映射（评论/不可信材料恒零命令）、Question/NeedsInput 三态与超时保持 pending、

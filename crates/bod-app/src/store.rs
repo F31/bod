@@ -273,7 +273,7 @@ impl SqliteStore {
     #[doc(hidden)]
     pub fn apply_bench_pragmas(&self) -> Result<(), StoreError> {
         self.conn
-            .pragma_update(None, "cache_size", BENCH_CACHE_SIZE_KIB as i64)?;
+            .pragma_update(None, "cache_size", BENCH_CACHE_SIZE_KIB)?;
         self.conn.pragma_update(None, "temp_store", "MEMORY")?;
         Ok(())
     }

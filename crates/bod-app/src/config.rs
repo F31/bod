@@ -76,7 +76,7 @@ pub const FIELD_DOCS: &[FieldDoc] = &[
         path: "desktop.close_action",
         ty: "enum",
         default: "detach",
-        semantics: "detach 仅退出桌面，不终止外部已有宿主；首次使用展示后台运行策略（§37.14）。",
+        semantics: "detach 仅退出桌面，不终止外部已有宿主；stop_host 只对本次桌面启动的宿主生效，外部宿主一律降级为 detach 并记录事实；未知取值回落 detach（§37.14、desktop_lifecycle::run_exit）。",
     },
     FieldDoc {
         path: "sqlite.busy_timeout_ms",
@@ -183,11 +183,17 @@ impl HostMode {
 pub enum CloseAction {
     #[default]
     Detach,
+    /// 关闭窗口时停止**本次启动的**宿主；外部已有宿主一律按 `detach` 处理
+    /// （判定与降级记录在 `desktop_lifecycle::run_exit`）。
+    StopHost,
 }
 
 impl CloseAction {
     pub fn as_str(self) -> &'static str {
-        "detach"
+        match self {
+            Self::Detach => "detach",
+            Self::StopHost => "stop_host",
+        }
     }
 }
 

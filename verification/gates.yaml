@@ -336,9 +336,10 @@
   kind: gate
   requirement: 缓存隔离/撤权/清空/容量与热点回源
   module: bod-app::context_handoff
-  status: unverified
+  tests: bod-app::context_handoff::tests::cache_capacity_is_bounded_not_preallocated_and_evicts_lru
+  status: implemented
   evidence: cargo test -p bod-app context_handoff
-  note: 本切片只覆盖隔离（跨 Company/Project 拒绝命中）、撤权（权限摘要变化即拒绝）与清空；容量上限与热点回源未实现，按未验证登记，不判通过
+  note: "Tier A3：容量按 cache.max_entries / cache.max_bytes 双维度有界且非预分配，LRU 淘汰；单条超上限拒绝写入（不写成功再立刻淘汰）；上限 0 视为关闭缓存而非无界。热点回源由 get_or_load 承担：被淘汰片段从来源重读并以 FragmentSource::Reloaded 标记，回源失败与摘要不符的内容不缓存，撤权时拒绝命中且不借回源绕过权限（failed_or_tampered_reload_is_never_cached / revocation_blocks_reload_instead_of_fetching_again）。隔离与撤权仍由 cache_rejects_cross_company_reads、permission_revocation_rejects_cache_hit_and_reassembles 覆盖，清空由 cache_capacity_is_bounded_not_preallocated_and_evicts_lru 断言即时生效"
 - id: G-49
   kind: gate
   requirement: 迁移 lint/旧库升级/高风险例外/恢复
@@ -350,10 +351,10 @@
 - id: G-51
   kind: gate
   requirement: Tauri 连接/sidecar/退出/平台组合/单宿主
-  module: bod-app::desktop_lifecycle（P1 未实现，P0 已有 apps/desktop/shell 最小路径）
+  module: bod-app::desktop_lifecycle
   status: planned
-  evidence: cargo test -p bod-desktop
-  note: "P1 proposal 引用但 P1 非目标：P0 8.1 只验证窗口能起/能关/关得对（detach + finish）；sidecar 分发、平台组合矩阵、单宿主冲突与桌面业务页面渲染均未有 conformance 报告。按 V2.9.6 §39.15 保持 planned，不填 tests、不宣称 Supported；§39.14 预期的 bod-app::desktop_lifecycle 模块尚不存在，不得用 shell 测试冒充该门禁通过"
+  evidence: cargo test -p bod-app desktop_lifecycle && cargo test -p bod-desktop
+  note: "A3 起 bod-app::desktop_lifecycle 提供可测判定：连接归属 → 退出顺序（停新工作 → 等在途 → 断连 → 仅自启才停宿主 → 交还租约，外部宿主永不出现在停止步骤）；单宿主租约（同 Company 第二实例拒绝、交还只认持有者、回收需匹配 pid 或操作者证据，超时不算证据）；sidecar 清单解析与平台支持等级（无条目 unsupported、有条目无通过报告只能 declared_only）；壳不得直接写业务库（I-77）。本地 11 例通过。仍保持 planned：Tauri 真机窗口/WebView2、macOS 与 Linux 打包、sidecar 实际分发与平台组合 conformance 报告均未取得，单测不得冒充门禁通过，按 V2.9.6 §39.15 不填 tests、不宣称 Supported"
 - id: G-50
   kind: gate
   requirement: 验证索引全量/真实目标与断言/支持声明门禁

@@ -64,7 +64,7 @@ fn open_store(path: &Path) -> Result<SqliteStore, String> {
 
 fn raw_conn(path: &Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(path).map_err(|err| err.to_string())?;
-    conn.pragma_update(None, "cache_size", BENCH_CACHE_SIZE_KIB as i64)
+    conn.pragma_update(None, "cache_size", BENCH_CACHE_SIZE_KIB)
         .map_err(|err| err.to_string())?;
     conn.pragma_update(None, "temp_store", "MEMORY")
         .map_err(|err| err.to_string())?;

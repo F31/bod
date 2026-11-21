@@ -131,9 +131,7 @@ fn p6_gates_are_not_bound_before_the_exit_is_met() {
     // 只恢复规格覆盖，不提前宣称 implemented。
     let entry = |gate: &str| {
         let marker = format!("- id: {gate}");
-        let Some(start) = GATES.find(&marker) else {
-            return None;
-        };
+        let start = GATES.find(&marker)?;
         let rest = &GATES[start + marker.len()..];
         Some(&rest[..rest.find("\n- id: ").unwrap_or(rest.len())])
     };

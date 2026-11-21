@@ -627,7 +627,7 @@ fn receipt_scope() {
     };
     assert!(
         matches!(
-            cache_lookup(&[entry.clone()], &key, &internal_query),
+            cache_lookup(std::slice::from_ref(&entry), &key, &internal_query),
             CacheLookup::Hit(_)
         ),
         "内部卡可看验证详情"

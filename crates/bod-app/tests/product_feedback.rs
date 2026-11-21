@@ -588,7 +588,7 @@ fn backlog_only() {
         ),
         "生产发布措辞必须转治理流程"
     );
-    assert!(classification.is_learning() == false);
+    assert!(!classification.is_learning(), "治理路由不能同时算学习样本");
 
     let policy = bod_app::feedback_knowledge::AcceptancePolicy {
         actor_id: text(&case, "policy_actor").to_string(),

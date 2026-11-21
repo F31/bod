@@ -7,7 +7,8 @@
 //! 1. [`assemble`]：把规格/Profile/Skill/Preference/输入/运行时配置冻结成 [`ContextBundle`]，
 //!    清单摘要由规范化正文派生，相同输入必然得到相同 id 与摘要；
 //! 2. [`FragmentCache`]：按 `revision + digest` 复用不可变片段，命中时**重查**当前权限，
-//!    撤权只拒绝命中，不返回旧内容；
+//!    撤权只拒绝命中，不返回旧内容；容量按 `cache.max_entries` / `cache.max_bytes` 有界
+//!    （LRU 淘汰、非预分配），被淘汰的热点片段经 [`FragmentCache::get_or_load`] 回源；
 //! 3. [`reconcile`]：按「用户目标与验收 > 项目授权规则 > Profile > Preference > 外部材料」
 //!    应用指令；外部网页/Issue/工具输出/反馈一律标不可信，冲突只形成 [`Question`]；
 //! 4. [`SessionRegistry`]：会话复用要求同一 Company/Project/输入修订/有效权限，角色、Profile
@@ -50,6 +51,10 @@ pub enum AssemblyError {
     ExternalOriginRequired { kind: OriginKind },
     /// 运行时配置出现空键。
     EmptyRuntimeConfigKey,
+    /// 单个片段超过缓存字节上限：拒绝写入，不静默丢弃（否则"写成功但取不到"）。
+    FragmentExceedsCapacity { bytes: usize, limit: usize },
+    /// 缓存上限为 0（关闭缓存）：写入直接拒绝，不假装成功。
+    CacheDisabled,
 }
 
 impl std::fmt::Display for AssemblyError {
@@ -70,6 +75,11 @@ impl std::fmt::Display for AssemblyError {
                 write!(f, "{} 不是外部来源，不能标为不可信", kind.as_str())
             }
             Self::EmptyRuntimeConfigKey => write!(f, "运行时配置存在空键"),
+            Self::FragmentExceedsCapacity { bytes, limit } => write!(
+                f,
+                "单个片段 {bytes} 字节超过缓存上限 {limit} 字节，拒绝写入而不是写后立即淘汰"
+            ),
+            Self::CacheDisabled => write!(f, "缓存上限为 0（已关闭），拒绝写入片段"),
         }
     }
 }
@@ -341,15 +351,162 @@ impl CacheRejection {
     }
 }
 
+/// 缓存容量上界。**不是启动预分配**：只在上界内按需增长（§37.11、§37.14）。
+///
+/// 两个维度同时生效，任一先到就淘汰：
+/// - `max_entries`：片段条数；
+/// - `max_bytes`：片段内容字节（键 + 正文），不含 `BTreeMap` 节点等运行时开销，
+///   所以它是"内容上界"，不是"进程内存上界"。
+///
+/// 任一字段为 0 表示**关闭缓存**，而不是"无限"——配置写错不该变成无界占用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheLimits {
+    pub max_entries: usize,
+    pub max_bytes: usize,
+}
+
+impl CacheLimits {
+    /// 与 `cache.max_entries` / `cache.max_bytes` 默认值一致（1024 条 / 8 MiB）。
+    pub const DEFAULT: Self = Self {
+        max_entries: 1024,
+        max_bytes: 8 * 1024 * 1024,
+    };
+
+    pub fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    /// 从生效配置取上限，保证 `explain` 里显示的默认值与缓存实际行为是同一份数字。
+    pub fn from_config(config: &crate::config::CacheConfig) -> Self {
+        Self {
+            max_entries: usize::try_from(config.max_entries).unwrap_or(usize::MAX),
+            max_bytes: usize::try_from(config.max_bytes).unwrap_or(usize::MAX),
+        }
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.max_entries == 0 || self.max_bytes == 0
+    }
+}
+
+impl Default for CacheLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// 缓存计数。**命中与回源分开记**：回源是把片段重新读回来的真实开销，
+/// 不能算作命中，否则"缓存有效率"会被自己的淘汰策略美化。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    /// 命中且权限复核通过。
+    pub hits: usize,
+    /// 未命中（从未缓存、已被淘汰，或已关闭缓存）。
+    pub misses: usize,
+    /// 未命中后经回源装载成功。
+    pub reloads: usize,
+    /// 因容量上限被淘汰的条数。
+    pub evictions: usize,
+    /// 命中但被拒绝（跨 Company/Project、撤权）。
+    pub rejections: usize,
+}
+
+/// 片段来自哪里。界面与报告据此区分"命中缓存"与"重新回源"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FragmentSource {
+    /// 命中已有条目，且已通过当前权限复核。
+    Cache,
+    /// 未命中（或被淘汰），由调用方提供的回源函数重新装载。
+    Reloaded,
+}
+
+/// 回源结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedFragment {
+    pub fragment: CachedFragment,
+    pub source: FragmentSource,
+}
+
+impl LoadedFragment {
+    pub fn body(&self) -> &str {
+        &self.fragment.body
+    }
+
+    /// 是否真的走了回源（成本已发生）。
+    pub fn is_reload(&self) -> bool {
+        self.source == FragmentSource::Reloaded
+    }
+}
+
+/// 带回源取片段时的失败分类：命中被拒 / 回源失败 / 写入被拒。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheLoadError {
+    /// 条目存在但当前权限不允许返回。
+    Rejected(CacheRejection),
+    /// 回源函数失败；失败结果**不进入缓存**，下次仍会重新回源。
+    LoadFailed(String),
+    /// 回源内容无法写入缓存（摘要不符、单条超上限、缓存已关闭）。
+    NotCached(AssemblyError),
+}
+
+impl std::fmt::Display for CacheLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(rejection) => write!(f, "{}", rejection.explain()),
+            Self::LoadFailed(reason) => write!(f, "回源失败：{reason}"),
+            Self::NotCached(error) => write!(f, "回源内容未能进入缓存：{error}"),
+        }
+    }
+}
+
 /// 按 `kind:id@revision#digest` 键复用片段。内容变化必然产生新键，旧键不覆盖。
-#[derive(Debug, Default)]
+///
+/// 容量上限按 [`CacheLimits`] 生效，淘汰策略是 **LRU**（最近最少使用）。
+/// 淘汰不是"丢数据"：调用方经 [`FragmentCache::get_or_load`] 请求时，被淘汰的片段
+/// 会从来源重新装载（热点回源），装载结果同样要过摘要校验与权限隔离。
+#[derive(Debug)]
 pub struct FragmentCache {
-    entries: BTreeMap<String, CachedFragment>,
+    entries: BTreeMap<String, CacheSlot>,
+    limits: CacheLimits,
+    bytes: usize,
+    clock: u64,
+    stats: CacheStats,
+}
+
+#[derive(Debug)]
+struct CacheSlot {
+    fragment: CachedFragment,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl Default for FragmentCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FragmentCache {
+    /// 用默认上界（1024 条 / 8 MiB，与配置默认值一致）构造。
     pub fn new() -> Self {
-        Self::default()
+        Self::with_limits(CacheLimits::DEFAULT)
+    }
+
+    pub fn with_limits(limits: CacheLimits) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            limits,
+            bytes: 0,
+            clock: 0,
+            stats: CacheStats::default(),
+        }
+    }
+
+    pub fn from_config(config: &crate::config::CacheConfig) -> Self {
+        Self::with_limits(CacheLimits::from_config(config))
     }
 
     pub fn len(&self) -> usize {
@@ -360,8 +517,23 @@ impl FragmentCache {
         self.entries.is_empty()
     }
 
+    /// 当前占用字节（键 + 正文），用于证明"不是预分配"。
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn limits(&self) -> CacheLimits {
+        self.limits
+    }
+
+    pub fn stats(&self) -> CacheStats {
+        self.stats
+    }
+
+    /// 清空是即时生效的：不等待 TTL，也不保留"仅元数据"的残条目。
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.bytes = 0;
     }
 
     pub fn keys(&self) -> Vec<String> {
@@ -369,6 +541,9 @@ impl FragmentCache {
     }
 
     /// 写入片段。正文摘要必须与引用一致，否则拒绝——这条是"不可变"的实际执行点。
+    ///
+    /// 单条超过 `max_bytes` 时**拒绝**而不是"写入后立刻淘汰"：后者会让调用方以为
+    /// 写成功、取的时候却永远未命中。
     pub fn insert(
         &mut self,
         reference: StableRef,
@@ -376,6 +551,9 @@ impl FragmentCache {
         body: impl Into<String>,
     ) -> Result<(), AssemblyError> {
         let body = body.into();
+        if self.limits.is_disabled() {
+            return Err(AssemblyError::CacheDisabled);
+        }
         let actual = format!("sha256:{}", sha256_hex(body.as_bytes()));
         if actual != reference.digest() {
             return Err(AssemblyError::ContentDigestMismatch {
@@ -384,6 +562,13 @@ impl FragmentCache {
             });
         }
         let key = reference.key();
+        let bytes = key.len() + body.len();
+        if bytes > self.limits.max_bytes {
+            return Err(AssemblyError::FragmentExceedsCapacity {
+                bytes,
+                limit: self.limits.max_bytes,
+            });
+        }
         let entry = CachedFragment {
             reference,
             body,
@@ -391,39 +576,129 @@ impl FragmentCache {
             project_id: permissions.project_id.clone(),
             permission_fingerprint: permissions.fingerprint(),
         };
-        self.entries.insert(key, entry);
+        self.clock += 1;
+        let last_used = self.clock;
+        if let Some(previous) = self.entries.insert(
+            key.clone(),
+            CacheSlot {
+                fragment: entry,
+                bytes,
+                last_used,
+            },
+        ) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+        }
+        self.bytes += bytes;
+        self.evict_to_fit(&key);
         Ok(())
     }
 
     /// 命中前重查当前权限：Company、Project、权限摘要任一不符都返回拒绝，不返回旧正文。
+    ///
+    /// 命中会刷新最近使用时间；被拒绝的命中不刷新（否则撤权条目会长期占位）。
     pub fn lookup(
-        &self,
+        &mut self,
         reference: &StableRef,
         permissions: &PermissionSnapshot,
     ) -> Result<Option<CachedFragment>, CacheRejection> {
-        let Some(entry) = self.entries.get(&reference.key()) else {
+        let key = reference.key();
+        let Some(slot) = self.entries.get(&key) else {
+            self.stats.misses += 1;
             return Ok(None);
         };
-        if entry.company_id != permissions.company_id {
+        if slot.fragment.company_id != permissions.company_id {
+            self.stats.rejections += 1;
             return Err(CacheRejection::CrossCompany {
-                cached: entry.company_id.clone(),
+                cached: slot.fragment.company_id.clone(),
                 requested: permissions.company_id.clone(),
             });
         }
-        if entry.project_id != permissions.project_id {
+        if slot.fragment.project_id != permissions.project_id {
+            self.stats.rejections += 1;
             return Err(CacheRejection::CrossProject {
-                cached: entry.project_id.clone(),
+                cached: slot.fragment.project_id.clone(),
                 requested: permissions.project_id.clone(),
             });
         }
         let current = permissions.fingerprint();
-        if entry.permission_fingerprint != current {
+        if slot.fragment.permission_fingerprint != current {
+            self.stats.rejections += 1;
             return Err(CacheRejection::PermissionChanged {
-                cached: entry.permission_fingerprint.clone(),
+                cached: slot.fragment.permission_fingerprint.clone(),
                 current,
             });
         }
-        Ok(Some(entry.clone()))
+        self.clock += 1;
+        let now = self.clock;
+        let slot = self
+            .entries
+            .get_mut(&key)
+            .expect("上面已确认该键存在，中间没有删除");
+        slot.last_used = now;
+        let fragment = slot.fragment.clone();
+        self.stats.hits += 1;
+        Ok(Some(fragment))
+    }
+
+    /// 取片段，未命中就按 `load` 回源。**热点回源**的落点：被容量淘汰的片段不该变成
+    /// "永久缺失"，也不该返回过期内容——回源结果必须通过摘要校验才能进缓存。
+    ///
+    /// 回源失败不进缓存（否则一次失败会被固化）；权限不一致仍然拒绝，不因回源而绕过隔离。
+    pub fn get_or_load<F>(
+        &mut self,
+        reference: &StableRef,
+        permissions: &PermissionSnapshot,
+        load: F,
+    ) -> Result<LoadedFragment, CacheLoadError>
+    where
+        F: FnOnce(&StableRef) -> Result<String, String>,
+    {
+        match self.lookup(reference, permissions) {
+            Ok(Some(fragment)) => Ok(LoadedFragment {
+                fragment,
+                source: FragmentSource::Cache,
+            }),
+            Ok(None) => {
+                let body = load(reference).map_err(CacheLoadError::LoadFailed)?;
+                self.insert(reference.clone(), permissions, body)
+                    .map_err(CacheLoadError::NotCached)?;
+                // 刚写入的条目必然存在；`insert` 不会淘汰"自己刚写的那条"。
+                let fragment = self
+                    .entries
+                    .get(&reference.key())
+                    .map(|slot| slot.fragment.clone())
+                    .ok_or_else(|| {
+                        CacheLoadError::LoadFailed("回源写入后条目消失，缓存状态不一致".to_string())
+                    })?;
+                self.stats.reloads += 1;
+                Ok(LoadedFragment {
+                    fragment,
+                    source: FragmentSource::Reloaded,
+                })
+            }
+            Err(rejection) => Err(CacheLoadError::Rejected(rejection)),
+        }
+    }
+
+    /// 淘汰到上界内。`keep` 是本次刚写入的键，永不被选为牺牲者。
+    fn evict_to_fit(&mut self, keep: &str) {
+        while self.entries.len() > self.limits.max_entries || self.bytes > self.limits.max_bytes {
+            let victim = self
+                .entries
+                .iter()
+                .filter(|(key, _)| key.as_str() != keep)
+                .min_by_key(|(key, slot)| (slot.last_used, key.as_str()))
+                .map(|(key, _)| key.clone());
+            let Some(victim) = victim else {
+                // 只剩 keep 一条仍超限：`insert` 已按单条上限拒绝过，走到这里说明
+                // 上限在建缓存后被改小，保留而不是无限循环。
+                break;
+            };
+            if let Some(slot) = self.entries.remove(&victim) {
+                self.bytes = self.bytes.saturating_sub(slot.bytes);
+                self.stats.evictions += 1;
+            }
+        }
     }
 }
 
@@ -1647,6 +1922,187 @@ mod tests {
             .lookup(&reference, &outsider)
             .expect_err("跨 Company 不得命中");
         assert!(matches!(error, CacheRejection::CrossCompany { .. }));
+    }
+
+    #[test]
+    fn cache_capacity_is_bounded_not_preallocated_and_evicts_lru() {
+        let perms = permissions("project-1");
+        let mut cache = FragmentCache::with_limits(CacheLimits::new(2, 1024 * 1024));
+        assert_eq!(cache.bytes(), 0, "新建缓存不预分配字节");
+        assert!(cache.is_empty());
+        assert_eq!(cache.limits().max_entries, 2);
+
+        let a = stable(RefKind::Input, "a.rs", "r1", "alpha\n");
+        let b = stable(RefKind::Input, "b.rs", "r1", "beta\n");
+        let c = stable(RefKind::Input, "c.rs", "r1", "gamma\n");
+        cache.insert(a.clone(), &perms, "alpha\n").expect("写入 a");
+        cache.insert(b.clone(), &perms, "beta\n").expect("写入 b");
+
+        // 触碰 a，使 b 成为最久未使用条目。
+        assert!(cache.lookup(&a, &perms).expect("有权限").is_some());
+        cache.insert(c.clone(), &perms, "gamma\n").expect("写入 c");
+
+        assert_eq!(cache.len(), 2, "条目数不得超过上限");
+        assert!(
+            !cache.keys().contains(&b.key()),
+            "被淘汰的应是最久未使用的 b，而不是刚写入的 c"
+        );
+        assert!(cache.keys().contains(&a.key()), "刚被触碰的 a 不该被淘汰");
+        assert_eq!(cache.stats().evictions, 1);
+        assert!(cache.bytes() <= cache.limits().max_bytes);
+
+        cache.clear();
+        assert!(cache.is_empty(), "清空即时生效，不等 TTL");
+        assert_eq!(cache.bytes(), 0, "清空后不残留字节计数");
+    }
+
+    #[test]
+    fn cache_byte_limit_evicts_by_size_and_refuses_oversized_fragment() {
+        let perms = permissions("project-1");
+        let a = stable(RefKind::Input, "a.rs", "r1", "alpha\n");
+        let b = stable(RefKind::Input, "b.rs", "r1", "beta\n");
+        let c = stable(RefKind::Input, "c.rs", "r1", "gamma\n");
+
+        // 先量出单条实际占用（键 + 正文），不靠硬编码长度猜口径。
+        let mut probe = FragmentCache::with_limits(CacheLimits::new(8, 1 << 20));
+        probe
+            .insert(a.clone(), &perms, "alpha\n")
+            .expect("写入探针");
+        let one = probe.bytes();
+        assert!(one > 0, "单条片段必然占用字节，否则上限没有意义");
+
+        let mut cache = FragmentCache::with_limits(CacheLimits::new(8, one * 2));
+        cache.insert(a.clone(), &perms, "alpha\n").expect("写入 a");
+        cache.insert(b.clone(), &perms, "beta\n").expect("写入 b");
+        assert_eq!(cache.len(), 2);
+        cache.insert(c, &perms, "gamma\n").expect("写入 c");
+        assert!(
+            cache.bytes() <= one * 2,
+            "字节上限先到时也要淘汰：{} > {}",
+            cache.bytes(),
+            one * 2
+        );
+        assert_eq!(cache.len(), 2, "两条等大片段只能留两条");
+
+        // 单条超上限：拒绝写入，不"写成功再立刻淘汰"。
+        let huge = "y".repeat(4096);
+        let huge_ref = stable(RefKind::Input, "huge.rs", "r1", &huge);
+        let mut tiny = FragmentCache::with_limits(CacheLimits::new(8, 32));
+        let error = tiny
+            .insert(huge_ref, &perms, huge)
+            .expect_err("超上限必须拒绝");
+        assert!(matches!(
+            error,
+            AssemblyError::FragmentExceedsCapacity { limit: 32, .. }
+        ));
+        assert!(tiny.is_empty(), "拒绝的写入不得留下条目");
+
+        // 上限为 0 = 关闭缓存，不是"无限"。
+        let mut disabled = FragmentCache::with_limits(CacheLimits::new(0, 1024));
+        assert!(matches!(
+            disabled.insert(a.clone(), &perms, "alpha\n"),
+            Err(AssemblyError::CacheDisabled)
+        ));
+        assert!(
+            disabled
+                .lookup(&a, &perms)
+                .expect("关闭缓存不算拒绝")
+                .is_none()
+        );
+        assert_eq!(disabled.stats().misses, 1);
+    }
+
+    #[test]
+    fn cache_limits_follow_config_defaults() {
+        let config = crate::config::BodConfig::default().cache;
+        let cache = FragmentCache::from_config(&config);
+        assert_eq!(cache.limits().max_entries, 1024);
+        assert_eq!(cache.limits().max_bytes, 8_388_608);
+        assert_eq!(cache.limits(), CacheLimits::DEFAULT);
+        assert_eq!(cache.bytes(), 0, "上限来自配置，不预分配");
+    }
+
+    #[test]
+    fn evicted_hot_fragment_is_reloaded_from_source_not_lost() {
+        let perms = permissions("project-1");
+        let a = stable(RefKind::Input, "a.rs", "r1", "alpha\n");
+        let b = stable(RefKind::Input, "b.rs", "r1", "beta\n");
+        let mut cache = FragmentCache::with_limits(CacheLimits::new(1, 1 << 20));
+        cache.insert(a.clone(), &perms, "alpha\n").expect("写入 a");
+        cache.insert(b.clone(), &perms, "beta\n").expect("写入 b");
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.keys().contains(&a.key()), "a 已被容量淘汰");
+
+        let mut loads = 0;
+        let loaded = cache
+            .get_or_load(&a, &perms, |_| {
+                loads += 1;
+                Ok("alpha\n".to_string())
+            })
+            .expect("被淘汰的热点片段应可回源");
+        assert_eq!(loads, 1, "回源必须真的读一次来源");
+        assert!(loaded.is_reload(), "来源标记为回源，不冒充命中");
+        assert_eq!(loaded.body(), "alpha\n");
+        assert_eq!(cache.stats().reloads, 1);
+
+        let again = cache
+            .get_or_load(&a, &perms, |_| panic!("命中时不得再回源"))
+            .expect("第二次应命中");
+        assert_eq!(again.source, FragmentSource::Cache);
+        assert_eq!(cache.stats().hits, 1);
+    }
+
+    #[test]
+    fn failed_or_tampered_reload_is_never_cached() {
+        let perms = permissions("project-1");
+        let a = stable(RefKind::Input, "a.rs", "r1", "alpha\n");
+        let mut cache = FragmentCache::new();
+
+        let failed = cache.get_or_load(&a, &perms, |_| Err("源不可读".to_string()));
+        assert!(matches!(failed, Err(CacheLoadError::LoadFailed(_))));
+        assert!(cache.is_empty(), "回源失败不得写缓存，下一次仍会重新回源");
+
+        let tampered = cache.get_or_load(&a, &perms, |_| Ok("alpha 被改过\n".to_string()));
+        assert!(
+            matches!(
+                tampered,
+                Err(CacheLoadError::NotCached(
+                    AssemblyError::ContentDigestMismatch { .. }
+                ))
+            ),
+            "回源内容同样要过摘要校验，不能因为是回源就放宽"
+        );
+        assert!(cache.is_empty());
+
+        let ok = cache
+            .get_or_load(&a, &perms, |_| Ok("alpha\n".to_string()))
+            .expect("摘要一致的回源可写入");
+        assert!(ok.is_reload());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn revocation_blocks_reload_instead_of_fetching_again() {
+        let perms = permissions("project-1");
+        let a = stable(RefKind::Input, "a.rs", "r1", "alpha\n");
+        let mut cache = FragmentCache::new();
+        cache
+            .insert(a.clone(), &perms, "alpha\n")
+            .expect("写入片段");
+
+        let revoked = permissions("project-1").without_project("project-1");
+        let mut fetched = false;
+        let result = cache.get_or_load(&a, &revoked, |_| {
+            fetched = true;
+            Ok("alpha\n".to_string())
+        });
+        assert!(
+            matches!(result, Err(CacheLoadError::Rejected(_))),
+            "撤权后既不能返回旧正文，也不能借回源绕开权限"
+        );
+        assert!(!fetched, "撤权时不得为了取内容而回源");
+        assert_eq!(cache.stats().rejections, 1);
+        assert_eq!(cache.stats().reloads, 0);
     }
 
     #[test]

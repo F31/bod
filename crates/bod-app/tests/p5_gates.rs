@@ -122,9 +122,7 @@ fn p5_gates_are_not_bound_before_the_exit_is_met() {
     // G-21 是 P0 的旧绑定，只允许它继续指向 control_api 的既有用例。
     let entry = |gate: &str| {
         let marker = format!("- id: {gate}");
-        let Some(start) = GATES.find(&marker) else {
-            return None;
-        };
+        let start = GATES.find(&marker)?;
         let rest = &GATES[start + marker.len()..];
         Some(&rest[..rest.find("\n- id: ").unwrap_or(rest.len())])
     };
