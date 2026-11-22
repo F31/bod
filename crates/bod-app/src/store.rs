@@ -19,6 +19,7 @@ pub mod maintenance;
 pub mod project;
 pub mod queue;
 pub mod read_port;
+pub mod revoke;
 pub mod rows;
 
 #[cfg(test)]
@@ -189,6 +190,9 @@ pub enum StoreError {
     /// 授权事实取不到（3.6 B1/B2）。**单独一档**：它的处置是「报故障」，
     /// 不是「当成没有事实」——降级为全可见或全不可见都是把故障伪装成权限。
     Facts(facts::StageFactsError),
+    /// 撤权命令不成立（缺公司、缺主体、缺操作者）。与 `Sql` 分开：这些是调用方
+    /// 的错误，重试同一个请求只会得到同一个答案。
+    Revocation(revoke::RevocationError),
 }
 
 impl fmt::Display for StoreError {
@@ -209,6 +213,7 @@ impl fmt::Display for StoreError {
             Self::Idempotency(err) => write!(f, "幂等键冲突: {}", err.explain()),
             Self::Link(err) => write!(f, "关联追加失败: {}", err.explain()),
             Self::Facts(err) => write!(f, "授权事实装配失败: {}", err.explain()),
+            Self::Revocation(err) => write!(f, "撤权命令不成立: {}", err.explain()),
         }
     }
 }
@@ -254,6 +259,12 @@ impl From<crate::delivery_link::LinkError> for StoreError {
 impl From<facts::StageFactsError> for StoreError {
     fn from(value: facts::StageFactsError) -> Self {
         Self::Facts(value)
+    }
+}
+
+impl From<revoke::RevocationError> for StoreError {
+    fn from(value: revoke::RevocationError) -> Self {
+        Self::Revocation(value)
     }
 }
 

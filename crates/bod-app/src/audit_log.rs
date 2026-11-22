@@ -68,6 +68,11 @@ pub enum AuditAction {
     ImportSource,
     /// 给跟踪项追加来源或内部工作包关联。
     AppendLink,
+    /// 撤销某个主体在本公司的全部生效授权。
+    ///
+    /// 它不是阶段动作：撤权不改变任何交付目标的状态，也不回答「改这件事需要什么凭据」
+    /// ——它就是改凭据本身。所以它进审计词表，不进 `StageAction`。
+    RevokeAuthorization,
 }
 
 impl AuditAction {
@@ -85,6 +90,7 @@ impl AuditAction {
             Self::Reopen => "reopen",
             Self::ImportSource => "import-source",
             Self::AppendLink => "append-link",
+            Self::RevokeAuthorization => "revoke-authorization",
         }
     }
 
@@ -103,13 +109,21 @@ impl AuditAction {
             "reopen" => Some(Self::Reopen),
             "import-source" => Some(Self::ImportSource),
             "append-link" => Some(Self::AppendLink),
+            "revoke-authorization" => Some(Self::RevokeAuthorization),
             _ => None,
         }
     }
 
     /// 是否属于阶段准入词表。写库前的闸门用它把两类动作用不同的构造入口分开。
+    ///
+    /// 判断**不再手写一份名单**，而是问 `StageAction::parse` 认不认这个字符串：
+    /// 阶段动作与它的字符串形一一对应（`From<StageAction>` 就是这个契约），
+    /// 业务写入的字符串在 `StageAction` 里没有对应物。原先的
+    /// `!matches!(self, ImportSource | AppendLink)` 是黑名单——新增一个业务写入却忘了
+    /// 加进列表，`for_write` 会当场报 `ActionKindMismatch`；改走单一来源后这类遗忘
+    /// 不再存在，而且两份词表无法再各自漂移。
     pub fn is_stage(self) -> bool {
-        !matches!(self, Self::ImportSource | Self::AppendLink)
+        crate::authorization::StageAction::parse(self.as_str()).is_some()
     }
 }
 
@@ -230,10 +244,19 @@ impl AuditEvent {
             _ => {}
         }
 
+        // `basis` 的前缀恒为 `<action>:`，由 `for_write` / `from_stage` 拼装，是常量；
+        // 只有后半段是外部文本。检查整段会**误伤**：`revoke-authorization:` 里就含
+        // `authorization:`，而那个标记本来是用来抓 HTTP `Authorization` 头的。
+        // 只剥掉「本事件自己的动作名 + 冒号」，剥不掉就整段检查——防的是有人把
+        // `authorization: Bearer x` 直接存进 basis 冒充动作前缀。
+        let basis_body = self
+            .basis
+            .strip_prefix(&format!("{}:", self.action.as_str()))
+            .unwrap_or(self.basis.as_str());
         for (field, value) in [
             ("correlation_id", Some(self.correlation_id.as_str())),
             ("actor", Some(self.actor.as_str())),
-            ("basis", Some(self.basis.as_str())),
+            ("basis", Some(basis_body)),
             ("reason", self.reason.as_deref()),
         ] {
             let Some(text) = value else { continue };
@@ -526,8 +549,27 @@ mod tests {
         ] {
             assert!(action.is_stage(), "{} 必须是阶段动作", action.as_str());
         }
-        for action in [AuditAction::ImportSource, AuditAction::AppendLink] {
+        for action in [
+            AuditAction::ImportSource,
+            AuditAction::AppendLink,
+            AuditAction::RevokeAuthorization,
+        ] {
             assert!(!action.is_stage(), "{} 不是阶段动作", action.as_str());
+        }
+        // 阶段判定与词表**同源**：凡是 `StageAction` 认得的字符串，`is_stage` 必须为真；
+        // 反之业务写入的字符串 `StageAction::parse` 必须不认。这条断言盯的是
+        // 「以后有人给审计加了个阶段动作的字符串，却忘了让 `StageAction` 认识它」——
+        // 那种情况下 `for_write` 会放行一个本该只由判定生成的阶段事件。
+        for action in [
+            AuditAction::ImportSource,
+            AuditAction::AppendLink,
+            AuditAction::RevokeAuthorization,
+        ] {
+            assert!(
+                StageAction::parse(action.as_str()).is_none(),
+                "{} 是业务写入，不应被 `StageAction` 认识",
+                action.as_str()
+            );
         }
         // `StageAction` 的每个变体都能映射进来，且映射结果仍是阶段动作——
         // 漏映射会让 `from_stage` 生成的 basis 前缀与实际动作不符。
@@ -547,6 +589,39 @@ mod tests {
             assert!(mapped.is_stage());
             assert_eq!(mapped.as_str(), action.as_str(), "词表必须同形");
         }
+    }
+
+    /// 脱敏闸门只看 `basis` 的正文：动作前缀是程序拼的常量，不该被当成凭据文本。
+    ///
+    /// 这条也是 `revoke-authorization` 这个动作名能成立的前提——它的前缀里含
+    /// `authorization:`（标记表里那一条本来是抓 HTTP `Authorization` 头的）。
+    /// 若整段检查，撤权审计永远写不进去，而报错只会说「basis 含凭据」，
+    /// 病因离现场很远。
+    #[test]
+    fn secret_markers_scan_the_basis_body_not_the_action_prefix() {
+        let mut event = base();
+        event.action = AuditAction::RevokeAuthorization;
+        event.basis = "revoke-authorization:principal_revocation".to_string();
+        assert!(event.validate().is_ok(), "动作前缀不该被当成凭据文本");
+
+        // 前缀剥不掉时整段检查：不能靠「随便加个像前缀的东西」绕过闸门。
+        let mut forged = base();
+        forged.basis = "authorization: Bearer abc".to_string();
+        assert!(
+            matches!(
+                forged.validate(),
+                Err(AuditRejection::SecretInText("basis"))
+            ),
+            "冒充前缀的整段文本必须照旧被拒"
+        );
+
+        // 剥掉真前缀之后，正文仍要检查。
+        let mut body = base();
+        body.basis = "submit:authorization: Bearer abc".to_string();
+        assert!(
+            matches!(body.validate(), Err(AuditRejection::SecretInText("basis"))),
+            "正文里的凭据形态仍然要拦"
+        );
     }
 
     /// `for_write` 拒绝阶段动作：那种事件只能出自判定，不能由调用方凭空构造。

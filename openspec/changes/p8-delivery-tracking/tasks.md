@@ -174,13 +174,35 @@
         接口层不猜、不硬编码），但**没有任何生产入口调用 `with_delivery`**，
         所以当前真实请求仍回 401。契约标 `served` 的含义是「端点已实现且行为可解释」，
         **不是「线上已经能读」**——这两件事在报告里必须分开写。
-      - `authorization_revocations` 仍**没有写入者**（撤权命令尚未实现），
-        `revoked_at_revision` 因此恒为 `None`。
+      - `authorization_revocations` **已有写入者**（2026-11-22，见下条）；剩下的
+        「谁有权下撤权命令、命令入口在哪」仍属 B3 同一件事。
       - 目标级**证据收窄是近似**：`EvidenceStamp` 不带 `target_id`（形状 2.2 已冻结），
         只能保留「被保留结论所依据的那几版修订」。要精确到目标得改契约形状。
       - `allowed_actions` 仍只按「端点是否 served」过滤，**未按动作权限判定**。
         当前所有写端点 planned，所以它恒为空；接通任何写端点之前必须补上，
         否则视图会推荐一个主体实际做不了的动作。
+
+      **撤权写入者已完成（2026-11-22，`store::revoke`）**：
+      - `UnitOfWork::revoke_authorization(RevokeCommand, now_ms)`：四张事实表按
+        (company, principal) 置 `active = 0`、追加 `authorization_revocations` 一行、
+        写审计 `revoke-authorization`，三件事同一个 SAVEPOINT。审计写不进去整条回滚
+        （用例用「相关性 ID 含 `secret` 形态」触发真实失败，断言 grants 仍生效、无撤权行）。
+      - **修订号在事务内现算**（`MAX(revision) + 1`），不由调用方给：填错会让离线客户端
+        少重同步一次（`check_subscription` 的 `since < revoked_at`）。
+      - **已是目标状态就 no-op**：判据是「有没有生效授权」，不是「有没有撤权记录」
+        ——撤权后又被重新授权时记录还在，必须能再撤一次并 bump 修订。
+      - 只做**主体级**撤权（`principal_id` 非空）。公司级（`principal_id` 为空，
+        影响全公司）读侧 SQL 已能处理，但**没有写入者**：产品侧不存在「一次抹掉整公司
+        授权」的命令，凭空实现一个危险操作比缺它更糟。
+      - **已知缺口，用例钉住**（`assignment_alone_still_permits_work_after_revocation`）：
+        `StageRequirement::Work` 只判 `target.assignee`，不查成员资格也不查 Grant，
+        所以**撤权后被指派者仍能「开发与进度回报」**。这与「撤权不改写历史分配」一致，
+        但「保留归属」不等于「保留执行权」。要收紧得让 `Work` 同时要求成员资格，
+        属判定语义变更，需产品决定。
+      - 顺带修正一处**系统性误伤**：审计 `basis` 的前缀是 `<action>:`（程序常量），
+        原先整段过脱敏闸门，于是 `revoke-authorization:` 撞上 `authorization:` 标记，
+        撤权审计永远写不进去且报错只说「basis 含凭据」。现在只剥掉「本事件动作名 +
+        冒号」再检查正文，剥不掉就整段检查（防冒充前缀），三条用例分别守前缀、冒充、正文。
 
 ## 4. 共用覆盖投影（`I-72`）
 
