@@ -254,6 +254,16 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 
 ### 7.2 更正对象（T05 / C05）
 
+> **需求先行**：`openspec/specs/` 里目前**没有** `delivery-tracking` 与 `delivery-draft`
+> 两个能力（p8 尚未归档），本 Change 的 `specs/*/spec.md` 是它们唯一的来源。
+> 7.2 的语义现在只写在下面这几行任务里、没有写进 spec delta——那么归档时主线规格里
+> 就永远不会出现「更正对象」，下一个人会按主线规格重新发明一套。所以 7.2.0 先于 7.2.1。
+
+- [ ] 7.2.0 先写 `specs/delivery-draft/spec.md` 的 ADDED requirement：
+      「更正以独立对象追加，不覆盖原答复与原确认」，场景至少覆盖
+      （a）`coverage=complete` 时已知下游逐个有状态；
+      （b）无法穷举下游时 `coverage=partial` 且**不得**出现「全部送达」的表述；
+      （c）通知失败留可重试记录。`openspec validate --strict` 通过后 7.2.1 才开工。
 - [ ] 7.2.1 `correction` 对象：`previous`（被更正记录引用）、`operation`（withdraw / supersede）、
       `reason`、`affected`、`coverage`（complete / partial）、`replacement`（supersede 必填）。
       追加式，禁止改写原答复与原确认。
@@ -264,6 +274,11 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 
 ### 7.3 观察委任（T07）
 
+- [ ] 7.3.0 先写 `specs/delivery-tracking/spec.md` 的 ADDED requirement：
+      「主动持续观察须有独立委任」，场景覆盖（a）无委任不得启动；
+      （b）委任到期 → 停止新增但保留历史；（c）观测中断/过期/撤权 → 对外显示「陈旧」或「未知」，
+      不回显上一次结论（这一条与已有结论的展示语义冲突，必须在规格里写清楚哪个优先）。
+      没有这条 delta，7.3.1 的实现就是归档后查不到的能力。
 - [ ] 7.3.1 主动持续观察须有**独立委任**：目标、期限、频率、预算、允许动作、停止条件。
       缺委任不得启动观察。
 - [ ] 7.3.2 观测中断/过期/撤权时对外显示「陈旧」或「未知」，不显示上一次结论。
@@ -271,6 +286,10 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 
 ### 7.4 C12 / C13 用例
 
+- [ ] 7.4.0 先确认 `specs/delivery-draft/spec.md` 里 C12/C13 的两条语义是否已可判定：
+      现有 requirement 只写了「发送必须在两个生效点各重验一次」与「回滚追加纠正」，
+      没有写「两处**分别**失效时的不同后果」，也没有写「换执行者/加模型起草不改变结论」。
+      缺则先补 delta，再写用例——避免「用例通过但需求里没有这条」。
 - [ ] 7.4.1 C12：在受理前与入队后外调前**分别**注入证据失效；前者拒绝且无待发意图，
       后者阻断并转待重审。两条用例独立，不得合并成一条。
 - [ ] 7.4.2 C13：更换执行者或加入模型起草，目标证据、策略与授权不变 → 覆盖结论逐字相同；
@@ -285,6 +304,10 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
       → `POST /delivery-observations` → `POST /feedback-receipts/{id}/drafts`
       → `POST .../drafts/{draft_id}/send`，逐条转 `served` 并同步 `x-bod-status`。
       每条转 served 时必须同时给出「谁调用它」的证据（CLI 或工作台），否则不转。
+      **⚠ 前置未满足**：本项与 7.6.2 在「谁是写者」上互斥——控制面一旦持可写连接，
+      就成了本 Change 非目标里明确排除的「第二业务写入者」。转 served 之前必须先由
+      **7.7（ADR-0009）**裁定写者归属，并先完成 **7.8（动作可用性判定）**，
+      否则视图会在路由还没开时就宣称「可做」。两项都不满足时本项保持未勾，不得分批转。
 
 ### 7.6 主体模型（唯一硬分叉点）
 
@@ -310,3 +333,42 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
       该限制不得用「多用户支持」的说法掩盖。
       **已落**：`openspec/changes/p8-delivery-tracking/design.md` §「支持范围与已知限制（7.6.3）」
       第 2 行（主体来源）与第 4 行（交付域只有读路径、事实表无写入者）。
+
+### 7.7 写者归属（7.5 的硬前置，ADR-0009）
+
+背景：7.6.2 的合法性靠「只读副本不是写者」；7.5 一旦转 served，控制面就必须持可写连接，
+成为本 Change 非目标里明确排除的「第二业务写入者」（`proposal.md` §5）。这不是排期问题，
+是自相矛盾，必须先裁定。
+
+- [ ] 7.7.1 签 `adr/0009-writer-ownership.md`：三选项 A（控制面唯一写者）/ B（写入只走 CLI）/
+      C（混合）。建议 B 作切片 1 出口形态、A 作 p9 目标形态；切换触发条件已写在 ADR 里。
+- [ ] 7.7.2 若裁为 A：**同一提交**里落宿主独占写锁 + running epoch + 双开被拒用例，
+      并改写 `proposal.md` 的非目标。锁与写路由不得分两次提交——中间态就是无防护双开。
+- [ ] 7.7.3 若裁为 B：五条 `POST` 保持 `planned`，支持矩阵写明「交付写入不经 HTTP」，
+      并把 `bod observe` / `bod tracking` / `bod sources` 改成 `open_existing_readonly`。
+      现状是这三个 help 写着「只读」的命令都走 `SqliteStore::open`——每次打开跑全部 20 个迁移，
+      目标路径不存在时还会 `create_dir_all` 建库。**「只读」目前是假的。**
+- [ ] 7.7.4 遗留登记：即便选 B，两个 CLI 进程之间仍无锁。WAL 会把写串行化、不损坏数据，
+      但「宿主独占写锁 + epoch」这条要求仍未实现；支持矩阵不得声称「已防双开」，
+      直到单实例锁独立落地（锁文件位置、僵死检测、重启接管、与 `$BOD_HOME` 的关系）。
+
+### 7.8 动作可用性判定（7.5 的前置，与 7.7 的选项无关）
+
+- [ ] 7.8.1 记录现状：`allowed_actions` 由 `is_served_action` 过滤，只认「路由是否 served」；
+      而两个动作码（`link-source` / `draft`）对应的路由都是 `planned`，所以该字段**恒为空**。
+      契约写着「允许动作」，字段却永远给不出——这是承诺与实现不符，不是暂时没数据。
+- [ ] 7.8.2 判定改为「本进程是否真有入口」（served 路由或 CLI 子命令），
+      并给交付域动作补需求映射。`StageAction::requirement()` 只覆盖十个 stage 动作，
+      `link-source` / `draft` 不在其中，现在没有任何一处回答「谁能 link / 谁能 draft」。
+- [ ] 7.8.3 投影必须接受主体：`DeliveryTrackingView::to_dto()` 不带 actor/facts，
+      而 `evaluate_read` 手里有 actor 却不往下传。改签名 `to_dto(facts, actor)`，
+      判定落在 `authorization`（与 `target_visible` 同一处），不在 DTO 构造器里加分支。
+- [ ] 7.8.4 反例记录：`readonly_api`（912 行，当前仅测试可达）里有 `ReadonlyAction` /
+      `authorize_readonly` / `button_hint`，看着像动作授权，实际只判项目级可达，
+      且注释明写「界面提示只用于显示，不参与放行判定」。**不得**当作现成实现复用；
+      与 `evidence_publication` ≠ V05 属同一类命名坑。
+- [ ] 7.8.5 三条用例（缺一不可）：
+      （a）没有真实入口（路由 planned 且无 CLI）→ 动作码不出现；
+      （b）有入口但主体无权限 → 动作码不出现；
+      （c）有入口且主体有权限 → 出现，且该入口真能执行（CLI 真跑一次或路由真 served）。
+      只有（c）而没有（a）（b），等于把「路由开了」当成「谁都能做」。
