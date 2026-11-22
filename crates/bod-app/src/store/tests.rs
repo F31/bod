@@ -78,7 +78,7 @@ fn audit_event_round_trips_and_keeps_write_order() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].event.decision, AuditDecision::Allowed);
     assert_eq!(rows[1].event.decision, AuditDecision::Denied);
-    assert_eq!(rows[1].event.action, StageAction::Submit);
+    assert_eq!(rows[1].event.action, AuditAction::Submit);
     assert_eq!(rows[1].event.basis, "submit:not_a_member");
     assert_eq!(rows[1].event.reason.as_deref(), Some("不是该项目成员"));
     assert_eq!(
@@ -223,7 +223,7 @@ fn audit_event(decision: AuditDecision, reason: Option<&str>) -> AuditEvent {
         company_id: "company-default".to_string(),
         correlation_id: "req-1".to_string(),
         actor: DomainId::new("user-owner"),
-        action: StageAction::Submit,
+        action: AuditAction::Submit,
         scope: Scope {
             company_id: DomainId::new("company-default"),
             project_id: Some(DomainId::new("project-1")),
@@ -1316,6 +1316,8 @@ fn import_command(key: &str, tracking_id: &str, source_id: &str) -> ImportSource
         new_source_id: source_id.to_string(),
         new_candidate_id: format!("{source_id}-cand"),
         imported_by: "alice".to_string(),
+        correlation_id: "req-import".to_string(),
+        decided_at: "2026-11-22T00:00:00Z".to_string(),
     }
 }
 
@@ -1604,6 +1606,8 @@ fn link_command(
         targets,
         expected_version,
         linked_by: "alice".to_string(),
+        correlation_id: "req-link".to_string(),
+        decided_at: "2026-11-22T00:00:00Z".to_string(),
     }
 }
 
@@ -2074,4 +2078,178 @@ fn link_receipt_records_the_command_and_its_result() {
     let outcome = LinkOutcome::replayed_from(&receipt.result_detail).expect("应可解析");
     assert!(outcome.link_id.starts_with("dl-"), "{}", outcome.link_id);
     assert_eq!(outcome.version, 2);
+}
+
+// ---------------------------------------------------------------------------
+// 审计接线（P8 3.5）：导入与追加关联各留一条事实
+// ---------------------------------------------------------------------------
+
+/// 导入的审计与业务写入同事务：读得到的审计必然对应一次真的发生过的写入。
+#[test]
+fn import_writes_audit_in_the_same_transaction() {
+    let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+    let outcome = with_uow(&mut store, |uow| {
+        uow.import_delivery_source(&import_command("k-audit", "dt-9", "src-9"), 1_000)
+    })
+    .expect("导入应成功");
+    assert_eq!(outcome.tracking_id.as_deref(), Some("dt-9"));
+
+    let rows = store
+        .list_audit_events("company-default", "req-import")
+        .expect("应可读回");
+    assert_eq!(rows.len(), 1, "一次导入只留一条审计");
+    let event = &rows[0].event;
+    assert_eq!(event.action, AuditAction::ImportSource);
+    assert_eq!(event.decision, AuditDecision::Allowed);
+    assert_eq!(event.basis, "import-source:source_identity");
+    assert_eq!(event.actor.as_str(), "alice");
+    assert_eq!(
+        event.scope.project_id.as_ref().map(DomainId::as_str),
+        Some("project-1"),
+        "审计范围要能定位到项目"
+    );
+    assert_eq!(
+        event.decided_at, "2026-11-22T00:00:00Z",
+        "业务时间取命令给的时刻，不从现在时刻反推"
+    );
+    assert_eq!(
+        rows[0].recorded_at_ms, 1_000,
+        "落库时间才是 now_ms——两者分开才有可恢复原值"
+    );
+}
+
+/// 候选导入的审计依据是「凭什么」（只有定位），不是「产生了什么」。
+#[test]
+fn candidate_import_audits_the_candidate_basis() {
+    let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+    let mut command = import_command("k-cand", "dt-c", "src-c");
+    command.object_type = None;
+    command.provider_object_id = None;
+    command.locator = "https://acme.example/web/pull/318".to_string();
+    with_uow(&mut store, |uow| {
+        uow.import_delivery_source(&command, 1_000)
+    })
+    .expect("只有定位应进候选");
+
+    let rows = store
+        .list_audit_events("company-default", "req-import")
+        .expect("应可读回");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event.action, AuditAction::ImportSource);
+    assert_eq!(rows[0].event.basis, "import-source:source_candidate");
+}
+
+/// 只有真有新增才记审计：重复提交同一关系是幂等空操作，不该在审计里多出一次改动。
+#[test]
+fn append_link_audits_only_when_something_is_added() {
+    let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+    register_pull_request(&mut store, "src-1");
+    insert_open_tracking(&mut store);
+
+    let first = with_uow(&mut store, |uow| {
+        uow.append_delivery_link(
+            &link_command(
+                "k-link-1",
+                LinkRef::Source("src-1".to_string()),
+                vec![link_target("acme", None)],
+                1,
+            ),
+            1_000,
+        )
+    })
+    .expect("首次追加应成功");
+    assert!(first.appended);
+
+    // 换一个键、同一关系、同一目标：幂等去重发生在关系层，本次什么都不新增。
+    let second = with_uow(&mut store, |uow| {
+        uow.append_delivery_link(
+            &link_command(
+                "k-link-2",
+                LinkRef::Source("src-1".to_string()),
+                vec![link_target("acme", None)],
+                first.version,
+            ),
+            1_000,
+        )
+    })
+    .expect("重复追加应成功");
+    assert!(!second.appended, "关系与目标都已存在，本次不新增");
+    assert_eq!(second.version, first.version, "空操作不推进版本");
+
+    // 两条命令同属一条链（同一 correlation_id）：链上只该有一条「追加」事实。
+    let rows = store
+        .list_audit_events("company-default", "req-link")
+        .expect("应可读回");
+    assert_eq!(rows.len(), 1, "空操作不得留下第二条『追加过』的审计");
+    assert_eq!(rows[0].event.action, AuditAction::AppendLink);
+    assert_eq!(rows[0].event.basis, "append-link:source_link");
+}
+
+/// 工作包关联的审计依据与来源关联分开：两者都是 `append-link`，但凭的不是同一样东西。
+#[test]
+fn work_package_link_audits_its_own_basis() {
+    let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+    insert_open_tracking(&mut store);
+    with_uow(&mut store, |uow| {
+        uow.append_delivery_link(
+            &link_command(
+                "k-wp",
+                LinkRef::WorkPackage("wp-1".to_string()),
+                vec![link_target("acme", None)],
+                1,
+            ),
+            1_000,
+        )
+    })
+    .expect("工作包关联应成功");
+
+    let rows = store
+        .list_audit_events("company-default", "req-link")
+        .expect("应可读回");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event.basis, "append-link:work_package_link");
+}
+
+/// 审计写不进去，整条导入回滚：不允许出现「业务成了、审计没有」的写入。
+///
+/// 构造方式是让业务字段全部合法、只有审计过不了闸门（`imported_by` 含凭据形态）。
+/// 若审计被放在事务外，这个用例会看到一条落库的跟踪项——那正是要害。
+#[test]
+fn import_rolls_back_when_the_audit_row_is_refused() {
+    let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+    let mut command = import_command("k-secret", "dt-x", "src-x");
+    command.imported_by = "Authorization: Bearer abc123".to_string();
+
+    let err = with_uow(&mut store, |uow| {
+        uow.import_delivery_source(&command, 1_000)
+    })
+    .expect_err("审计拒收时导入必须失败");
+    assert!(
+        matches!(
+            err,
+            StoreError::Audit(crate::audit_log::AuditRejection::SecretInText("actor"))
+        ),
+        "{err:?}"
+    );
+
+    assert_eq!(
+        count_rows(&store, "delivery_tracking"),
+        0,
+        "跟踪项必须一并回滚"
+    );
+    assert_eq!(
+        count_rows(&store, "delivery_sources"),
+        0,
+        "来源身份必须一并回滚"
+    );
+    assert_eq!(
+        count_rows(&store, "delivery_command_receipts"),
+        0,
+        "回执不得留下——否则重放会返回一个从未发生的成功"
+    );
+    assert_eq!(
+        count_rows(&store, "audit_events"),
+        0,
+        "审计本身也不得留半条"
+    );
 }

@@ -485,7 +485,7 @@ mod tests {
             company_id: "c-1".to_string(),
             correlation_id: "req-1".to_string(),
             actor: DomainId::new("u-1"),
-            action: crate::authorization::StageAction::Accept,
+            action: crate::audit_log::AuditAction::Accept,
             scope: Scope {
                 company_id: DomainId::new("c-1"),
                 project_id: Some(DomainId::new("p-1")),

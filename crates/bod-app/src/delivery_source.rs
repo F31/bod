@@ -531,6 +531,20 @@ pub struct ImportSourceCommand {
     pub new_candidate_id: String,
     /// 谁导入的。登记主体（§11 验收表要求可追溯），也进载荷指纹。
     pub imported_by: String,
+    /// 这次动作的关联 ID（由入口层给：HTTP 请求 ID、CLI 会话 ID）。
+    ///
+    /// **不拿幂等键顶替**：幂等键是调用方自编的字符串，取个 `k-secret` 之类的名字就会撞上
+    /// 审计的脱敏闸门（`SECRET_MARKERS` 含 `secret`），整条导入被拒——一个与业务无关的
+    /// 键名不该决定写入成败。关联 ID 属于入口层，与键的取值无关。
+    ///
+    /// 也不进载荷指纹：它是链路标识，不影响结果与责任归属。
+    pub correlation_id: String,
+    /// 这次导入的业务时刻（RFC 3339），直接作为审计的 `decided_at`。
+    ///
+    /// 不从 `now_ms` 反推：审计的业务时间定义就是「调用方给的时刻」，
+    /// 库层反推出来的只是第二份落库时间。也**不进载荷指纹**——换个时钟重放同一条命令
+    /// 应当命中重放，而不是被当成「同键异载荷」拒掉。
+    pub decided_at: String,
 }
 
 impl ImportSourceCommand {
@@ -926,6 +940,8 @@ mod tests {
             new_source_id: "src-1".to_string(),
             new_candidate_id: "cand-1".to_string(),
             imported_by: "alice".to_string(),
+            correlation_id: "req-1".to_string(),
+            decided_at: "2026-11-22T00:00:00Z".to_string(),
         }
     }
 

@@ -22,8 +22,7 @@ pub mod rows;
 #[cfg(test)]
 mod tests;
 
-use crate::audit_log::{AuditDecision, AuditEvent, AuditRecord};
-use crate::authorization::StageAction;
+use crate::audit_log::{AuditAction, AuditDecision, AuditEvent, AuditRecord};
 use crate::config::BodConfig;
 use crate::coverage_receipt::VerificationConclusion;
 use crate::delivery_idempotency::{IdempotencyError, Receipt, Replay, ResultKind, classify};

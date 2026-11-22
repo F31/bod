@@ -625,6 +625,21 @@
     两份观察仍原样留在 `evidence_stamps` 时间线里，「保留两者」不是合并成一条，
     也不是把其中一条标成「被取代」。
 
+25. **审计的动作词表与授权的动作词表是两个闭集**
+    （`crates/bod-app/src/audit_log.rs` 的 `AuditAction` vs `authorization::StageAction`）。
+    阶段动作是**准入**词表，每个变体都必须能回答「需要什么凭据」；审计是**事实**词表，
+    还要记准入之外的持久写入（`import-source` / `append-link`）。合成一个枚举只有两条路：
+    给业务写入编一个假的 `StageRequirement`，或者这些动作永远进不了审计——两条都在说谎。
+    映射只有一个方向（`From<StageAction>`），两个构造入口各挡错的那一类：
+    阶段判定只能走 `AuditEvent::from_stage`，业务写入只能走 `AuditEvent::for_write`，
+    互相喂错返回 `AuditRejection::ActionKindMismatch`。
+    **`correlation_id` 不得拿幂等键顶替**：键是调用方自编的字符串，取个 `k-secret` 之类的名字
+    就会撞上脱敏闸门（`SECRET_MARKERS` 含 `secret`），整条写入被拒——键名不该决定成败。
+    审计与业务写入**同事务**：审计写不进去就整条回滚（有用例
+    `import_rolls_back_when_the_audit_row_is_refused` 守着），不允许「业务成了、审计没有」。
+    只有**真新增**才记审计：`appended=false` 的幂等空操作不写，否则「谁改了什么」凭空多一次改动。
+    拒绝路径（如 `SOURCE_ALREADY_LINKED`）要留痕必须另起事务，目前**没做**，别当已完成。
+
 ## 验证与完成规则
 
 - 每个切片自带实现、测试与验证索引；不把测试路径存在当作测试通过。

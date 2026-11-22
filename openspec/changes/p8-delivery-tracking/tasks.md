@@ -85,8 +85,18 @@
       两条观察原样留在时间线里，不折叠、不择优。判据必须带版本：只比摘要会把每次正常发版
       判成冲突。3 个命名用例（冲突停在待核实且两份证据都在 / 新版本换摘要不算冲突 /
       两来源同摘要不算冲突）。
+      **已落地（审计接线）**：`import_delivery_source` 与 `append_delivery_link` 在各自的
+      `SAVEPOINT` 内写一条 `AuditEvent`——审计与业务写入同事务，审计写不进去整条回滚
+      （`import_rolls_back_when_the_audit_row_is_refused` 证明跟踪项、来源、回执、审计四张表
+      一起归零）。为此把审计的动作词表从 `StageAction` 上摘下来成 `AuditAction`（ADR-0007
+      第 1 条「不扩 `StageAction`」的延伸）：准入动作走 `from_stage`，业务写入走 `for_write`，
+      互相喂错类型即拒。`correlation_id` 由命令携带而不是拿幂等键顶替——键名含 `secret`
+      就会被脱敏闸门判成秘密，让整条导入永久失败（这个坑是被用例当场撞出来的）。
+      只有真新增才记审计：`appended=false` 的幂等空操作不写。5 个 store 用例 +
+      5 个 `audit_log` 单测。
       **未做**：写入口（`POST /api/v1/delivery-tracking/imports` 等仍 `planned`）、
-      §34.12 主体判定、审计 `append_audit_event` 接线——这三项才是「入单写事务」。
+      §34.12 主体判定、**拒绝路径的审计**（拒绝会回滚事务，连带带走审计行；
+      要留痕必须另起事务，这是独立的一步）。
       另缺一条用例：「观察写入与既有 Company 写操作同事务」的跨域回滚
       （现在各自都走 `UnitOfWork`，但没有一条用例证明 issue 写入失败时观察一并回滚）。
 

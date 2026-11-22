@@ -213,6 +213,35 @@
 客户 A 的部署观察不得改变客户 B 的结论，也不得出现在它的证据里；用例
 `shared_source_keeps_each_customer_record_separate` 钉的是这一条。
 
+### 3.5 落地时定下的四点（审计接线）
+
+1. **审计的动作词表与授权的动作词表分开**。`audit_events.action` 一直复用
+   `authorization::StageAction`，而阶段动作每个变体都必须能回答「需要什么凭据」
+   （`StageRequirement`）。导入与追加关联不属于任何阶段，硬塞进去只有两个结果：
+   给它们编一个假的阶段要求，或者这些写入永远进不了审计。所以新增 `AuditAction`
+   作为独立闭集，`From<StageAction>` 是唯一方向的映射——审计知道阶段动作，
+   阶段判定不知道审计动作。这也正是 ADR-0007「不扩 `StageAction`」的直接后果。
+2. **两个构造入口各挡错的那一类动作**。`AuditEvent::from_stage` 只产出阶段动作，
+   `AuditEvent::for_write` 只产出业务写入，互相喂错返回
+   `AuditRejection::ActionKindMismatch`。合并成一个构造函数的话，库里
+   「准入被拒」与「写入成功」会长得一样，`decision=denied` 那条链就失去意义。
+3. **`correlation_id` 由命令携带，不拿幂等键顶替**。第一版实现直接用幂等键当关联 ID，
+   用例 `import_rolls_back_when_the_audit_row_is_refused` 当场撞出问题：测试用了键名
+   `k-secret`，而脱敏闸门的 `SECRET_MARKERS` 含 `secret`，于是整条导入被判成
+   「审计含凭据」而失败——键名决定成败，且失败点离病因很远。关联 ID 属于入口层
+   （HTTP 请求 ID / CLI 会话 ID），与键的取值无关。
+4. **审计与业务写入同事务，且只记真发生的事**。审计行写在同一个 `SAVEPOINT` 里，
+   审计写不进去就整条回滚（四张表一起归零）；重放命中回执时**不写**审计，
+   `appended=false` 的幂等空操作也**不写**——审计要回答「谁改了什么」，
+   多记一条就等于凭空多出一次改动。
+
+### 3.6 尚未落地：为什么工作量在接线（ADR-0007）
+
+`authorization` 里 `filter_records` / `access_record` / `check_subscription` 都写好了，
+但生产零调用，`StageFacts` 的四处构造全在测试里，也没有任何函数把 grants / members /
+customer_bindings 从库里读出来。所以 3.6 的工作量在**装配端口**与 `Principal` 传参，
+不在重写判定；先做 GET 是关键——写端点先上、过滤后补，等于把「没有过滤」发布成「已过滤」。
+
 ## Open Questions
 
 - 渠道适配的第一条真实通道选哪个（决定「送达」是否有幂等键）。

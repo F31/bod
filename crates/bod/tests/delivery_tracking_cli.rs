@@ -247,6 +247,8 @@ fn tracking_detail_shows_later_work_packages() {
                 targets: Vec::new(),
                 expected_version: 1,
                 linked_by: "alice".to_string(),
+                correlation_id: "req-cli-1".to_string(),
+                decided_at: "2026-11-22T00:00:00Z".to_string(),
             },
             1_763_715_601_000,
         )

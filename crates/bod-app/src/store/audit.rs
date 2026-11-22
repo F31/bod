@@ -15,7 +15,7 @@ const AUDIT_SELECT: &str = "SELECT sequence, company_id, correlation_id, actor_i
 /// 库里出现应用不认识的取值，说明有人绕过应用写库，读侧必须炸出来。
 fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
     let action_text: String = row.get(4)?;
-    let action = StageAction::parse(&action_text).ok_or_else(|| {
+    let action = AuditAction::parse(&action_text).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
             4,
             rusqlite::types::Type::Text,

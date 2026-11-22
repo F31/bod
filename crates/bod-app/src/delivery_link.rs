@@ -260,6 +260,12 @@ pub struct AppendLinkCommand {
     pub expected_version: u64,
     /// 谁追加的。责任归属，也进载荷指纹。
     pub linked_by: String,
+    /// 这次动作的关联 ID（入口层给）。与 `ImportSourceCommand::correlation_id` 同款：
+    /// 不拿幂等键顶替，也不进载荷指纹。
+    pub correlation_id: String,
+    /// 这次追加的业务时刻（RFC 3339），直接作为审计的 `decided_at`。
+    /// 与 `ImportSourceCommand::decided_at` 同款：不进载荷指纹，也不从 `now_ms` 反推。
+    pub decided_at: String,
 }
 
 impl AppendLinkCommand {
@@ -438,6 +444,8 @@ mod tests {
             targets,
             expected_version: 3,
             linked_by: "alice".to_string(),
+            correlation_id: "req-1".to_string(),
+            decided_at: "2026-11-22T00:00:00Z".to_string(),
         }
     }
 

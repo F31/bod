@@ -1168,6 +1168,32 @@ impl<'a> UnitOfWork<'a> {
                 .as_deref()
                 .or(imported.tracking_id.as_deref())
                 .unwrap_or_default();
+            // 审计与业务写入同事务（SAVEPOINT 内）：先写回执会伪造冲突，先写审计而业务失败
+            // 会留下一条「登记过」的假记录。两条路都由同一个 savepoint 兜住。
+            //
+            // correlation_id 取命令给的链路标识，不用幂等键：键是调用方自编的字符串，
+            // 可能含 `secret` 之类形态，会让脱敏闸门拒掉整条导入。
+            // 重放命中回执时不会走到这里（重放没有产生任何事实，不该再记一条）。
+            let evidence = if imported.candidate_id.is_some() {
+                "source_candidate"
+            } else {
+                "source_identity"
+            };
+            let event = crate::audit_log::AuditEvent::for_write(
+                command.company_id.as_str(),
+                command.correlation_id.as_str(),
+                crate::domain::DomainId::new(command.imported_by.as_str()),
+                AuditAction::ImportSource,
+                crate::domain::Scope {
+                    company_id: crate::domain::DomainId::new(command.company_id.as_str()),
+                    project_id: Some(crate::domain::DomainId::new(command.project_id.as_str())),
+                    issue_id: None,
+                },
+                evidence,
+                command.decided_at.as_str(),
+            )
+            .map_err(StoreError::Audit)?;
+            self.append_audit_event(&event, now_ms)?;
             self.conn.execute(
                 "INSERT INTO delivery_command_receipts (
                     company_id, idempotency_key, command, payload_fingerprint,
@@ -1274,24 +1300,34 @@ impl<'a> UnitOfWork<'a> {
     ///
     /// 单独一条查询而不是复用 `delivery_tracking_view`：追加只需要两个标量，
     /// 读全量视图会把目标、观察、验证结论都算一遍，而那些值在读到时可能已经变了。
+    /// 读跟踪项的版本、状态与所属项目。
+    ///
+    /// 三项一起取而不是分两次查：它们必须来自同一行，分两次读会在并发改动后拼出
+    /// 「版本属于第一次、项目属于第二次」的结果。
     fn delivery_tracking_gate(
         &self,
         company_id: &str,
         tracking_id: &str,
-    ) -> Result<(i64, TrackingState), StoreError> {
+    ) -> Result<(i64, TrackingState, String), StoreError> {
         let row = self
             .conn
             .query_row(
-                "SELECT resource_version, state FROM delivery_tracking
+                "SELECT resource_version, state, project_id FROM delivery_tracking
                  WHERE company_id = ?1 AND tracking_id = ?2",
                 params![company_id, tracking_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((version, state)) = row else {
+        let Some((version, state, project_id)) = row else {
             return Err(DeliveryError::TrackingNotFound(tracking_id.to_string()).into());
         };
-        Ok((version, TrackingState::parse(&state)?))
+        Ok((version, TrackingState::parse(&state)?, project_id))
     }
 
     /// 追加一条关联（P8 3.4）：来源或内部工作包，连同要确保存在的客户目标。
@@ -1341,7 +1377,7 @@ impl<'a> UnitOfWork<'a> {
 
         self.conn.execute_batch("SAVEPOINT append_delivery_link")?;
         let outcome = (|| -> Result<LinkOutcome, StoreError> {
-            let (current, state) =
+            let (current, state, project_id) =
                 self.delivery_tracking_gate(&command.company_id, &command.tracking_id)?;
             if state != TrackingState::Open {
                 return Err(LinkError::TrackingClosed(command.tracking_id.clone()).into());
@@ -1412,6 +1448,29 @@ impl<'a> UnitOfWork<'a> {
             let detail = serde_json::to_string(&outcome).map_err(|err| {
                 IdempotencyError::ResultNotRecordable(format!("结果体无法编码为 JSON：{err}"))
             })?;
+            // 只在真有新增时记审计：`appended=false` 是幂等的空操作（关系已在、目标已在），
+            // 记一条「追加了」会让审计回答「谁改了什么」时凭空多出一次改动。
+            if appended {
+                let evidence = match &command.link {
+                    LinkRef::Source(_) => "source_link",
+                    LinkRef::WorkPackage(_) => "work_package_link",
+                };
+                let event = crate::audit_log::AuditEvent::for_write(
+                    command.company_id.as_str(),
+                    command.correlation_id.as_str(),
+                    crate::domain::DomainId::new(command.linked_by.as_str()),
+                    AuditAction::AppendLink,
+                    crate::domain::Scope {
+                        company_id: crate::domain::DomainId::new(command.company_id.as_str()),
+                        project_id: Some(crate::domain::DomainId::new(project_id.as_str())),
+                        issue_id: None,
+                    },
+                    evidence,
+                    command.decided_at.as_str(),
+                )
+                .map_err(StoreError::Audit)?;
+                self.append_audit_event(&event, now_ms)?;
+            }
             // 结果种类记 `tracking`：关系是跟踪项的属性，回执要回答的是「哪条跟踪项被改了」。
             // 新增第三种种类要重建表（`result_kind` 的 CHECK 不受 ALTER 幂等保护），
             // 而换命令与换载荷已经由 `command` 列分清。
@@ -1465,7 +1524,7 @@ impl<'a> UnitOfWork<'a> {
             params![company_id, tracking_id, now_ms, current],
         )?;
         if changed != 1 {
-            let (latest, _) = self.delivery_tracking_gate(company_id, tracking_id)?;
+            let (latest, _, _) = self.delivery_tracking_gate(company_id, tracking_id)?;
             return Err(LinkError::VersionConflict {
                 expected: u64::try_from(current)
                     .map_err(|_| DeliveryError::InvalidVersion(current))?,

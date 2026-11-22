@@ -4,8 +4,11 @@
 //! 与输出（`telemetry` 负责）。这样同一份判定既能落表又能进日志，不会长出两套字段。
 //!
 //! 与 `authorization::StageAudit` 的关系：后者是**判定过程的内存产物**，随请求结束消失；
-//! 本模块把它变成可持久的事实。`AuditEvent::from_stage` 是唯一的转换入口——
+//! 本模块把它变成可持久的事实。`AuditEvent::from_stage` 是阶段判定的唯一转换入口——
 //! 两处各自拼字段是审计字段漂移的常见来源，所以只留一条路。
+//!
+//! 准入之外的持久写入（导入来源、追加关联）不走 `from_stage`：它们没有阶段判定，
+//! 走 `AuditEvent::for_write`。两个入口各自挡住错的那一类动作，见 `AuditAction`。
 //!
 //! 为什么拒绝也要记：§8 要求「拒绝路径应无外部调用或待发意图」，要证明这一点，
 //! 必须先能查到「谁在什么时候被拒绝、因为什么」。拒绝不产生业务事实，
@@ -38,6 +41,95 @@ impl AuditDecision {
     }
 }
 
+/// 审计的动作词表。
+///
+/// 与 `authorization::StageAction` **分开**（ADR-0007 第 1 条「不扩 `StageAction`」的延伸）：
+/// 阶段动作是**准入**词表，每个变体都必须能回答「需要什么凭据」（`StageRequirement`）；
+/// 审计是**事实**词表，它要记的不止准入，还有准入之外的持久写入（导入来源、追加关联）。
+/// 合成一个枚举只有两条路可走——给业务写入编一个假的阶段要求（`requirement()` 无法
+/// 诚实回答），或者这些动作永远进不了审计。两条都在说谎，所以拆成两个闭集。
+///
+/// 映射只有一个方向：`From<StageAction>`。审计知道阶段动作，阶段判定不知道审计动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditAction {
+    // —— 阶段准入：与 `StageAction` 一一对应 ——
+    Submit,
+    ManageScope,
+    Dispatch,
+    Develop,
+    Review,
+    Accept,
+    Release,
+    Rollback,
+    Prove,
+    Reopen,
+    // —— 业务写入：不产生阶段判定，所以没有 `StageRequirement` ——
+    /// 导入外部来源：登记来源身份或提交候选，并挂到（或建立）跟踪项。
+    ImportSource,
+    /// 给跟踪项追加来源或内部工作包关联。
+    AppendLink,
+}
+
+impl AuditAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Submit => "submit",
+            Self::ManageScope => "manage_scope",
+            Self::Dispatch => "dispatch",
+            Self::Develop => "develop",
+            Self::Review => "review",
+            Self::Accept => "accept",
+            Self::Release => "release",
+            Self::Rollback => "rollback",
+            Self::Prove => "prove",
+            Self::Reopen => "reopen",
+            Self::ImportSource => "import-source",
+            Self::AppendLink => "append-link",
+        }
+    }
+
+    /// 读库用。表外值返回 `None`，由调用方报错——不静默回退（见 `store::audit` 的行映射）。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "submit" => Some(Self::Submit),
+            "manage_scope" => Some(Self::ManageScope),
+            "dispatch" => Some(Self::Dispatch),
+            "develop" => Some(Self::Develop),
+            "review" => Some(Self::Review),
+            "accept" => Some(Self::Accept),
+            "release" => Some(Self::Release),
+            "rollback" => Some(Self::Rollback),
+            "prove" => Some(Self::Prove),
+            "reopen" => Some(Self::Reopen),
+            "import-source" => Some(Self::ImportSource),
+            "append-link" => Some(Self::AppendLink),
+            _ => None,
+        }
+    }
+
+    /// 是否属于阶段准入词表。写库前的闸门用它把两类动作用不同的构造入口分开。
+    pub fn is_stage(self) -> bool {
+        !matches!(self, Self::ImportSource | Self::AppendLink)
+    }
+}
+
+impl From<StageAction> for AuditAction {
+    fn from(action: StageAction) -> Self {
+        match action {
+            StageAction::Submit => Self::Submit,
+            StageAction::ManageScope => Self::ManageScope,
+            StageAction::Dispatch => Self::Dispatch,
+            StageAction::Develop => Self::Develop,
+            StageAction::Review => Self::Review,
+            StageAction::Accept => Self::Accept,
+            StageAction::Release => Self::Release,
+            StageAction::Rollback => Self::Rollback,
+            StageAction::Prove => Self::Prove,
+            StageAction::Reopen => Self::Reopen,
+        }
+    }
+}
+
 /// 一条审计事件。
 ///
 /// 字段与 §8 的六项要求一一对应：谁（`actor`）、做了什么（`action`）、
@@ -49,7 +141,7 @@ pub struct AuditEvent {
     /// 一次用户动作贯穿的链：入口解析、阶段校验、外部效果、回执共用同一值。
     pub correlation_id: String,
     pub actor: DomainId,
-    pub action: StageAction,
+    pub action: AuditAction,
     pub scope: Scope,
     /// 判定的依据标识，形如 `submit:project_membership` / `accept:not_a_member`。
     /// 前缀是动作，便于按动作聚合；后缀是凭据或拒绝码，便于按原因聚合。
@@ -71,6 +163,9 @@ pub enum AuditRejection {
     DecisionReasonMismatch,
     /// 文本里出现凭据形态。审计表可读，写进去等于泄露。
     SecretInText(&'static str),
+    /// 动作与构造入口不匹配：阶段动作只能出自 `from_stage`，业务写入只能出自 `for_write`。
+    /// 放过去的话，「准入被拒」与「写入成功」会在同一张表里长得一样。
+    ActionKindMismatch(&'static str),
 }
 
 impl AuditRejection {
@@ -83,6 +178,7 @@ impl AuditRejection {
             Self::SecretInText(field) => {
                 format!("审计字段 {field} 含凭据形态，拒绝落库（审计表可读）")
             }
+            Self::ActionKindMismatch(why) => format!("审计动作与构造入口不匹配：{why}"),
         }
     }
 }
@@ -175,7 +271,7 @@ impl AuditEvent {
             company_id: company_id.into(),
             correlation_id: correlation_id.into(),
             actor: audit.actor.clone(),
-            action: audit.action,
+            action: AuditAction::from(audit.action),
             scope: audit.scope.clone(),
             // 前缀是动作：同一条链里可能有多段判定（提交 → 接受），只按凭据名读会串。
             basis: format!("{}:{}", audit.action.as_str(), evidence),
@@ -183,6 +279,49 @@ impl AuditEvent {
             reason,
             decided_at: decided_at.into(),
         }
+    }
+
+    /// 准入之外的**持久写入**的审计事件（导入来源、追加关联）。
+    ///
+    /// 与 `from_stage` 分开而不是共用一个函数：这两类事件的决策段语义不同。
+    /// 阶段判定的 `allowed` 是「这次动作被允许」；写入的 `allowed` 是「这次写入发生了」——
+    /// 因为写不成的路径会连业务行一起回滚，审计也就不会留下，所以能写进表里的写入审计
+    /// 必然是既成事实。共用一个构造函数会让这句话在代码里看不出来。
+    ///
+    /// `evidence` 是「凭什么这么做」的那一段（如 `source_identity` / `work_package`），
+    /// 与阶段动作一样拼成 `动作:依据`。
+    ///
+    /// 拒绝路径（如 `SOURCE_ALREADY_LINKED`）不在本函数负责范围内：拒绝会让事务回滚，
+    /// 回滚会带走同一事务里的审计行。这类拒绝要留痕必须另起事务写，属未完成项。
+    pub fn for_write(
+        company_id: impl Into<String>,
+        correlation_id: impl Into<String>,
+        actor: DomainId,
+        action: AuditAction,
+        scope: Scope,
+        evidence: &str,
+        decided_at: impl Into<String>,
+    ) -> Result<Self, AuditRejection> {
+        if action.is_stage() {
+            return Err(AuditRejection::ActionKindMismatch(
+                "阶段动作必须由 from_stage 生成：准入被拒与写入成功不能记成同一件事",
+            ));
+        }
+        if evidence.trim().is_empty() {
+            return Err(AuditRejection::BlankField("evidence"));
+        }
+        Ok(Self {
+            company_id: company_id.into(),
+            correlation_id: correlation_id.into(),
+            actor,
+            action,
+            scope,
+            basis: format!("{}:{evidence}", action.as_str()),
+            // 写入既成事实才算数，所以恒为 allowed、恒无原因。
+            decision: AuditDecision::Allowed,
+            reason: None,
+            decided_at: decided_at.into(),
+        })
     }
 }
 
@@ -214,7 +353,7 @@ mod tests {
             company_id: "c-1".to_string(),
             correlation_id: "req-7".to_string(),
             actor: DomainId::new("u-1"),
-            action: StageAction::Submit,
+            action: AuditAction::Submit,
             scope: scope(),
             basis: "submit:project_membership".to_string(),
             decision: AuditDecision::Allowed,
@@ -341,5 +480,124 @@ mod tests {
             assert_eq!(AuditDecision::parse(decision.as_str()), Some(decision));
         }
         assert_eq!(AuditDecision::parse("maybe"), None);
+    }
+
+    /// 词表是闭集：每个取值都能往返，表外值一律 `None`（读库时报错，不静默回退）。
+    #[test]
+    fn action_vocabulary_is_closed_under_round_trip() {
+        for action in [
+            AuditAction::Submit,
+            AuditAction::ManageScope,
+            AuditAction::Dispatch,
+            AuditAction::Develop,
+            AuditAction::Review,
+            AuditAction::Accept,
+            AuditAction::Release,
+            AuditAction::Rollback,
+            AuditAction::Prove,
+            AuditAction::Reopen,
+            AuditAction::ImportSource,
+            AuditAction::AppendLink,
+        ] {
+            assert_eq!(AuditAction::parse(action.as_str()), Some(action));
+        }
+        assert_eq!(
+            AuditAction::parse("import_source"),
+            None,
+            "下划线不是词表取值"
+        );
+        assert_eq!(AuditAction::parse("link"), None);
+    }
+
+    /// 阶段准入与业务写入必须分得开：混在一起，`StageRequirement` 就无法诚实回答。
+    #[test]
+    fn stage_actions_and_business_writes_are_disjoint() {
+        for action in [
+            AuditAction::Submit,
+            AuditAction::ManageScope,
+            AuditAction::Dispatch,
+            AuditAction::Develop,
+            AuditAction::Review,
+            AuditAction::Accept,
+            AuditAction::Release,
+            AuditAction::Rollback,
+            AuditAction::Prove,
+            AuditAction::Reopen,
+        ] {
+            assert!(action.is_stage(), "{} 必须是阶段动作", action.as_str());
+        }
+        for action in [AuditAction::ImportSource, AuditAction::AppendLink] {
+            assert!(!action.is_stage(), "{} 不是阶段动作", action.as_str());
+        }
+        // `StageAction` 的每个变体都能映射进来，且映射结果仍是阶段动作——
+        // 漏映射会让 `from_stage` 生成的 basis 前缀与实际动作不符。
+        for action in [
+            StageAction::Submit,
+            StageAction::ManageScope,
+            StageAction::Dispatch,
+            StageAction::Develop,
+            StageAction::Review,
+            StageAction::Accept,
+            StageAction::Release,
+            StageAction::Rollback,
+            StageAction::Prove,
+            StageAction::Reopen,
+        ] {
+            let mapped = AuditAction::from(action);
+            assert!(mapped.is_stage());
+            assert_eq!(mapped.as_str(), action.as_str(), "词表必须同形");
+        }
+    }
+
+    /// `for_write` 拒绝阶段动作：那种事件只能出自判定，不能由调用方凭空构造。
+    #[test]
+    fn for_write_refuses_stage_actions() {
+        let err = AuditEvent::for_write(
+            "c-1",
+            "k-1",
+            DomainId::new("u-1"),
+            AuditAction::Accept,
+            scope(),
+            "grant:accept",
+            "2026-11-22T00:00:00Z",
+        )
+        .expect_err("阶段动作不得由 for_write 生成");
+        assert!(matches!(err, AuditRejection::ActionKindMismatch(_)));
+    }
+
+    /// 写入审计恒为 allowed 且无原因，basis 以动作名开头——与阶段动作同形，便于按动作聚合。
+    #[test]
+    fn for_write_marks_an_established_write() {
+        let event = AuditEvent::for_write(
+            "c-1",
+            "k-1",
+            DomainId::new("u-1"),
+            AuditAction::ImportSource,
+            scope(),
+            "source_identity",
+            "2026-11-22T00:00:00Z",
+        )
+        .expect("业务写入应可构造");
+        assert_eq!(event.action, AuditAction::ImportSource);
+        assert_eq!(event.basis, "import-source:source_identity");
+        assert_eq!(event.decision, AuditDecision::Allowed);
+        assert_eq!(event.reason, None);
+        assert_eq!(event.validate(), Ok(()));
+    }
+
+    /// 依据为空等于没写「凭什么」，与字段缺失同档处理。
+    #[test]
+    fn for_write_requires_evidence() {
+        let err = AuditEvent::for_write(
+            "c-1",
+            "k-1",
+            DomainId::new("u-1"),
+            AuditAction::AppendLink,
+            scope(),
+            "   ",
+            "2026-11-22T00:00:00Z",
+        )
+        .expect_err("空依据不得写入");
+        assert_eq!(err, AuditRejection::BlankField("evidence"));
     }
 }
