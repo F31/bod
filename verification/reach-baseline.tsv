@@ -1,6 +1,6 @@
-# bod-reach-baseline v1 crate=bod-app modules=94 lines=106705
+# bod-reach-baseline v1 crate=bod-app modules=94 lines=107484
 # name	lines	reach
-store	8916	live
+store	9695	live
 manager_transfer	2678	live
 rebuild_precheck	2418	live
 context_handoff	2360	live

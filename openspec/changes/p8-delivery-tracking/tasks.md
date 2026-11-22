@@ -126,6 +126,27 @@
       （`visibility_and_target_granularity_fail_for_different_reasons`）；
       `delivery_api::DENIED_CODE` 改由 `RecordRejection::ApiDenied` 派生，同一档码不再有两个字面量。
       仍缺 B1/B2/B3：路由上没有任何一处调用这些函数，`x-bod-status` 仍是 `planned`。
+      **B1/B2/B6 已完成（2026-11-22）**：
+      - B1 → `020_stage_facts.sql` 四张表：`project_members`（PK company+project+principal）、
+        `customer_bindings`（PK company+principal，**一个主体只绑定一个客户**：一对多会让
+        `customer_of` 的答案取决于行序）、`release_operators`（PK company+principal）、
+        `authorization_revocations`（PK company+revision，`principal_id` 为空表示公司级，
+        追加式：UPDATE/DELETE 由 trigger 拒绝）。四张表都带 `revision` 与 `active`：
+        它们是**当前事实**，历史由 `audit_events` 承担。
+      - B6 → `assignments` **不建表**，从既有 `issues.owner_id / owner_kind /
+        assignment_grant_revision` 派生。那三列是写路径唯一维护的指派事实，再建一张表
+        就是第二份会漂移的真相（且没有写入者）。
+      - B2 → `store::facts::StageFactsPort`（`crates/bod-app/src/store/facts.rs`）：
+        只读、按主体投影、失败返回 `StageFactsError`（`BOD_FACTS_UNAVAILABLE` / 503），
+        绝不返回空事实。10 条用例覆盖空库、跨公司/跨主体隔离、停用行、表外权限文本报错、
+        缺表报错、客户绑定唯一性、撤权表追加式、以及「装配 → `access_record` → 三档码」的接缝
+        （`assembled_facts_drive_the_record_decision`）。
+      - **撤权修订的来源已定**：只认 `authorization_revocations`。**不从 `grants.active = 0`
+        反推**——`grants.revision` 是授予时的修订，停用不 bump，推出来偏旧，
+        会让本该重同步的离线客户端漏一次重同步。
+      **仍未做 B3/B4/B5**：`Principal` 仍无生产构造点（主体来源待定，选项 A/B/C 见
+      `docs/reports/v299-spec-review-and-plan.md` §3）；`authorization_revocations` 目前
+      **没有写入者**（撤权命令尚未实现）；装配端口在生产零调用，路由仍回 401 `BOD_API_DENIED`。
 
 ## 4. 共用覆盖投影（`I-72`）
 

@@ -13,6 +13,7 @@ pub mod audit;
 pub mod budget;
 pub mod delivery;
 pub mod execution;
+pub mod facts;
 pub mod governance;
 pub mod maintenance;
 pub mod project;
@@ -86,7 +87,8 @@ pub use rows::{
 /// 016 为 §11 交付跟踪（P8 3.1：跟踪项/目标/追加式观察）；
 /// 017 为来源身份（P8 3.2：五元组/候选/追加式修订）；
 /// 018 为去重语义（P8 3.3：命令回执/来源关系）；
-/// 019 为关联追加（P8 3.4：内部工作包关联；目标关联与版本推进复用 016 的表与列）。
+/// 019 为关联追加（P8 3.4：内部工作包关联；目标关联与版本推进复用 016 的表与列）；
+/// 020 为授权事实（P8 3.6 B1：项目成员/客户绑定/发布操作人/撤权修订）。
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 /// P7 基准统一页缓存：负数按 KiB 解释，64 MiB；避免依赖 SQLite 默认 2 MiB。
 const BENCH_CACHE_SIZE_KIB: i64 = 65_536;
@@ -111,6 +113,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/017_delivery_sources.sql"),
     include_str!("../migrations/018_delivery_idempotency.sql"),
     include_str!("../migrations/019_delivery_links.sql"),
+    include_str!("../migrations/020_stage_facts.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -134,6 +137,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "017_delivery_sources.sql",
     "018_delivery_idempotency.sql",
     "019_delivery_links.sql",
+    "020_stage_facts.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -181,6 +185,9 @@ pub enum StoreError {
     /// 与 `Delivery` 分开：这些错误的处置是「改请求」或「按当前版本重提」，
     /// 而不是去补证据。
     Link(crate::delivery_link::LinkError),
+    /// 授权事实取不到（3.6 B1/B2）。**单独一档**：它的处置是「报故障」，
+    /// 不是「当成没有事实」——降级为全可见或全不可见都是把故障伪装成权限。
+    Facts(facts::StageFactsError),
 }
 
 impl fmt::Display for StoreError {
@@ -200,6 +207,7 @@ impl fmt::Display for StoreError {
             Self::Source(err) => write!(f, "来源身份失败: {}", err.explain()),
             Self::Idempotency(err) => write!(f, "幂等键冲突: {}", err.explain()),
             Self::Link(err) => write!(f, "关联追加失败: {}", err.explain()),
+            Self::Facts(err) => write!(f, "授权事实装配失败: {}", err.explain()),
         }
     }
 }
@@ -239,6 +247,12 @@ impl From<IdempotencyError> for StoreError {
 impl From<crate::delivery_link::LinkError> for StoreError {
     fn from(value: crate::delivery_link::LinkError) -> Self {
         Self::Link(value)
+    }
+}
+
+impl From<facts::StageFactsError> for StoreError {
+    fn from(value: facts::StageFactsError) -> Self {
+        Self::Facts(value)
     }
 }
 
@@ -404,12 +418,34 @@ fn owner_kind_str(kind: OwnerKind) -> &'static str {
     }
 }
 
+/// `issues.owner_kind` 的读侧。只认写入时用的那套大写拼写；
+/// 表外取值返回 `None`，由调用方报错而不是猜一个默认值。
+fn parse_owner_kind(text: &str) -> Option<OwnerKind> {
+    match text {
+        "Agent" => Some(OwnerKind::Agent),
+        "User" => Some(OwnerKind::User),
+        _ => None,
+    }
+}
+
 fn permission_str(permission: Permission) -> &'static str {
     match permission {
         Permission::Dispatch => "Dispatch",
         Permission::ManageBudget => "ManageBudget",
         Permission::Accept => "Accept",
         Permission::ManageScope => "ManageScope",
+    }
+}
+
+/// `grants.permission` 的读侧。读不成已知权限说明有人绕过应用写库——
+/// 静默当成某个已知权限，等于把越权写成缺陷。
+fn parse_permission(text: &str) -> Option<Permission> {
+    match text {
+        "Dispatch" => Some(Permission::Dispatch),
+        "ManageBudget" => Some(Permission::ManageBudget),
+        "Accept" => Some(Permission::Accept),
+        "ManageScope" => Some(Permission::ManageScope),
+        _ => None,
     }
 }
 

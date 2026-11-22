@@ -666,6 +666,28 @@
     `target_visible` 对「无客户维度的记录」返回 `true`（粒度不适用）由阶段二挡下，
     是刻意的：两阶段各自只回答自己的问题。
 
+28. **授权事实只能按主体装配，取不到就报错，不许降级**
+    （`crates/bod-app/src/store/facts.rs`、`store::facts::tests`）。
+    `StageFactsPort` 是 §8.1 判定的唯一取数口，四条约束都是可机械判断的：
+    - **按主体投影，不是公司全量**。`grants` / `project_members` / `customer_bindings`
+      都带 `WHERE principal_id = ?`；判定只读传入主体的那几行，装全公司会把一次请求的
+      成本绑到组织规模上。`release_operators` 是例外：判定问「我在不在名单里」，
+      但直接把「我是否在」查成一个布尔会让 `StageFacts` 从事实退化成答案。
+    - **空事实 ≠ 空判定**。缺表、锁超时、表外取值一律返回 `StageFactsError`
+      （`BOD_FACTS_UNAVAILABLE` / 503）。返回空 `StageFacts` 会让 `record_visible` 全假，
+      每个请求都 `BOD_NOT_FOUND`，且与「对象不存在」不可区分——比直接报故障更糟。
+    - **同一枚举在库里有两种拼写**：`members.kind` 与 `project_members.kind` 是小写
+      （`user` / `agent`），`issues.owner_kind` 是首字母大写（`User` / `Agent`）。
+      跨表按文本比对会**恒不相等**，读侧必须各按写入侧还原。
+    - **撤权修订只认 `authorization_revocations`**，不从 `grants.active = 0` 的行反推：
+      `grants.revision` 是授予时的修订，停用不 bump，推出来偏旧，
+      而 `check_subscription` 用 `since < revoked_at` 决定重同步——偏旧等于漏一次重同步。
+      撤权表是追加式的（UPDATE/DELETE 由 trigger 拒绝），改写它等于追溯性地改掉
+      「按哪一版授权判的」。
+    `assignments` 从既有 `issues.owner_id / owner_kind / assignment_grant_revision` 派生，
+    **不新建表**：那三列是写路径唯一维护的指派事实，再建一张表就是第二份会漂移的真相。
+    代价是 `assignment_grant_revision` 为空时只能记 0（写路径不会产生，判定也不读它）。
+
 ## 验证与完成规则
 
 - 每个切片自带实现、测试与验证索引；不把测试路径存在当作测试通过。

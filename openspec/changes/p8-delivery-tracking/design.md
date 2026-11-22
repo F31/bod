@@ -242,6 +242,24 @@
 customer_bindings 从库里读出来。所以 3.6 的工作量在**装配端口**与 `Principal` 传参，
 不在重写判定；先做 GET 是关键——写端点先上、过滤后补，等于把「没有过滤」发布成「已过滤」。
 
+**已完成的一半（B1/B2/B6）**：`020_stage_facts.sql` 补了四张表（项目成员 / 客户绑定 /
+发布操作人 / 撤权修订），`store::facts::StageFactsPort` 负责按主体装配六组事实。
+四个决定值得留在设计里：
+
+1. **成员分两层**。`members`(001) 是 Company 级身份，`project_members` 才是「在项目里有立场」。
+   把 `project_id` 塞进 `members` 会让「同一个人换项目」变成两行同 uid 的冲突。
+2. **一个主体只绑定一个客户**（主键决定）。`customer_of` 只返回一个答案，一对多会让判定
+   依赖行序；需要多客户视角时用不同主体——客户是交付目标维度，不是数据所有权边界。
+3. **撤权修订单独登记**，不从 `grants.active = 0` 反推：`grants.revision` 是授予时的修订，
+   停用不 bump，反推会偏旧，而 `check_subscription` 用 `since < revoked_at` 决定重同步，
+   偏旧等于漏一次重同步。这张表目前**没有写入者**（撤权命令尚未实现），
+   所以 `revoked_at_revision` 仍是 `None`——这是现状，不是已实现。
+4. **`assignments` 不建表**，从 `issues` 的 owner 三列派生。再建一张表就是第二份会漂移的
+   真相，而且没有写入者。
+
+剩下的是 B3（`Principal` 从哪来）/ B4（装配失败的对外映射）/ B5（GET 转 `served`），
+三者都压在「主体来源」这一个决定上。
+
 ## Open Questions
 
 - 渠道适配的第一条真实通道选哪个（决定「送达」是否有幂等键）。
