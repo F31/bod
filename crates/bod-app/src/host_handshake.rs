@@ -187,6 +187,19 @@ pub struct HostServer {
     /// `run` 每轮检查。用原子而非 `handle` 返回值，是因为停服属于传输层的
     /// 循环控制，不该由路由层的 `Reply` 表达。
     stopping: AtomicBool,
+    /// 产品接口（`/api/v1/*`）的只读端口 + 请求主体（P8 3.6 B3/B5）。
+    ///
+    /// **两者合成一个 `Option`**：有数据源却没有主体、或有主体却没有数据源，
+    /// 都是「装配没完成」。拆成两个字段会让「半配置」在类型上合法，
+    /// 于是要在一堆 handler 里各判一次。
+    ///
+    /// `None` 时产品接口一律 401。这不是占位，是刻意的安全默认：装配缺失时
+    /// 不回退成「匿名用户」——匿名主体会让权限判定与审计归属同时失真，
+    /// 而失真后的记录比没有记录更难查。
+    delivery: Option<(
+        std::sync::Arc<dyn crate::delivery_api::TrackingRead>,
+        crate::delivery_api::DeliveryActor,
+    )>,
 }
 
 impl HostServer {
@@ -232,6 +245,7 @@ impl HostServer {
             feed,
             policy,
             stopping: AtomicBool::new(false),
+            delivery: None,
         };
         write_descriptor(descriptor_path, &server.descriptor)?;
         Ok(server)
@@ -242,6 +256,33 @@ impl HostServer {
     /// 必须在 `run` 之前调用；发布产物不应调用它。
     pub fn allow_origin(&mut self, origin: &str) {
         self.policy = self.policy.clone().with_origin(origin);
+    }
+
+    /// 装配产品接口（`/api/v1/*`）的只读端口与请求主体（P8 3.6 B3/B5）。
+    ///
+    /// **必须在 `run` 之前调用**。不调用时产品接口一律 401 `BOD_API_DENIED`，
+    /// 理由见字段 `delivery` 的说明——装配缺失不等于「匿名用户可以访问」。
+    ///
+    /// 主体（`DeliveryActor`）由宿主决定从哪来：本机单用户配置、会话 → 成员映射、
+    /// 或请求头自报，是三种不同的产品选择，接口层不预设。这里只要求传进来的
+    /// 是一个确定的主体，不是一个可缺省的东西。
+    pub fn with_delivery(
+        mut self,
+        tracking: std::sync::Arc<dyn crate::delivery_api::TrackingRead>,
+        actor: crate::delivery_api::DeliveryActor,
+    ) -> Self {
+        self.delivery = Some((tracking, actor));
+        self
+    }
+
+    /// 产品接口的只读端口。未装配时为 `None`。
+    pub fn tracking_read(&self) -> Option<&dyn crate::delivery_api::TrackingRead> {
+        self.delivery.as_ref().map(|(read, _)| read.as_ref())
+    }
+
+    /// 产品接口使用的请求主体。未装配时为 `None`。
+    pub fn delivery_actor(&self) -> Option<&crate::delivery_api::DeliveryActor> {
+        self.delivery.as_ref().map(|(_, actor)| actor)
     }
 
     /// 当前 Host/Origin 白名单，供测试与诊断读取。

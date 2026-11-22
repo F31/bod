@@ -235,7 +235,11 @@ fn planned_operations_are_marked_and_explain_the_501() {
             planned += 1;
         }
     }
-    assert_eq!(planned, 6, "§11 的 6 个操作应全部处于 planned");
+    assert_eq!(
+        planned, 5,
+        "§11 的 6 个操作里，只有 GET /delivery-tracking/{{id}} 已落地（P8 3.6 B5）；\
+         其余 5 个仍须如实标 planned。数字变了就要回头读 tasks.md，别直接改这里"
+    );
 }
 
 /// serde 与 schema 的漂移闸门。

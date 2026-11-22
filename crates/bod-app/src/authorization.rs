@@ -489,9 +489,13 @@ fn is_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) -> b
 /// 将来放宽其中一条时没人能说清是哪一条在起作用。
 ///
 /// 只与 `is_visible` 合起来用（`record_visible` 是唯一组合点）。
-fn target_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) -> bool {
+///
+/// 入参是**客户维度本身**而不是整条记录：列表过滤（`filter_records`）要用它判记录的
+/// 客户字段，而 GET 这类读路径要对**每个目标**单独判一次目标粒度，两者都只需要这一个值。
+/// 传 `&ScopedRecord` 会逼着调用方为每个目标现造一条假记录。
+pub fn target_visible(facts: &StageFacts, actor: &Principal, customer_id: Option<&str>) -> bool {
     match facts.customer_of(&actor.id) {
-        Some(customer) => match record.customer_id.as_deref() {
+        Some(customer) => match customer_id {
             Some(target) => target == customer,
             None => true,
         },
@@ -500,7 +504,7 @@ fn target_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) 
 }
 
 fn record_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) -> bool {
-    is_visible(facts, actor, record) && target_visible(facts, actor, record)
+    is_visible(facts, actor, record) && target_visible(facts, actor, record.customer_id.as_deref())
 }
 
 /// 对外拒绝码（V2.9.9 §8.1）。三个码是契约：客户端按码分支，改名等于改契约。
@@ -575,6 +579,48 @@ pub fn rejection(authenticated: bool, access: &RecordAccess) -> Option<RecordRej
     confirm_subject(authenticated)
         .err()
         .or_else(|| classify_access(access).err())
+}
+
+/// 一条**容器记录**（如跟踪项）的读结论。§8.1 阶段二在容器上的三种结果。
+///
+/// 为什么不是 `Result<(), RecordRejection>`：容器的可见性对客户协作者不是「过或不过」，
+/// 而是「过一部分」——跟踪项本身不带客户维度，客户维度在它下面的目标上。
+/// 用布尔表达会丢掉「按目标放行」这一档，调用方就只能自己去查客户绑定，
+/// 判定规则于是有了第二份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerRead {
+    /// 容器整体可见：内部成员（项目成员）或记录负责人。
+    Whole,
+    /// 只按目标粒度放行。客户协作者属于这一档：他们对容器没有立场
+    /// （`is_visible` 对无客户维度的记录恒为假），可见范围由目标决定。
+    ByTarget,
+    /// 不可见。对外一律 `NotFound`。
+    Halted,
+}
+
+/// §8.1 容器记录的读判定：阶段二（立场）+ 阶段四（目标粒度），**没有阶段三**。
+///
+/// 读没有动作。`StageAction` 的十个变体各自回答「改这件事需要什么凭据」，
+/// 往里塞一个 `Read` 会立刻逼出「读取需要 Dispatch 凭据吗」这类没有答案的问题——
+/// 这正是 ADR-0007 第 1 条禁止扩这个枚举的原因。所以读不发 `StageAction`，
+/// 也不查 `grants`：能看见就能读。
+///
+/// `Halted` 由调用方翻成 `NotFound`，与 `classify_access(&RecordAccess::Invisible)` 同档——
+/// 读路径上「存在但无权」必须与「不存在」同答，否则返回码本身就成了枚举工具。
+/// `ScopeDenied` 那一档只属于命令，不属于读。
+pub fn read_container(
+    facts: &StageFacts,
+    actor: &Principal,
+    record: &ScopedRecord,
+) -> ContainerRead {
+    if facts.customer_of(&actor.id).is_some() {
+        return ContainerRead::ByTarget;
+    }
+    if record_visible(facts, actor, record) {
+        ContainerRead::Whole
+    } else {
+        ContainerRead::Halted
+    }
 }
 
 /// 能看到 ≠ 能做。可见但缺动作权限返回拒绝，而不是"不可见"。
@@ -1390,6 +1436,62 @@ mod stage_permission_tests {
     }
 
     /// 2.2 / AZ01：不可见与可见但禁止是两种返回，不混成一种。
+    /// 容器记录的三档读结论各有归属，且**不靠客户维度决定容器本身可不可见**。
+    ///
+    /// 这条用例守的是一个很容易写错的边界：跟踪项这类容器不带客户维度，
+    /// 客户协作者对它的 `is_visible` 恒为假。若把它当成「不可见」，
+    /// 客户协作者就永远读不到自己的目标；若把它当成「可见」，
+    /// 内部记录又会对所有客户敞开。正确答案是第三档。
+    #[test]
+    fn container_read_is_three_way_and_customer_access_is_by_target() {
+        let mut facts = facts();
+        facts
+            .customer_bindings
+            .push((DomainId::new("user-customer-a"), "customer-a".to_string()));
+        let container = ScopedRecord::new("tracking-1", scope("project-1", "tracking-1"));
+
+        // 内部成员：整体可见。
+        assert_eq!(
+            read_container(&facts, &user("user-dev"), &container),
+            ContainerRead::Whole,
+            "项目成员对容器有立场"
+        );
+
+        // 记录负责人但**不是**项目成员：负责人是独立的立场来源。
+        // 这里刻意用 `members` 之外的主体，否则验到的还是成员那条分支。
+        let owned = ScopedRecord::new("tracking-1", scope("project-1", "tracking-1"))
+            .assigned_to(DomainId::new("user-outside-owner"));
+        assert_eq!(
+            read_container(&facts, &user("user-outside-owner"), &owned),
+            ContainerRead::Whole,
+            "负责人看得到自己负责的容器，不需要先成为成员"
+        );
+
+        // 客户协作者：容器本身没有立场，但也不是拒绝——按目标放行。
+        let customer = user("user-customer-a");
+        assert_eq!(
+            read_container(&facts, &customer, &container),
+            ContainerRead::ByTarget,
+            "客户协作者对无客户维度的容器没有立场，结论是「按目标放行」而不是拒绝"
+        );
+
+        // 同一档不因容器自带客户维度而变成整体可见：那会把兄弟客户一律放进来。
+        let customer_scoped =
+            ScopedRecord::new("issue-a", scope("project-1", "issue-a")).for_customer("customer-a");
+        assert_eq!(
+            read_container(&facts, &customer, &customer_scoped),
+            ContainerRead::ByTarget,
+            "带客户维度的记录上，客户协作者同样只按目标粒度放行"
+        );
+
+        // 无关用户：拒绝。这一档由调用方翻成 NotFound，与「不存在」同答。
+        assert_eq!(
+            read_container(&facts, &user("user-outsider"), &container),
+            ContainerRead::Halted,
+            "既不是成员、也不是负责人、也没有客户绑定 → 拒绝"
+        );
+    }
+
     #[test]
     fn task_2_2_invisible_and_forbidden_are_distinct() {
         let facts = facts();
@@ -1452,7 +1554,8 @@ mod stage_permission_tests {
         let internal = ScopedRecord::new("issue-internal", scope("project-1", "issue-internal"));
 
         assert!(
-            is_visible(&facts, &customer, &own) && target_visible(&facts, &customer, &own),
+            is_visible(&facts, &customer, &own)
+                && target_visible(&facts, &customer, own.customer_id.as_deref()),
             "本客户的目标两步都过"
         );
         // 兄弟客户：阶段二过（对客户维度有立场），阶段四挡下（粒度只到本客户）。
@@ -1461,7 +1564,7 @@ mod stage_permission_tests {
             "客户协作者对客户维度的记录有立场"
         );
         assert!(
-            !target_visible(&facts, &customer, &sibling),
+            !target_visible(&facts, &customer, sibling.customer_id.as_deref()),
             "但只看得到自己那个客户——这是阶段四的职责"
         );
         // 内部记录：阶段二就挡下，阶段四不适用（不在此处重复判断）。
@@ -1470,14 +1573,18 @@ mod stage_permission_tests {
             "没有客户维度的记录不在客户的可见域内"
         );
         assert!(
-            target_visible(&facts, &customer, &internal),
+            target_visible(&facts, &customer, internal.customer_id.as_deref()),
             "阶段四不重复判断立场，否则两阶段的失败原因会混在一起"
         );
 
         // 成员不受目标粒度限制：项目内的内部记录与客户记录都可见。
         let member = user("user-dev");
         assert!(is_visible(&facts, &member, &internal));
-        assert!(target_visible(&facts, &member, &internal));
+        assert!(target_visible(
+            &facts,
+            &member,
+            internal.customer_id.as_deref()
+        ));
         assert!(
             is_visible(&facts, &member, &sibling),
             "项目成员看得到本项目下所有客户的记录"

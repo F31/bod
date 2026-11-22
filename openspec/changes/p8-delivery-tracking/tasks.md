@@ -144,9 +144,43 @@
       - **撤权修订的来源已定**：只认 `authorization_revocations`。**不从 `grants.active = 0`
         反推**——`grants.revision` 是授予时的修订，停用不 bump，推出来偏旧，
         会让本该重同步的离线客户端漏一次重同步。
-      **仍未做 B3/B4/B5**：`Principal` 仍无生产构造点（主体来源待定，选项 A/B/C 见
-      `docs/reports/v299-spec-review-and-plan.md` §3）；`authorization_revocations` 目前
-      **没有写入者**（撤权命令尚未实现）；装配端口在生产零调用，路由仍回 401 `BOD_API_DENIED`。
+      **B4/B5 已完成（2026-11-22）**：
+      - **B4 → 装配失败对外映射**：`StageFactsError::CODE`（`BOD_FACTS_UNAVAILABLE`）
+        + `http_status()`（503）由 `evaluate_read` 直接使用。用例
+        `unreadable_facts_are_503_and_never_an_empty_snapshot` 同时守**顺序**：
+        假实现里 `tracking_view` 直接 panic，证明「装配失败后不得继续读视图」。
+      - **B5 → `GET /api/v1/delivery-tracking/{id}` 转 `served`**，四阶段判定接线：
+        主体 → 容器立场 → 目标粒度；三档拒绝码全部经 `RecordRejection` 派生；
+        `x-bod-status` 已改 `served`，501 响应已从契约移除。
+      - **新增判定出口** `authorization::ContainerRead` / `read_container`（三档：
+        `Whole` / `ByTarget` / `Halted`）。读请求**不发 `StageAction`**——ADR-0007 第 1 条：
+        往里塞一个 `Read` 会逼出「读取需要 Dispatch 凭据吗」这类没有答案的问题。
+        容器对客户协作者是「按目标放行」，不是「过 / 不过」：容器本身不带客户维度，
+        用布尔只能得到「恒不可见」或「对所有客户敞开」，两个都错。
+      - **新增只读端口** `delivery_api::TrackingRead`（`Send + Sync`）+
+        `DeliveryActor`（公司 + 主体，主体本身不带公司，这是部署事实）。
+        库侧实现 `store::read_port::StoreTrackingRead`：`Mutex<SqliteStore>`，
+        因为服务循环本身是单线程串行（`HostServer::run` 只有 SSE 才 spawn），
+        锁上没有争用——它只是把「`Connection` 不是 `Sync`」这件事说出来。
+      - **装配入口唯一**：`HostServer::with_delivery(read, actor)`，**两个依赖合成一个
+        `Option`**：有数据源没主体、或有主体没数据源，都是「装配没完成」，
+        拆成两个字段会让半配置在类型上合法。未装配时一律 401 `BOD_API_DENIED`，
+        且对任何 id 同答（用例 `a_host_without_an_actor_denies_before_looking_at_the_id`
+        两个 id 一起断言）。
+
+      **仍未做 / 读之前必看**：
+      - **B3 主体来源仍未经产品决定**（A 单用户显式 / B 会话 → 成员映射 /
+        C `X-Bod-Actor` 请求头自报）。接缝已就位（主体由宿主传给 `with_delivery`，
+        接口层不猜、不硬编码），但**没有任何生产入口调用 `with_delivery`**，
+        所以当前真实请求仍回 401。契约标 `served` 的含义是「端点已实现且行为可解释」，
+        **不是「线上已经能读」**——这两件事在报告里必须分开写。
+      - `authorization_revocations` 仍**没有写入者**（撤权命令尚未实现），
+        `revoked_at_revision` 因此恒为 `None`。
+      - 目标级**证据收窄是近似**：`EvidenceStamp` 不带 `target_id`（形状 2.2 已冻结），
+        只能保留「被保留结论所依据的那几版修订」。要精确到目标得改契约形状。
+      - `allowed_actions` 仍只按「端点是否 served」过滤，**未按动作权限判定**。
+        当前所有写端点 planned，所以它恒为空；接通任何写端点之前必须补上，
+        否则视图会推荐一个主体实际做不了的动作。
 
 ## 4. 共用覆盖投影（`I-72`）
 

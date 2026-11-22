@@ -18,6 +18,7 @@ pub mod governance;
 pub mod maintenance;
 pub mod project;
 pub mod queue;
+pub mod read_port;
 pub mod rows;
 
 #[cfg(test)]

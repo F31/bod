@@ -1126,7 +1126,7 @@
     },
     "/api/v1/delivery-tracking/{id}": {
       "get": {
-        "description": "只校验本机会话密钥；§34.12 未实现。读取按授权目标过滤：对调用者不可见的客户不出现在 targets 里，不是返回空结论",
+        "description": "会话密钥 + §34.12 主体/目标判定（P8 3.6 B5 已接线）。判定顺序：主体 → 记录立场 → 目标粒度；未配主体的宿主一律 BOD_API_DENIED，对任何 id 同答。读取按授权目标过滤：对调用者不可见的客户不出现在 targets 里，一条都不可见时回 BOD_NOT_FOUND（与不存在同答）。事实装配失败回 503 BOD_FACTS_UNAVAILABLE，不降级为空事实",
         "operationId": "get_api_v1_delivery_tracking_id",
         "parameters": [
           {
@@ -1175,16 +1175,6 @@
               }
             },
             "description": "路径不存在或方法不匹配；两者对外同答 404"
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "契约已冻结、实现未落地：本条请求不会被受理，也不会产生任何写入；错误码固定为 BOD_NOT_IMPLEMENTED"
           }
         },
         "security": [
@@ -1194,7 +1184,7 @@
         ],
         "summary": "读取跟踪项的覆盖结论与允许动作",
         "x-bod-auth": "bearer",
-        "x-bod-status": "planned"
+        "x-bod-status": "served"
       }
     },
     "/api/v1/delivery-tracking/{id}/links": {

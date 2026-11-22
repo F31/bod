@@ -26,6 +26,7 @@ use crate::http_router::{
     Auth, Contract, ContractBody, ContractResponse, EndpointRequest, Method, Reply, Route,
     RouteError,
 };
+use crate::store::facts::StageFactsError;
 
 /// 产品接口前缀。分发层按它选择路由表（`host_handshake::handle`），
 /// 所以注入式的前缀表与路由表必须一致——`openapi_contract` 有测试守这一条。
@@ -41,12 +42,175 @@ pub const DENIED_CODE: &str = crate::authorization::RecordRejection::ApiDenied.a
 /// 计划中操作的统一 501 码。
 pub const NOT_IMPLEMENTED_CODE: &str = "BOD_NOT_IMPLEMENTED";
 
+// ---------------------------------------------------------------------------
+// 读端口与请求主体（P8 3.6 B3 / B5）
+// ---------------------------------------------------------------------------
+
+/// 产品接口的请求主体：**谁**，以及**在哪个公司**。
+///
+/// 两者绑在一起是有意的。`Principal`（`bod-core`）只回答「是谁」，不带公司——
+/// 主体与公司的关系是部署事实，不是主体定义的一部分。而装配 `StageFacts` 需要
+/// `company_id`，接口层又不能从请求体里取（「Company 由主体解析得出，不由请求体声明」），
+/// 所以这项对应由宿主在装配时给出。
+///
+/// **尚未决定的是「谁」从哪来**（会话 → 成员映射 / 宿主配置 / 请求头自报）。
+/// 本结构不预设答案：宿主拿到主体后传进来，接口层只负责用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryActor {
+    pub company_id: String,
+    pub principal: crate::authorization::Principal,
+}
+
+/// 交付跟踪的只读端口：宿主注入，接口层只依赖这个 trait，不依赖 `SqliteStore`。
+///
+/// 三条约束：
+/// - **只读**：这两个方法都不写库、不产生审计、不派发。
+/// - **失败不降级**：读不出来返回 `StageFactsError`（503 / `BOD_FACTS_UNAVAILABLE`），
+///   不得退回空事实。空事实会让每个请求都 `BOD_NOT_FOUND`，与「对象真不存在」不可区分。
+/// - **一次请求一份**：调用方在单次请求内只调一次 `stage_facts`，不要放进循环。
+pub trait TrackingRead: Send + Sync {
+    /// 按主体装配授权事实（库侧实现见 `store::facts`）。
+    fn stage_facts(
+        &self,
+        company_id: &str,
+        principal: &crate::authorization::Principal,
+    ) -> Result<crate::authorization::StageFacts, StageFactsError>;
+
+    /// 读一条跟踪项的完整视图。`None` 表示这一条不存在（或不属于该公司）。
+    fn tracking_view(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+    ) -> Result<Option<crate::delivery_tracking::TrackingView>, StageFactsError>;
+}
+
 /// 未实现的 handler：按契约返回 501，不读请求体、不碰状态。
 ///
 /// 刻意不做「解析一半再失败」：请求体尚未被任何实现校验过，报 422 等于
 /// 声称这份 schema 已经生效。
 fn not_implemented(_state: &HostServer, _endpoint: EndpointRequest) -> Result<Reply, RouteError> {
     Err(RouteError::new(501, NOT_IMPLEMENTED_CODE))
+}
+
+/// 拒绝 → 路由错误。状态码与码都从 `RecordRejection` 派生，handler 里不出现第二份字面量。
+fn deny(rejection: crate::authorization::RecordRejection) -> RouteError {
+    RouteError::new(rejection.http_status(), rejection.as_code())
+}
+
+/// `GET /api/v1/delivery-tracking/{id}`（P8 3.6 B5）：真实实现。
+///
+/// 顺序即 §8.1：**主体 → 立场 → 目标粒度**。主体必须在对象之前判完：
+/// 没配主体的宿主，对任意 id 都回同一档码，返回码不携带「这个 id 存不存在」。
+///
+/// 跟踪项与客户目标是两个粒度，这里刻意分两级判（理由见 `container_visible`）。
+fn read_tracking(server: &HostServer, endpoint: EndpointRequest) -> Result<Reply, RouteError> {
+    use crate::authorization::RecordRejection;
+
+    // 阶段一：主体确认。会话密钥已由 `Auth::Bearer` 验过，但「认证通过」不等于
+    // 「知道是谁」——宿主要么在装配时指定了操作者，要么这台机器上没有可归属的主体。
+    // 两种缺失走同一档码：装配没完成是宿主的问题，不该用 403 写成「你没权限」。
+    let Some(actor) = server.delivery_actor() else {
+        return Err(deny(RecordRejection::ApiDenied));
+    };
+    let Some(reader) = server.tracking_read() else {
+        return Err(deny(RecordRejection::ApiDenied));
+    };
+    let Some(tracking_id) = endpoint.param("id") else {
+        return Err(deny(RecordRejection::NotFound));
+    };
+
+    let dto = evaluate_read(actor, reader, tracking_id)?;
+    let value =
+        serde_json::to_value(&dto).map_err(|_| RouteError::new(500, "BOD_TRACKING_UNREADABLE"))?;
+    Ok(Reply::ok(value))
+}
+
+/// `GET /delivery-tracking/{id}` 的判定与投影，与传输层无关。
+///
+/// 单独一个函数有两个好处：用例可以直接驱动它（不必 bind 一个真端口），
+/// 以及「判定顺序」这件事被固定在一处——顺序错了就是这里错了。
+///
+/// 顺序即 §8.1：**主体 → 立场 → 目标粒度**。主体必须在对象之前判完：
+/// 没配主体的宿主，对任意 id 都回同一档码，返回码不携带「这个 id 存不存在」。
+///
+/// 跟踪项与客户目标是两个粒度，这里刻意分两级判（理由见 `ContainerRead`）。
+fn evaluate_read(
+    actor: &DeliveryActor,
+    reader: &dyn TrackingRead,
+    tracking_id: &str,
+) -> Result<DeliveryTrackingView, RouteError> {
+    use crate::authorization::{ContainerRead, RecordRejection, ScopedRecord};
+    use crate::domain::{DomainId, Scope};
+
+    // 一次请求只装配一次事实。装在循环里会让成本随目标数线性增长。
+    let facts = reader
+        .stage_facts(&actor.company_id, &actor.principal)
+        .map_err(|err| {
+            tracing::warn!(
+                target: "bod.delivery_api",
+                detail = %err.explain(),
+                "授权事实装配失败；按 503 拒绝，不降级为空事实"
+            );
+            RouteError::new(err.http_status(), err.as_code())
+        })?;
+
+    let Some(mut view) = reader
+        .tracking_view(&actor.company_id, tracking_id)
+        .map_err(|err| RouteError::new(err.http_status(), err.as_code()))?
+    else {
+        return Err(deny(RecordRejection::NotFound));
+    };
+
+    let scope = Scope {
+        company_id: DomainId::new(actor.company_id.as_str()),
+        project_id: Some(DomainId::new(view.tracking.project_id.as_str())),
+        issue_id: None,
+    };
+    let mut record = ScopedRecord::new(view.tracking.tracking_id.as_str(), scope);
+    // 空负责人不是主体。`assigned_to("")` 会让空串与空串相等，等于给「没有负责人」
+    // 的记录配了一个人人可当的指派身份。
+    if !view.tracking.owner_id.trim().is_empty() {
+        record = record.assigned_to(DomainId::new(view.tracking.owner_id.as_str()));
+    }
+
+    // 阶段二：这条容器能不能看。三档结果见 `ContainerRead`：内部成员整体可见，
+    // 客户协作者按目标放行，其余不可见。**判定规则只在 `authorization` 里一份**，
+    // 这里不自己查客户绑定——否则「谁能看容器」会有两个说法，且没人知道哪个是准的。
+    let container = crate::authorization::read_container(&facts, &actor.principal, &record);
+    if container == ContainerRead::Halted {
+        return Err(deny(RecordRejection::NotFound));
+    }
+
+    // 阶段四：目标粒度。客户协作者只见本客户的目标；被排除的目标**不出现**，
+    // 而不是留一个「无结论」的空位——空位等于承认这些目标存在。
+    if container == ContainerRead::ByTarget {
+        view.targets.retain(|target| {
+            crate::authorization::target_visible(
+                &facts,
+                &actor.principal,
+                Some(target.target.customer_id.as_str()),
+            )
+        });
+        // 证据时间线按目标归属收窄。`EvidenceStamp` 不带 target_id（契约形状在 2.2 冻结），
+        // 所以这里只能保留「被保留下来的结论所依据的那几版证据」——宁可少给，
+        // 不把别的客户的证据修订一起送出去。
+        let kept: std::collections::BTreeSet<&str> = view
+            .targets
+            .iter()
+            .filter_map(|target| target.evidence_revision.as_deref())
+            .collect();
+        view.evidence
+            .retain(|stamp| kept.contains(stamp.revision.as_str()));
+
+        // 一条都看不到时必须与「文档不存在」同答。回 200 空 targets 会泄漏
+        // 「这条记录确实存在，只是里面没有你的目标」。
+        if view.targets.is_empty() {
+            return Err(deny(RecordRejection::NotFound));
+        }
+    }
+
+    view.to_dto()
+        .map_err(|_| RouteError::new(500, "BOD_TRACKING_UNREADABLE"))
 }
 
 /// 合同里共用的计划响应尾巴：200 之后必然是 501。
@@ -121,20 +285,25 @@ static ROUTES: &[Route<HostServer>] = &[
         method: Method::Get,
         pattern: "/api/v1/delivery-tracking/{id}",
         auth: Auth::Bearer(DENIED_CODE),
-        note: "只校验本机会话密钥；§34.12 未实现。读取按授权目标过滤：对调用者不可见的客户不出现在 targets 里，\
-               不是返回空结论",
+        note: "会话密钥 + §34.12 主体/目标判定（P8 3.6 B5 已接线）。判定顺序：主体 → 记录立场 → \
+               目标粒度；未配主体的宿主一律 BOD_API_DENIED，对任何 id 同答。读取按授权目标过滤：\
+               对调用者不可见的客户不出现在 targets 里，一条都不可见时回 BOD_NOT_FOUND（与不存在同答）。\
+               事实装配失败回 503 BOD_FACTS_UNAVAILABLE，不降级为空事实",
         contract: Contract {
             summary: "读取跟踪项的覆盖结论与允许动作",
             request: None,
             query: &[],
-            responses: planned_responses!(
+            responses: &[ContractResponse::new(
+                200,
                 "覆盖结论、证据版本与来源时间、缺口、负责人与允许动作",
-                "DeliveryTrackingView",
-                crate::openapi::schema_of::<DeliveryTrackingView>
-            ),
-            status: crate::http_router::Implementation::Planned,
+                Some(ContractBody::json(
+                    "DeliveryTrackingView",
+                    crate::openapi::schema_of::<DeliveryTrackingView>,
+                )),
+            )],
+            status: crate::http_router::Implementation::Served,
         },
-        handler: not_implemented,
+        handler: read_tracking,
     },
     Route {
         method: Method::Post,
@@ -597,28 +766,55 @@ mod tests {
         }
     }
 
-    /// 计划中操作的 handler 只能是 `not_implemented`，且必须声明 501。
-    /// 这条是「不许把未实现悄悄当已实现」的机械保障。
+    /// 声明与实现必须一致，双向都不许含糊。
+    ///
+    /// - `planned` → handler 只能是 `not_implemented`，且必须声明 501。
+    /// - `served` → handler 不得仍是 `not_implemented`，且**不得**再声明 501
+    ///   （留着 501 等于告诉客户端「这个端点可能不受理」，与 served 自相矛盾）。
+    ///
+    /// 两个方向都判，是因为只判一个方向时，另一侧的错法无人拦：漏改 `planned`
+    /// 会让实现假装未实现，漏改 handler 会让 served 假装已实现。
     #[test]
-    fn planned_routes_point_at_the_unimplemented_handler() {
+    fn declared_status_matches_the_handler_it_points_at() {
+        use crate::http_router::Implementation;
         let unimplemented: crate::http_router::Handler<HostServer> = not_implemented;
+
         for route in routes() {
-            assert!(
-                std::ptr::fn_addr_eq(route.handler, unimplemented),
-                "{} 已有实现，应从 planned 改为 served 并更新测试",
-                route.pattern
-            );
+            let still_stub = std::ptr::fn_addr_eq(route.handler, unimplemented);
             let statuses: Vec<u16> = route
                 .contract
                 .responses
                 .iter()
                 .map(|response| response.status)
                 .collect();
-            assert!(
-                statuses.contains(&501),
-                "{} 未声明 501：计划中操作必须如实说明不会被受理",
-                route.pattern
-            );
+
+            match route.contract.status {
+                Implementation::Planned => {
+                    assert!(
+                        still_stub,
+                        "{} 声明 planned，但 handler 不是 not_implemented：要么接线，要么别声明",
+                        route.pattern
+                    );
+                    assert!(
+                        statuses.contains(&501),
+                        "{} 未声明 501：计划中操作必须如实说明不会被受理",
+                        route.pattern
+                    );
+                }
+                Implementation::Served => {
+                    assert!(
+                        !still_stub,
+                        "{} 声明 served，但 handler 仍是 not_implemented",
+                        route.pattern
+                    );
+                    assert!(
+                        !statuses.contains(&501),
+                        "{} 已 served，却仍声明 501：契约与实现自相矛盾",
+                        route.pattern
+                    );
+                }
+            }
+
             assert!(
                 !statuses.contains(&401) && !statuses.contains(&404),
                 "{} 手写了 401/404；这两个码由 Auth 与分发层生成",
@@ -681,5 +877,236 @@ mod tests {
         }))
         .expect_err("未知字段必须被拒绝");
         assert!(err.to_string().contains("tenant"), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /delivery-tracking/{id}：四阶段的端到端用例（P8 3.6 B5）
+    // -----------------------------------------------------------------------
+
+    fn config() -> crate::config::BodConfig {
+        let mut config = crate::config::BodConfig::default();
+        config.sqlite.busy_timeout_ms = 5_000;
+        config
+    }
+
+    /// 一条跟踪项 + 两个客户目标 + 各一条部署观察。
+    ///
+    /// 三个主体刻意都不重叠：`user-dev` 只是项目成员，`user-cust-a` 只绑了 `customer-a`，
+    /// `user-outsider` 什么都没有。重叠会让「哪条规则在起作用」无法归因。
+    fn store_with_two_customers() -> crate::store::SqliteStore {
+        let store = crate::store::SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        store
+            .execute_batch_for_test(
+                "INSERT INTO delivery_tracking (
+                     tracking_id, company_id, project_id, title, resource_version,
+                     created_at_ms, updated_at_ms)
+                 VALUES ('tracking-1', 'company-1', 'project-1', '两客户的交付', 3, 1000, 1000);
+                 INSERT INTO delivery_targets (
+                     target_id, company_id, tracking_id, customer_id, environment,
+                     acceptance, switch_state, population_known, created_at_ms, updated_at_ms)
+                 VALUES
+                   ('target-a', 'company-1', 'tracking-1', 'customer-a', 'prod',
+                    '验收条款', 'synced', 1, 1000, 1000),
+                   ('target-b', 'company-1', 'tracking-1', 'customer-b', 'prod',
+                    '验收条款', 'synced', 1, 1000, 1000);
+                 INSERT INTO delivery_observations (
+                     observation_id, company_id, tracking_id, target_id, kind, source_kind,
+                     source_ref, revision, actor_id, authorized, observed_at, observed_at_ms,
+                     recorded_at_ms)
+                 VALUES
+                   ('obs-a', 'company-1', 'tracking-1', 'target-a', 'deployment', 'connector',
+                    'conn-a', 'rev-a', 'user-dev', 1, '2026-11-20T00:00:00Z', 1000, 1000),
+                   ('obs-b', 'company-1', 'tracking-1', 'target-b', 'deployment', 'connector',
+                    'conn-b', 'rev-b', 'user-dev', 1, '2026-11-20T00:00:00Z', 1000, 1000);
+                 INSERT INTO project_members (
+                     company_id, project_id, principal_id, kind, revision, active, updated_at_ms)
+                 VALUES ('company-1', 'project-1', 'user-dev', 'user', 1, 1, 1000);
+                 INSERT INTO customer_bindings (
+                     company_id, principal_id, customer_id, revision, active, updated_at_ms)
+                 VALUES
+                   ('company-1', 'user-cust-a', 'customer-a', 1, 1, 1000),
+                   ('company-1', 'user-cust-none', 'customer-z', 1, 1, 1000);",
+            )
+            .expect("夹具应写入成功");
+        store
+    }
+
+    fn actor(id: &str) -> DeliveryActor {
+        DeliveryActor {
+            company_id: "company-1".to_string(),
+            principal: crate::authorization::Principal {
+                id: crate::domain::DomainId::new(id),
+                kind: crate::authorization::PrincipalKind::User,
+                claimed_roles: Vec::new(),
+            },
+        }
+    }
+
+    fn read_as(id: &str, tracking_id: &str) -> Result<DeliveryTrackingView, RouteError> {
+        let reader = crate::store::read_port::StoreTrackingRead::new(store_with_two_customers());
+        evaluate_read(&actor(id), &reader, tracking_id)
+    }
+
+    /// 项目成员看到全部目标与全部证据：阶段二整体放行，阶段四不适用。
+    #[test]
+    fn a_project_member_sees_every_target() {
+        let view = read_as("user-dev", "tracking-1").expect("成员应可读取");
+        assert_eq!(view.targets.len(), 2, "两个客户的目标都要在");
+        assert_eq!(view.evidence.len(), 2, "两条证据都要在");
+        assert_eq!(view.version, 3, "版本取库里的 resource_version");
+    }
+
+    /// 客户协作者只见本客户的目标，且证据时间线一并收窄。
+    ///
+    /// 只断言「看不到别人的」而不去断言「一定看得到自己的」：能否有结论取决于
+    /// 覆盖判定，那是另一个模块的事。这条用例守的是**不越界**。
+    #[test]
+    fn a_customer_collaborator_sees_only_own_target() {
+        let view = read_as("user-cust-a", "tracking-1").expect("有本客户目标时应可读取");
+        assert_eq!(
+            view.targets.len(),
+            1,
+            "只有自己那个客户？被排除的目标不该出现"
+        );
+        assert_eq!(view.targets[0].target.customer_id, "customer-a");
+        assert!(
+            view.evidence.iter().all(|stamp| stamp.revision != "rev-b"),
+            "别的客户的证据修订不得随视图送出去：{:?}",
+            view.evidence
+        );
+    }
+
+    /// 有客户绑定、但这条记录里没有他的目标 → 与「记录不存在」同答。
+    ///
+    /// 回 200 空 targets 会泄漏「这条记录确实存在，只是里面没有你的目标」，
+    /// 那等于把「别人在这里有交付」这件事告诉了不该知道的人。
+    #[test]
+    fn a_customer_without_target_here_gets_the_same_answer_as_missing() {
+        let absent =
+            read_as("user-cust-none", "tracking-1").expect_err("本客户无目标时不得返回视图");
+        let missing = read_as("user-cust-none", "tracking-404").expect_err("记录不存在");
+        assert_eq!(absent.status, 404);
+        assert_eq!(absent.code, "BOD_NOT_FOUND");
+        assert_eq!(
+            (absent.status, absent.code),
+            (missing.status, missing.code),
+            "「有记录但没你的目标」与「没有这条记录」必须同答"
+        );
+    }
+
+    /// 无关用户：不可见，且与「不存在」同答（不允许用返回码枚举存在性）。
+    #[test]
+    fn an_outsider_cannot_tell_existence_apart() {
+        let invisible = read_as("user-outsider", "tracking-1").expect_err("既非成员也无绑定");
+        let missing = read_as("user-outsider", "tracking-404").expect_err("记录不存在");
+        assert_eq!(invisible.code, "BOD_NOT_FOUND");
+        assert_eq!(
+            (invisible.status, invisible.code),
+            (missing.status, missing.code)
+        );
+    }
+
+    /// 事实装配失败回 503，**不降级成空事实**。
+    ///
+    /// 这条用例同时守顺序：装配失败后不得继续去读视图（假实现里 panic 会炸出来），
+    /// 否则「读不出来」会先花一次查询、再被当成「没有事实」。
+    struct UnreadableFacts;
+
+    impl TrackingRead for UnreadableFacts {
+        fn stage_facts(
+            &self,
+            _company_id: &str,
+            _principal: &crate::authorization::Principal,
+        ) -> Result<crate::authorization::StageFacts, StageFactsError> {
+            Err(StageFactsError::Unreadable {
+                group: "grants",
+                detail: "锁等待超时".to_string(),
+            })
+        }
+
+        fn tracking_view(
+            &self,
+            _company_id: &str,
+            _tracking_id: &str,
+        ) -> Result<Option<crate::delivery_tracking::TrackingView>, StageFactsError> {
+            panic!("事实装配失败后不得继续读视图");
+        }
+    }
+
+    #[test]
+    fn unreadable_facts_are_503_and_never_an_empty_snapshot() {
+        let err = evaluate_read(&actor("user-dev"), &UnreadableFacts, "tracking-1")
+            .expect_err("装配失败必须报错");
+        assert_eq!(err.status, 503, "取不到事实是服务方的问题，不是权限问题");
+        assert_eq!(err.code, "BOD_FACTS_UNAVAILABLE");
+    }
+
+    /// 未装配主体的宿主一律拒绝，且**对任何 id 同答**。
+    ///
+    /// 这条守的是安全默认：装配缺失时不回退成「匿名用户」。匿名主体会让权限判定
+    /// 与审计归属同时失真，而失真后的记录比没有记录更难查。
+    #[test]
+    fn a_host_without_an_actor_denies_before_looking_at_the_id() {
+        let descriptor = std::env::temp_dir().join(format!(
+            "bod-delivery-api-desc-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let server = HostServer::bind("127.0.0.1:0", &descriptor, 0).expect("应可绑定本机端口");
+
+        let ask = |tracking: &str| {
+            let endpoint = EndpointRequest {
+                request: crate::http_router::Request::new(
+                    "GET",
+                    &format!("/api/v1/delivery-tracking/{tracking}"),
+                ),
+                params: vec![("id", tracking.to_string())],
+            };
+            read_tracking(&server, endpoint)
+        };
+
+        // `Reply` 没实现 `Debug`（它是传输层类型，不该为此加派生），所以用 match 而不用 `expect_err`。
+        let existing = match ask("tracking-1") {
+            Err(err) => err,
+            Ok(_) => panic!("没有主体时不得返回视图"),
+        };
+        let absent = match ask("tracking-404") {
+            Err(err) => err,
+            Ok(_) => panic!("没有主体时不得返回视图"),
+        };
+        assert_eq!(existing.status, 401);
+        assert_eq!(existing.code, "BOD_API_DENIED");
+        assert_eq!(
+            (existing.status, existing.code),
+            (absent.status, absent.code),
+            "主体未确认时，答案不得随对象变化"
+        );
+
+        // 装配完成后同一条路由开始走真判定：这条断言防的是「配了还是 401」——
+        // 装配入口失效时它会先红，而不是等到线上才发现所有读取都被拒。
+        let server = server.with_delivery(
+            std::sync::Arc::new(crate::store::read_port::StoreTrackingRead::new(
+                store_with_two_customers(),
+            )),
+            actor("user-dev"),
+        );
+        let endpoint = EndpointRequest {
+            request: crate::http_router::Request::new(
+                "GET",
+                "/api/v1/delivery-tracking/tracking-1",
+            ),
+            params: vec![("id", "tracking-1".to_string())],
+        };
+        let reply = read_tracking(&server, endpoint).expect("装配后成员应可读取");
+        match reply {
+            Reply::Json { status, value } => {
+                assert_eq!(status, 200);
+                assert_eq!(value["targets"].as_array().map(Vec::len), Some(2));
+            }
+            Reply::Upgrade { .. } => panic!("读取产出的是普通响应，不是长连接"),
+        }
     }
 }
