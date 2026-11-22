@@ -1,6 +1,7 @@
 # Tasks: P8 双入口交付
 
-> 规格来源：本 Change 的 `specs/*/spec.md`（V2.9.8 §11）。全部条目**未开始**——
+> 规格来源：本 Change 的 `specs/*/spec.md`（V2.9.8 §11；V2.9.9 增补 §34.15 拒绝码分级与
+> §29.8「两处重验必须能分别失败」，见 `docs/bod-V2.9.9-产品方案勘误.md`）。全部条目**未开始**——
 > 本文件建立时只完成了前置（CR-004 契约单源，ADR-0004），没有任何实现可勾选。
 > 门禁绑定初始为 planned：`I-72`（两条入口同一结论）。计划路径不得当作证据。
 
@@ -88,6 +89,14 @@
       §34.12 主体判定、审计 `append_audit_event` 接线——这三项才是「入单写事务」。
       另缺一条用例：「观察写入与既有 Company 写操作同事务」的跨域回滚
       （现在各自都走 `UnitOfWork`，但没有一条用例证明 issue 写入失败时观察一并回滚）。
+
+- [ ] 3.6 `GET /api/v1/delivery-tracking/{id}` served + 主体/目标判定接线（ADR-0007 `proposed`）。
+      **为什么排在写端点之前**：§39.25 的判定类场景都要读回覆盖结论；写入口先上、过滤后补，
+      等于把「没有过滤」发布成「已过滤」。判定函数已在 `authorization`
+      （`filter_records` / `access_record`），缺口是 `StageFacts` 的只读装配端口与
+      `Principal` 的传参，不是重写判定。
+      出口条件：三档拒绝码（`BOD_API_DENIED` / `BOD_NOT_FOUND` / `BOD_SCOPE_DENIED`）各有命名用例；
+      客户协作者读到兄弟目标返回 `BOD_NOT_FOUND` 而非 403；`x-bod-status` 由 `planned` 改 `served`。
 
 ## 4. 共用覆盖投影（`I-72`）
 
