@@ -79,6 +79,13 @@
       响应体；新追加的目标没有验收条件（请求体没有该字段），而 `acceptance` 目前也不是
       判定的输入——已记进 design 的 Open Questions。
 - [ ] 3.5 关联与补证入现有 Company 单写事务；连接器与人工证据冲突保留两者并进待核实。
+      **已落地（部分）**：冲突判定在 `delivery_tracking::digest_conflict`——按 `revision` 分组，
+      同一版本出现两个摘要才判冲突，结论停在 `PendingVerification` 并写明是哪一组版本；
+      两条观察原样留在时间线里，不折叠、不择优。判据必须带版本：只比摘要会把每次正常发版
+      判成冲突。3 个命名用例（冲突停在待核实且两份证据都在 / 新版本换摘要不算冲突 /
+      两来源同摘要不算冲突）。
+      **未做**：写入口（`POST /api/v1/delivery-tracking/imports` 等仍 `planned`）、
+      §34.12 主体判定、审计 `append_audit_event` 接线——这三项才是「入单写事务」。
 
 ## 4. 共用覆盖投影（`I-72`）
 

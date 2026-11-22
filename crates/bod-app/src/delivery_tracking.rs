@@ -23,7 +23,7 @@ use crate::coverage_receipt::{
 };
 use crate::delivery_api::{self, DeliveryTrackingView, EvidenceStamp, TargetCoverage, TargetRef};
 use crate::delivery_link::WorkPackageLink;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // 缺口码
@@ -494,6 +494,36 @@ pub fn coverage_input(
 }
 
 /// 投影一个目标：规范化 → `judge_coverage` → 缺口 → 决定性观察。
+/// 同一版本出现两个内容摘要：连接器与人工回执对同一个版本给出了不同内容。
+///
+/// 规格要求「保留两者并进入待核实，不自行选择其中一份」。这里只做识别：
+/// 两条观察仍原样留在时间线里，结论停在待核实并说明冲突在哪一组版本上。
+///
+/// 判据必须带版本。只比摘要的话，每次正常发版都会被判成冲突（新版本换摘要），
+/// 那会让「冲突」这个词失去意义——真正的冲突是**同一个版本**被描述成两份内容。
+fn digest_conflict(observations: &[ObservationRow]) -> Option<String> {
+    let mut by_revision: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for observation in observations {
+        if observation.revision.trim().is_empty() || observation.digest.trim().is_empty() {
+            continue;
+        }
+        by_revision
+            .entry(observation.revision.as_str())
+            .or_default()
+            .insert(observation.digest.as_str());
+    }
+    by_revision
+        .into_iter()
+        .find(|(_, digests)| digests.len() > 1)
+        .map(|(revision, digests)| {
+            format!(
+                "版本 {revision} 出现 {} 个不同摘要（{}）：连接器与人工证据不一致，需人工确认",
+                digests.len(),
+                digests.into_iter().collect::<Vec<_>>().join(" / ")
+            )
+        })
+}
+
 pub fn project_target(
     project_id: &str,
     target: &TargetRow,
@@ -501,7 +531,11 @@ pub fn project_target(
     verification: VerificationConclusion,
 ) -> TargetCoverageView {
     let input = coverage_input(project_id, target, observations, verification);
-    let verdict = judge_coverage(&input);
+    // 冲突优先于判定：两份证据互相矛盾时，任何「选一份」的结论都是替人做决定。
+    let verdict = match digest_conflict(observations) {
+        Some(reason) => CoverageVerdict::PendingVerification { reason },
+        None => judge_coverage(&input),
+    };
     let gaps = gaps_for(&input, &verdict);
     let decisive = decisive_observation(&verdict, observations);
     TargetCoverageView {
@@ -758,6 +792,19 @@ mod tests {
             observed_at_ms: at_ms,
             recorded_at_ms: at_ms,
         }
+    }
+
+    /// 同一份观察，但版本号由调用方指定：冲突判据要用它分组。
+    fn observation_at(
+        id: &str,
+        kind: ObservationKind,
+        at_ms: i64,
+        revision: &str,
+        digest: &str,
+    ) -> ObservationRow {
+        let mut row = observation(id, kind, at_ms, digest);
+        row.revision = revision.to_string();
+        row
     }
 
     fn tracking() -> TrackingRow {
@@ -1082,5 +1129,103 @@ mod tests {
             verification_conclusion("verified").unwrap(),
             VerificationConclusion::Passed
         );
+    }
+
+    // -------------------------------------------------------------------
+    // 证据冲突（§11：保留两者并进入待核实，不自行选一份）
+    // -------------------------------------------------------------------
+
+    /// 同一版本两个摘要：保留两份证据，结论停在待核实，并说明冲突在哪。
+    #[test]
+    fn conflicting_digests_on_one_revision_stop_at_pending_verification() {
+        let observations = vec![
+            observation_at(
+                "o1",
+                ObservationKind::Deployment,
+                100,
+                "rev-1",
+                "sha256:aaa",
+            ),
+            observation_at(
+                "o2",
+                ObservationKind::ManualEvidence,
+                200,
+                "rev-1",
+                "sha256:bbb",
+            ),
+        ];
+        let view = project_target(
+            PROJECT,
+            &target(),
+            &observations,
+            VerificationConclusion::Passed,
+        );
+        match &view.verdict {
+            CoverageVerdict::PendingVerification { reason } => {
+                assert!(reason.contains("rev-1"), "{reason}");
+                assert!(reason.contains("sha256:aaa"), "{reason}");
+                assert!(reason.contains("sha256:bbb"), "{reason}");
+            }
+            other => panic!("应为待核实：{other:?}"),
+        }
+        assert!(!view.verdict.is_covered());
+        // 「保留两者」不是口号：时间线里两条都还在，一条都没被折叠。
+        assert_eq!(evidence_stamps(&observations).len(), 2);
+    }
+
+    /// 新版本换摘要不是冲突：正常发版也会换内容，只比摘要会把发版判成事故。
+    #[test]
+    fn a_newer_revision_with_another_digest_is_not_a_conflict() {
+        let observations = vec![
+            observation_at(
+                "o1",
+                ObservationKind::Deployment,
+                100,
+                "rev-1",
+                "sha256:aaa",
+            ),
+            observation_at(
+                "o2",
+                ObservationKind::Deployment,
+                200,
+                "rev-2",
+                "sha256:bbb",
+            ),
+        ];
+        let view = project_target(
+            PROJECT,
+            &target(),
+            &observations,
+            VerificationConclusion::Passed,
+        );
+        assert!(view.verdict.is_covered(), "{:?}", view.verdict);
+    }
+
+    /// 连接器与人工对同一版本给出同一摘要：一致，不制造冲突。
+    #[test]
+    fn matching_digests_from_two_sources_do_not_conflict() {
+        let observations = vec![
+            observation_at(
+                "o1",
+                ObservationKind::Deployment,
+                100,
+                "rev-1",
+                "sha256:aaa",
+            ),
+            observation_at(
+                "o2",
+                ObservationKind::ManualEvidence,
+                200,
+                "rev-1",
+                "sha256:aaa",
+            ),
+        ];
+        let view = project_target(
+            PROJECT,
+            &target(),
+            &observations,
+            VerificationConclusion::Passed,
+        );
+        assert!(view.verdict.is_covered(), "{:?}", view.verdict);
     }
 }
