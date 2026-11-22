@@ -86,6 +86,8 @@
       两来源同摘要不算冲突）。
       **未做**：写入口（`POST /api/v1/delivery-tracking/imports` 等仍 `planned`）、
       §34.12 主体判定、审计 `append_audit_event` 接线——这三项才是「入单写事务」。
+      另缺一条用例：「观察写入与既有 Company 写操作同事务」的跨域回滚
+      （现在各自都走 `UnitOfWork`，但没有一条用例证明 issue 写入失败时观察一并回滚）。
 
 ## 4. 共用覆盖投影（`I-72`）
 
