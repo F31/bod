@@ -122,3 +122,29 @@
    此时主体来源改为「链路双向认证结果」，仍**不得**回到请求头自报；
 3. 工作台需要「以他人身份查看」——这是模拟/代操作能力，必须走单独的代操作凭据与双签审计，
    不得靠改 `Principal` 实现。
+
+## 落地记录（2026-11-22 深夜 · P8 7.6.2）
+
+第 6 条从「决策」变成「在生产路径上生效」，落点是三处，每一处都写明了**故意不做什么**：
+
+| 落点 | 做了什么 | 故意不做 |
+|---|---|---|
+| `host_handshake::local_principal_id` | 启动时读一次本机账户名（`USERNAME` / `USER` / `LOGNAME`），逐字作为 `principal.id` | 不拼前缀、不折叠大小写、**不提供 `--as` 之类的覆盖开关**。覆盖开关等于把「谁是主体」交给启动者，而桌面环境下启动者与调用方常在同一进程树里 |
+| `SqliteStore::open_existing_readonly` | 以 `SQLITE_OPEN_READ_ONLY` + `query_only` 挂载既有业务库；不建库、不迁移、不写 | 不跑迁移。库比代码旧时报 503（装配端口 `Unreadable`），不替业务库决定 schema 版本 |
+| `bod serve --db <path>` | 显式路径必须存在，缺省只在 `$BOD_HOME/bod.db` 已存在时挂载；未挂载时 `/api/v1/*` 一律 401 | 不在默认路径建空库。建了空库，「路径写错」会伪装成「库里没数据」，每个请求都变成 404 |
+
+**为什么只读挂载不违反 8.1「不打开第二个业务库」**：8.1 防的是**第二个写者**（双主、WAL 争用、
+审计与业务写入没法同事务）。只读连接在 SQLite 层就写不进去，且 WAL 下读者与写者互不阻塞，
+因此它是读副本而不是第二个写者。判据可以机械检查：`query_only` 一旦关掉，`store::tests::store_core::readonly_mount_*` 立刻失败。
+
+**证据**（`crates/bod/tests/delivery_read_e2e.rs`，真实子进程 + 真实 TCP）：
+
+1. 不带任何自报头 → `200`，两个目标都在（此前恒为 401）；
+2. 换一个 id → `404 BOD_NOT_FOUND`（可见性按主体算，不按 id 存在与否算）；
+3. 加 `X-Bod-Actor: someone-else` → 仍是 `404`（自报头不改变归属；若将来有人加了这个支持，这条会立刻变 200）；
+4. 未挂载 → `401 BOD_API_DENIED`，且不替默认路径建库；
+5. 显式指向不存在的库 → 启动失败、不留下空库与描述文件。
+
+**遗留**（不改第 6 条，只记录）：`StageRequirement::Work` 仍只判 `target.assignee`，
+撤权之后被指派者还能开发与回报进度；这属于「动作权限」的缺口，与主体来源无关，
+已由 `store::tests::revoke::assignment_alone_still_permits_work_after_revocation` 钉住。

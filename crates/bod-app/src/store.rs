@@ -67,10 +67,10 @@ use crate::recovery_models::{
 };
 use crate::takeover_intent::TakeoverIntentRow;
 use crate::takeover_review::{CheckpointRow, ConfirmationRow, InvocationFactRow};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // 外部只认识 `crate::store::X` 这几条路径。行结构搬进 `rows` 之后在这里重新导出，
 // 调用方不必知道它们被放到了哪个文件——重构不改变对外形状。
@@ -193,6 +193,12 @@ pub enum StoreError {
     /// 撤权命令不成立（缺公司、缺主体、缺操作者）。与 `Sql` 分开：这些是调用方
     /// 的错误，重试同一个请求只会得到同一个答案。
     Revocation(revoke::RevocationError),
+    /// 只读挂载的目标文件不存在。
+    ///
+    /// **单独一档且必须报错**：`Connection::open` 会顺手建出一个空库并跑完迁移，
+    /// 于是「路径写错」看起来像「库里没数据」——控制面读到的将是空事实，
+    /// 每个请求都变成 404，而运维会去查权限。代价是把这类配置错误变成启动失败。
+    MissingDatabase(PathBuf),
 }
 
 impl fmt::Display for StoreError {
@@ -214,6 +220,11 @@ impl fmt::Display for StoreError {
             Self::Link(err) => write!(f, "关联追加失败: {}", err.explain()),
             Self::Facts(err) => write!(f, "授权事实装配失败: {}", err.explain()),
             Self::Revocation(err) => write!(f, "撤权命令不成立: {}", err.explain()),
+            Self::MissingDatabase(path) => write!(
+                f,
+                "数据库文件不存在: {}（只读挂载不创建库，也不跑迁移）",
+                path.display()
+            ),
         }
     }
 }
@@ -322,6 +333,31 @@ impl SqliteStore {
 
     pub fn in_memory(config: &BodConfig) -> Result<Self, StoreError> {
         Self::open(Path::new(":memory:"), config)
+    }
+
+    /// 只读挂载一个**已存在**的库（控制面读交付视图用，P8 7.6.2）。
+    ///
+    /// 与 [`open`](Self::open) 的四处不同，每一处都是为了「不成为第二个写者」：
+    /// - **文件不存在就报错**，不建空库（见 `StoreError::MissingDatabase`）；
+    /// - **不跑迁移**：只读连接改不了 schema，而且控制面没有资格替业务库决定版本。
+    ///   库比代码旧时装配端口会报 `Unreadable`（503），这是如实报故障，不是静默升级；
+    /// - **`SQLITE_OPEN_READ_ONLY`**：写语句在 SQLite 层就失败，不靠调用方自觉；
+    /// - **`query_only`** 作为第二道：即便将来有人把 flags 改错，SQL 层仍然拒绝写入。
+    ///
+    /// 不校验 `journal_mode`：只读连接设不了 pragma，查出来也不能改；本仓自己的
+    /// `open` 一定把库设成 WAL，非 WAL 的副本只可能来自外部拷贝，此时读仍然是对的。
+    ///
+    /// 并发语义：WAL 下读者与写者互不阻塞。库被另一个写者以 WAL 打开时，本连接
+    /// 读的是已提交快照；`-shm` 缺失且 WAL 里有未提交帧的极端情况会打开失败，
+    /// 这时报错，不退化成读主文件——那会把未提交的数据读成已提交。
+    pub fn open_existing_readonly(path: &Path, config: &BodConfig) -> Result<Self, StoreError> {
+        if !path.is_file() {
+            return Err(StoreError::MissingDatabase(path.to_path_buf()));
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.pragma_update(None, "busy_timeout", config.sqlite.busy_timeout_ms as i64)?;
+        conn.pragma_update(None, "query_only", true)?;
+        Ok(Self { conn })
     }
 
     /// P7 基准口径专用：固定页缓存与临时表位置，避免不同机器的 SQLite 默认值混入两阶段对比。

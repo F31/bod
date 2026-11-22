@@ -260,6 +260,23 @@ customer_bindings 从库里读出来。所以 3.6 的工作量在**装配端口*
 剩下的是 B3（`Principal` 从哪来）/ B4（装配失败的对外映射）/ B5（GET 转 `served`），
 三者都压在「主体来源」这一个决定上。
 
+## 支持范围与已知限制（7.6.3）
+
+这张表回答「**今天这一版**支持什么」，不回答「以后会支持什么」。每一行都必须可机械核对
+（有测试或命令输出）；写「支持」而没有证据的项不应出现在这里。
+
+| # | 维度 | 当前实装 | 已知限制（不得省略） | 证据 |
+|---|---|---|---|---|
+| 1 | 部署边界 | 单宿主、单机、回环监听；非回环地址被 `deployment_boundary` 拒绝 | 远程节点与多宿主高可用不支持（无选主、无一致性后端）；不把单机锁说成分布式 leader election | `authorization::deployment_boundary` 单测 |
+| 2 | 主体来源 | 宿主启动时按本机账户名（`USERNAME`/`USER`/`LOGNAME`）定一次，逐字使用 | **同机多成员共用同一宿主身份时，审计归属记到宿主账户上，无法区分张三与李四**；没有切换主体的入口（刻意如此，ADR-0007 第 6 条）。不得用「支持多用户」掩盖 | `host_handshake::local_principal_id`；`delivery_read_e2e` 第 3 条（自报头无效） |
+| 3 | 业务库挂载 | `serve --db` 以只读连接 + `query_only` 挂载既有库；缺省只在 `$BOD_HOME/bod.db` 已存在时挂载 | 不建库、**不迁移**：库比代码旧时装配端口报 503（`BOD_FACTS_UNAVAILABLE`），不静默升级；WAL 有未提交帧且缺 `-shm` 时挂载失败（报错，不降级读主文件） | `store_core::readonly_mount_reads_existing_db_and_refuses_to_write_or_create`；`delivery_read_e2e` 第 4/5 条 |
+| 4 | 交付域 | `GET /api/v1/delivery-tracking/{id}` served（四阶段判定 + 目标粒度过滤） | **只有读路径**：`POST imports` 仍 `planned`，`import_delivery_source` 在测试外没有调用者，跟踪项只能由测试或外部工具写库；`customer_bindings` / `project_members` / `release_operators` 同样**没有生产写入者**，实际可配置的立场只有「指派给本机主体」，客户协作者（`ByTarget`）只能在测试里构造 | `grep "INSERT INTO customer_bindings"` 仅命中测试；`grep "import_delivery_source"` 无生产调用者 |
+| 5 | 平台 | Windows（全量实测）+ WSL Linux（同机全量实测） | 不是发布级矩阵：协议版本 × 客户端 × 执行器组合未登记；双机/跨网络未验证（P6 2.8） | 两平台 `cargo test` 记录 |
+| 6 | 模型调用 | 不接任何模型客户端；草稿＝规则摘要 + 人工编辑 | 未做外部模型投影（ADR-008 的 B2 档）；未验本地模型时延与常驻内存 | `adr/0008-model-invocation-boundary.md` |
+
+第 2 行与第 4 行是这一版最容易误导人的两处：前者会让「谁做的」记错人，后者会让
+「客户协作者按目标过滤」看起来已支持而实际配置不出来。两者都不设默认开关来掩盖。
+
 ## Open Questions
 
 - 渠道适配的第一条真实通道选哪个（决定「送达」是否有幂等键）。

@@ -290,7 +290,19 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
       与 §0.4「先确定目标和对象可见性，再判动作授权」，主体由**宿主装配时按本地身份确定**，
       请求体/请求头**不得自报**主体。否决 `X-Bod-Actor` 方案：自报主体会让租户隔离失效，
       并使审计归属可被调用方改写。
-- [ ] 7.6.2 落地：`HostServer` 的真实启动路径调用 `with_delivery(read, actor)`；
+- [x] 7.6.2 落地：`HostServer` 的真实启动路径调用 `with_delivery(read, actor)`；
       完成判据——未带任何自报头的真实请求返回 200 而不是 401，且换一个 id 仍按目标过滤。
-- [ ] 7.6.3 已知限制写进支持矩阵：同一台机器多个成员共用时，审计归属会记到宿主身份上。
+      **已落（2026-11-22 深夜）**，三处落点与五条证据：
+      1. `host_handshake::local_principal_id`：启动时读一次本机账户名（`USERNAME`/`USER`/`LOGNAME`），
+         逐字作为主体；**不提供 `--as` 覆盖**（覆盖开关等于把主体交给启动者）。
+      2. `SqliteStore::open_existing_readonly`：`SQLITE_OPEN_READ_ONLY` + `query_only`，
+         不建库、不迁移、不写——只读副本不是「第二个写者」，不违反 8.1。
+      3. `bod serve --db <path> [--company <id>]`：显式路径不存在即启动失败；缺省只在
+         `$BOD_HOME/bod.db` 已存在时挂载；未挂载时 `/api/v1/*` 一律 401，不回退成匿名主体。
+      证据（`crates/bod/tests/delivery_read_e2e.rs`，真实子进程 + 真实 TCP）：无自报头 → 200；
+      换 id → 404；带 `X-Bod-Actor: someone-else` → 仍 404；未挂载 → 401 `BOD_API_DENIED`
+      且不建库；显式缺库 → 启动失败且不留空库/描述文件。
+- [x] 7.6.3 已知限制写进支持矩阵：同一台机器多个成员共用时，审计归属会记到宿主身份上。
       该限制不得用「多用户支持」的说法掩盖。
+      **已落**：`openspec/changes/p8-delivery-tracking/design.md` §「支持范围与已知限制（7.6.3）」
+      第 2 行（主体来源）与第 4 行（交付域只有读路径、事实表无写入者）。

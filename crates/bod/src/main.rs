@@ -73,6 +73,8 @@ const USAGE: &str = "\
   bod serve                        启动本地控制面并写出连接描述（受保护握手）
   bod serve --listen <addr>        指定监听地址（默认取 server.listen，可为 127.0.0.1:0）
   bod serve --descriptor <path>    指定连接描述路径（默认 $BOD_HOME/host.endpoint.json）
+  bod serve --db <path>            只读挂载既有业务库，启用 GET /api/v1/delivery-tracking/{id}
+  bod serve --company <id>         产品接口使用的公司（默认 company-default）
   bod serve --json                 就绪后输出机器可读的一行（不含任何令牌）
   bod --help                       显示本帮助
 ";
@@ -1302,15 +1304,89 @@ fn sources(flags: &[String]) -> Result<String, String> {
     Ok(out)
 }
 
+/// 控制面默认库位置：与描述文件同目录（`$BOD_HOME`）。
+///
+/// 文件名沿用各命令行子命令的约定（`--db` 指向同一份文件），不另起一套命名。
+const DEFAULT_DATABASE_FILE: &str = "bod.db";
+
+fn default_database_path() -> std::path::PathBuf {
+    bod_app::host_handshake::default_home().join(DEFAULT_DATABASE_FILE)
+}
+
+/// 产品接口的装配结果。
+///
+/// `principal_id` 只用于启动说明与报告，**不参与判定**——判定读的是 `actor`。
+struct DeliveryWiring {
+    read: std::sync::Arc<dyn bod_app::delivery_api::TrackingRead>,
+    actor: bod_app::delivery_api::DeliveryActor,
+    principal_id: String,
+}
+
+/// 数据库来源：显式 `--db` 是硬要求，缺省只在默认库**已经存在**时才挂。
+///
+/// 两种缺失分开处理，因为它们的原因不同：
+/// - 显式给了路径却不存在 → 配置错了，当场失败（否则会建空库，把所有请求变成 404）；
+/// - 没给路径且默认库不存在 → 正常状态（还没导过数据），控制面照常起，产品接口 401。
+fn resolve_database(
+    explicit: Option<std::path::PathBuf>,
+    default_path: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, String> {
+    match explicit {
+        Some(path) if path.is_file() => Ok(Some(path)),
+        Some(path) => Err(format!(
+            "--db 指向的数据库不存在：{}\n只读挂载不创建库；先用命令把数据写进该库，再让控制面挂载。",
+            path.display()
+        )),
+        None if default_path.is_file() => Ok(Some(default_path.to_path_buf())),
+        None => Ok(None),
+    }
+}
+
+/// 装配产品接口：主体 + 只读端口。
+///
+/// 主体取本机账户名（`host_handshake::local_principal_id`），**不提供任何命令行或
+/// 请求级覆盖**。给了 `--as` 之类的开关，就等于把「谁是主体」交给启动者，
+/// 而启动者与 HTTP 调用方在桌面环境里常常是同一个进程树——ADR-0007 第 6 条否决的
+/// 正是这条路。取不到账户名时报错，不退化成占位主体。
+fn delivery_wiring(path: &std::path::Path, company: &str) -> Result<DeliveryWiring, String> {
+    use bod_app::delivery_api::DeliveryActor;
+
+    let principal_id = bod_app::host_handshake::local_principal_id().ok_or_else(|| {
+        "无法确定本机主体（USERNAME / USER / LOGNAME 都为空）：产品接口不装配。\n\
+         不提供自报主体的开关——那会让租户隔离与审计归属同时失效（ADR-0007 第 6 条）。"
+            .to_string()
+    })?;
+    let store = bod_app::store::SqliteStore::open_existing_readonly(path, &BodConfig::default())
+        .map_err(|err| format!("只读挂载 {} 失败：{err}", path.display()))?;
+    let read = std::sync::Arc::new(bod_app::store::read_port::StoreTrackingRead::new(store));
+    let actor = DeliveryActor {
+        company_id: company.to_string(),
+        principal: bod_app::authorization::Principal {
+            id: bod_app::domain::DomainId::new(principal_id.as_str()),
+            kind: bod_app::authorization::PrincipalKind::User,
+            claimed_roles: Vec::new(),
+        },
+    };
+    Ok(DeliveryWiring {
+        read,
+        actor,
+        principal_id,
+    })
+}
+
 /// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。
 ///
-/// P0 的控制面只做握手与生命周期，不承载业务命令；业务 DB 仍由命令层独占，
-/// 因此这里**不打开第二个业务库**（8.1 的硬约束）。
+/// P0 的控制面只做握手与生命周期，不承载业务命令；业务库的**写入**仍由命令层独占。
+/// 产品接口要读交付视图时，这里用 `--db` 显式挂载既有库，而且是**只读连接 +
+/// `query_only`**：不建库、不迁移、不写，因此不构成第二个写者（8.1 的硬约束）。
+/// 未挂载时产品接口一律 401——装配缺失不等于「匿名用户可以访问」。
 fn serve(flags: &[String]) -> Result<String, String> {
     use bod_app::host_handshake::{HostServer, default_descriptor_path};
 
     let mut listen: Option<String> = None;
     let mut descriptor_path: Option<std::path::PathBuf> = None;
+    let mut db: Option<std::path::PathBuf> = None;
+    let mut company: Option<String> = None;
     let mut json = false;
     let mut index = 0;
     while index < flags.len() {
@@ -1329,6 +1405,20 @@ fn serve(flags: &[String]) -> Result<String, String> {
                 descriptor_path = Some(std::path::PathBuf::from(value));
                 index += 2;
             }
+            "--db" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--db 需要一个路径".to_string())?;
+                db = Some(std::path::PathBuf::from(value));
+                index += 2;
+            }
+            "--company" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| "--company 需要一个公司 ID".to_string())?;
+                company = Some(value.clone());
+                index += 2;
+            }
             "--json" => {
                 json = true;
                 index += 1;
@@ -1345,10 +1435,35 @@ fn serve(flags: &[String]) -> Result<String, String> {
     }
     let listen = listen.unwrap_or_else(|| config.server.listen.clone());
     let descriptor_path = descriptor_path.unwrap_or_else(default_descriptor_path);
+    let company = company.unwrap_or_else(|| {
+        bod_app::authorization::default_company()
+            .id
+            .as_str()
+            .to_string()
+    });
+    // 显式 `--db` 必须存在：路径写错时宁可启动失败，也不要建出一个空库让所有请求变 404。
+    let database = resolve_database(db, &default_database_path())?;
     // 事件源就是 `GET /_bod/events` 的 SSE 基线订阅来源；宿主自己发布的事件也走同一条序列。
     let feed = std::sync::Arc::new(bod_app::event_stream::MemoryFeed::with_capacity(1024));
-    let server = HostServer::bind_with_feed(&listen, &descriptor_path, now_ms(), feed.clone())
+    let mut server = HostServer::bind_with_feed(&listen, &descriptor_path, now_ms(), feed.clone())
         .map_err(|err| format!("宿主启动失败：{err}"))?;
+    // 产品接口装配（P8 7.6.2）：主体在**这里**定一次，请求无权改。
+    let product_api = match &database {
+        Some(path) => {
+            let wiring = delivery_wiring(path, &company)?;
+            let note = format!(
+                "产品接口：GET /api/v1/delivery-tracking/{{id}}（主体 {} / 公司 {company} / 库 {} 只读挂载）",
+                wiring.principal_id,
+                path.display()
+            );
+            server = server.with_delivery(wiring.read, wiring.actor);
+            note
+        }
+        None => format!(
+            "产品接口未装配：默认库 {} 不存在（只读挂载不创建库）；用 --db 指向既有库。在此之前 /api/v1/* 一律 401。",
+            default_database_path().display()
+        ),
+    };
     let ready_sequence = feed.publish(
         "host.ready",
         serde_json::json!({
@@ -1369,6 +1484,8 @@ fn serve(flags: &[String]) -> Result<String, String> {
             "events_sequence": ready_sequence,
         });
         println!("{line}");
+        // 机器可读的那一行保持只有一个 JSON 对象；装配说明走 stderr。
+        eprintln!("{product_api}");
     } else {
         println!("控制面已就绪：{summary}");
         println!(
@@ -1376,6 +1493,7 @@ fn serve(flags: &[String]) -> Result<String, String> {
             descriptor_path.display()
         );
         println!("订阅端点：GET /_bod/events（Bearer 会话密钥，SSE，游标持久）");
+        println!("{product_api}");
     }
     // spawner 依赖这一行判断就绪，必须立即刷出。
     use std::io::Write as _;
@@ -1619,5 +1737,37 @@ mod tests {
         let args = vec!["bogus".to_string()];
         let err = run(&args).expect_err("未知命令必须失败");
         assert!(err.contains("用法"));
+    }
+
+    /// 显式 `--db` 指向不存在的文件：必须失败，且不得顺手创建它。
+    ///
+    /// 这条挡的是「路径写错 → 建出空库 → 每个请求 404」：那时运维会去查权限，
+    /// 而真正的原因是控制面读了一份刚被自己造出来的空库。
+    #[test]
+    fn explicit_database_must_exist_and_is_never_created() {
+        let dir = std::env::temp_dir().join(format!("bod-serve-db-{}-missing", std::process::id()));
+        let missing = dir.join("absent.db");
+        let err = resolve_database(Some(missing.clone()), &dir.join("default.db"))
+            .expect_err("显式路径不存在必须失败");
+        assert!(err.contains("--db 指向的数据库不存在"), "{err}");
+        assert!(!missing.exists(), "不得创建数据库文件");
+    }
+
+    /// 缺省库存在时自动挂载：控制面不需要额外参数就能读。
+    #[test]
+    fn default_database_is_mounted_only_when_it_exists() {
+        let dir = std::env::temp_dir().join(format!("bod-serve-db-{}-default", std::process::id()));
+        fs::create_dir_all(&dir).expect("建临时目录");
+        let existing = dir.join("bod.db");
+        fs::write(&existing, b"not-a-real-db").expect("写占位文件");
+
+        let mounted = resolve_database(None, &existing).expect("存在时应挂载");
+        assert_eq!(mounted.as_deref(), Some(existing.as_path()));
+
+        let absent = dir.join("nothing.db");
+        let not_mounted = resolve_database(None, &absent).expect("不存在不是错误");
+        assert!(not_mounted.is_none(), "默认库不存在时不挂载，也不建库");
+        assert!(!absent.exists(), "不得创建数据库文件");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

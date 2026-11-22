@@ -283,3 +283,39 @@ fn assigned_issue_persists_owner_and_revision() {
     assert_eq!(owner, "coder-1");
     assert_eq!(revision, 7);
 }
+
+/// 只读挂载（P8 7.6.2）：能读既有库，写不进去，缺文件时不建空库。
+///
+/// 三条断言各挡一个具体缺陷：
+/// - 读不到 → 控制面每次请求 404，看起来像权限问题；
+/// - 写得进 → 控制面成了第二个写者，违反 8.1 的单写边界；
+/// - 建空库 → 路径写错被伪装成「库里没数据」，且在生产目录留下一个空库。
+#[test]
+fn readonly_mount_reads_existing_db_and_refuses_to_write_or_create() {
+    let path = temp_db();
+    {
+        let store = SqliteStore::open(&path, &config()).expect("建库应成功");
+        store
+            .execute_batch_for_test("CREATE TABLE readonly_probe (x INTEGER)")
+            .expect("写库应成功");
+    }
+
+    let read = SqliteStore::open_existing_readonly(&path, &config()).expect("只读挂载应成功");
+    let tables: i64 = read
+        .read_connection()
+        .query_row("SELECT COUNT(*) FROM readonly_probe", [], |row| row.get(0))
+        .expect("只读连接应读得到既有表");
+    assert_eq!(tables, 0, "读得到内容，只是没有行");
+
+    let denied = read.execute_batch_for_test("INSERT INTO readonly_probe VALUES (1)");
+    assert!(denied.is_err(), "只读连接必须写不进去");
+
+    let missing = path.with_extension("absent.db");
+    match SqliteStore::open_existing_readonly(&missing, &config()) {
+        Err(StoreError::MissingDatabase(reported)) => assert_eq!(reported, missing),
+        Err(other) => panic!("缺文件必须报 MissingDatabase，实际：{other}"),
+        Ok(_) => panic!("缺文件不得被打开（那意味着顺手建了空库）"),
+    }
+    assert!(!missing.exists(), "只读挂载不得创建空库");
+    let _ = std::fs::remove_file(&path);
+}

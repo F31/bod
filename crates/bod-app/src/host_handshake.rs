@@ -112,6 +112,34 @@ pub fn default_descriptor_path() -> PathBuf {
     default_home().join(DESCRIPTOR_FILE)
 }
 
+/// 宿主主体：本机账户名（ADR-0007 第 6 条的落地）。
+///
+/// **只在装配时读**，请求体与请求头不参与判定。这一条就是「请求不得自报主体」的
+/// 落点：只要主体来自进程环境，HTTP 客户端既改不了审计归属，也借不到别人的目标可见性。
+///
+/// 四个刻意的取舍：
+/// - **不做名字改写**：不拼 `user-` 前缀、不折叠大小写。库里存的是主体 id，
+///   改写会引入一张只有本仓库知道的映射表；映射不存在时失败方式是 404，
+///   排查时看不出是「映射问题」还是「确实没权限」。
+/// - **不是凭据**：它是归属来源，不是认证。认证只有会话密钥。能改这个环境变量的
+///   人本来就能直接改库，所以这里不做防篡改——信任边界是 OS 账户，不是环境变量。
+/// - **取不到就是没有**：空串与全空白都算没有，`serve` 因此不装配产品接口、一律 401，
+///   而不是回退成 `local-user` 之类的占位主体。占位主体会让每次读取都去查一个
+///   不存在的成员，把「装配缺失」写成「没有权限」。
+/// - **同一台机器多个成员共用时归属失真**：这是已知限制（支持矩阵要写明），
+///   不能靠加一个自报开关来「解决」——那等于把归属交给调用方。
+pub fn local_principal_id() -> Option<String> {
+    let raw = std::env::var("USERNAME")
+        .ok()
+        .or_else(|| std::env::var("USER").ok())
+        .or_else(|| std::env::var("LOGNAME").ok())?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// 令牌来源：`RandomState` 由 OS 熵初始化；P0 只用它做本机凭据，不当作密码学承诺。
 fn random_token(label: &str) -> String {
     use std::collections::hash_map::RandomState;
