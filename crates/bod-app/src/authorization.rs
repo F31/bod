@@ -405,6 +405,10 @@ pub fn may_manage_budget(facts: &StageFacts, actor: &Principal) -> bool {
 pub struct ScopedRecord {
     pub id: String,
     pub scope: Scope,
+    /// 客户目标维度。**客户是交付目标，不是数据所有权边界**（V2.9.9 产品勘误 1）：
+    /// 同一 Company 内的客户共用一个库、一个宿主写入者；需要物理隔离时用独立部署与
+    /// 操作系统隔离，不在这个字段上分库、也不由它决定谁能读整张表。
+    /// 它只参与阶段四的目标粒度判定（`target_visible`）。
     pub customer_id: Option<String>,
     pub assignee: Option<DomainId>,
 }
@@ -457,15 +461,120 @@ pub fn filter_records(
     filtered
 }
 
-fn record_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) -> bool {
-    if let Some(customer) = facts.customer_of(&actor.id) {
-        // 客户协作者只看自己客户的记录，父项目与兄弟工单一律不可见。
-        return record.customer_id.as_deref() == Some(customer);
+/// §8.1 阶段二：**对象可见性**——这个主体在记录所属范围内有没有立场。
+///
+/// 只看「有没有立场」，不看「是哪一个目标」。客户协作者的立场来自绑定，因此其可见域
+/// 只包含带客户维度的记录：内部记录属于团队，不属于任何客户目标。至于绑定的是哪个客户，
+/// 属于阶段四（`target_visible`）。
+///
+/// 两阶段分开的理由是可分别断言：合成一步时，「内部记录不该被客户看到」与
+/// 「兄弟客户的记录不该被看到」在测试里只能观察到同一个结果，也就无法证明是哪一条在起作用。
+fn is_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) -> bool {
+    if facts.customer_of(&actor.id).is_some() {
+        return record.customer_id.is_some();
     }
     if record.assignee.as_ref() == Some(&actor.id) {
         return true;
     }
     facts.is_member(&actor.id, record.scope.project_id.as_ref())
+}
+
+/// §8.1 阶段四：**目标粒度**——立场成立之后，这个具体目标是否允许。
+///
+/// 客户协作者只见本客户的目标，父项目与兄弟客户的目标都在这一步被排除；
+/// 其余角色不受目标粒度限制（他们的范围已由阶段二的项目成员与指派决定）。
+///
+/// 这一步不重新判断立场：没有客户维度的记录不是任何客户的目标，粒度不适用，
+/// 留给阶段二挡。若在这里也判 false，两阶段的失败原因会混在一起，
+/// 将来放宽其中一条时没人能说清是哪一条在起作用。
+///
+/// 只与 `is_visible` 合起来用（`record_visible` 是唯一组合点）。
+fn target_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) -> bool {
+    match facts.customer_of(&actor.id) {
+        Some(customer) => match record.customer_id.as_deref() {
+            Some(target) => target == customer,
+            None => true,
+        },
+        None => true,
+    }
+}
+
+fn record_visible(facts: &StageFacts, actor: &Principal, record: &ScopedRecord) -> bool {
+    is_visible(facts, actor, record) && target_visible(facts, actor, record)
+}
+
+/// 对外拒绝码（V2.9.9 §8.1）。三个码是契约：客户端按码分支，改名等于改契约。
+///
+/// 四个判定阶段只产生三种拒绝——阶段二与阶段四共用 `NotFound`，因为两者对外的表现
+/// 必须**完全相同**：一旦「存在但无权」与「不存在」可分，枚举就成立了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordRejection {
+    /// 主体确认未通过。与对象无关，不得因对象不同而改码。
+    ApiDenied,
+    /// 对象不可见（含目标粒度不通过）。与「不存在」同答。
+    NotFound,
+    /// 可见但缺动作权限。提示改主体或申请授权。
+    ScopeDenied,
+}
+
+impl RecordRejection {
+    /// `const`：路由表的 401 码直接由它派生，两处字面量不许各写一遍。
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::ApiDenied => "BOD_API_DENIED",
+            Self::NotFound => "BOD_NOT_FOUND",
+            Self::ScopeDenied => "BOD_SCOPE_DENIED",
+        }
+    }
+
+    pub fn http_status(self) -> u16 {
+        match self {
+            Self::ApiDenied => 401,
+            Self::NotFound => 404,
+            Self::ScopeDenied => 403,
+        }
+    }
+
+    /// 对外一句话。`ScopeDenied` 可以说明「改主体或申请授权」；
+    /// `NotFound` 不能补任何细节——补了就泄漏。
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ApiDenied => "未通过主体确认",
+            Self::NotFound => "未找到该对象",
+            Self::ScopeDenied => "当前主体在该范围没有所需权限；可更换主体或申请授权",
+        }
+    }
+}
+
+/// §8.1 阶段一：主体确认。未认证时结论与对象无关。
+pub fn confirm_subject(authenticated: bool) -> Result<(), RecordRejection> {
+    if authenticated {
+        Ok(())
+    } else {
+        Err(RecordRejection::ApiDenied)
+    }
+}
+
+/// §8.1 阶段二～四的对外结论：`access_record` 的结果 → 码。
+///
+/// 单独一个函数而不是让 handler 各自 `match`：三档码的分档规则只有一处，
+/// 改档位时不会有一半路由跟着漂。
+pub fn classify_access(access: &RecordAccess) -> Result<(), RecordRejection> {
+    match access {
+        RecordAccess::Invisible => Err(RecordRejection::NotFound),
+        RecordAccess::Allowed(decision) if decision.is_allowed() => Ok(()),
+        RecordAccess::Allowed(_) => Err(RecordRejection::ScopeDenied),
+    }
+}
+
+/// 判定链的对外结论，顺序即 §8.1 的表：主体 → 可见 → 动作 → 目标粒度。
+///
+/// **主体先于对象**是这里唯一有顺序要求的地方：未认证请求的答案必须与对象无关，
+/// 否则拿同一个坏凭据去打两个对象、看返回码是否不同，就能判断哪个对象存在。
+pub fn rejection(authenticated: bool, access: &RecordAccess) -> Option<RecordRejection> {
+    confirm_subject(authenticated)
+        .err()
+        .or_else(|| classify_access(access).err())
 }
 
 /// 能看到 ≠ 能做。可见但缺动作权限返回拒绝，而不是"不可见"。
@@ -1323,6 +1432,146 @@ mod stage_permission_tests {
             ),
             RecordAccess::Invisible => panic!("成员应看得到，只是不能派"),
         }
+    }
+
+    /// §8.1：可见性（阶段二）与目标粒度（阶段四）是两步，能分别归因。
+    ///
+    /// 合成一步时三种记录在测试里只观察到一个「不可见」，无法证明是哪一条在起作用；
+    /// 拆开之后「兄弟客户」与「内部记录」的失败原因必须不同。
+    #[test]
+    fn visibility_and_target_granularity_fail_for_different_reasons() {
+        let mut facts = facts();
+        facts
+            .customer_bindings
+            .push((DomainId::new("user-customer-a"), "customer-a".to_string()));
+        let customer = user("user-customer-a");
+        let own =
+            ScopedRecord::new("issue-a", scope("project-1", "issue-a")).for_customer("customer-a");
+        let sibling =
+            ScopedRecord::new("issue-b", scope("project-1", "issue-b")).for_customer("customer-b");
+        let internal = ScopedRecord::new("issue-internal", scope("project-1", "issue-internal"));
+
+        assert!(
+            is_visible(&facts, &customer, &own) && target_visible(&facts, &customer, &own),
+            "本客户的目标两步都过"
+        );
+        // 兄弟客户：阶段二过（对客户维度有立场），阶段四挡下（粒度只到本客户）。
+        assert!(
+            is_visible(&facts, &customer, &sibling),
+            "客户协作者对客户维度的记录有立场"
+        );
+        assert!(
+            !target_visible(&facts, &customer, &sibling),
+            "但只看得到自己那个客户——这是阶段四的职责"
+        );
+        // 内部记录：阶段二就挡下，阶段四不适用（不在此处重复判断）。
+        assert!(
+            !is_visible(&facts, &customer, &internal),
+            "没有客户维度的记录不在客户的可见域内"
+        );
+        assert!(
+            target_visible(&facts, &customer, &internal),
+            "阶段四不重复判断立场，否则两阶段的失败原因会混在一起"
+        );
+
+        // 成员不受目标粒度限制：项目内的内部记录与客户记录都可见。
+        let member = user("user-dev");
+        assert!(is_visible(&facts, &member, &internal));
+        assert!(target_visible(&facts, &member, &internal));
+        assert!(
+            is_visible(&facts, &member, &sibling),
+            "项目成员看得到本项目下所有客户的记录"
+        );
+    }
+
+    /// §8.1：四个阶段只产生三种拒绝码，且主体先于对象。
+    ///
+    /// 表驱动，三条值全部由真实判定产生（不手搓 `StageDecision`）：
+    /// 手搓能通过，只证明映射函数会 `match`，证明不了判定确实产出这三种。
+    #[test]
+    fn rejection_codes_are_three_and_the_subject_stage_comes_first() {
+        let facts = facts();
+        let own = ScopedRecord::new("issue-1", scope("project-1", "issue-1"));
+        let other = ScopedRecord::new("issue-x", scope("project-2", "issue-x"));
+        let actor = user("user-dev");
+
+        // 阶段二挡下：不可见。
+        let invisible = access_record(
+            &facts,
+            &actor,
+            &other,
+            StageAction::Submit,
+            &StageTarget::new(other.scope.clone(), 1),
+            AT,
+        );
+        // 阶段三放行：成员可提交。
+        let permitted = access_record(
+            &facts,
+            &actor,
+            &own,
+            StageAction::Submit,
+            &StageTarget::new(own.scope.clone(), 1),
+            AT,
+        );
+        // 阶段三拒绝：可见但无分派权。
+        let denied = access_record(
+            &facts,
+            &actor,
+            &own,
+            StageAction::Dispatch,
+            &StageTarget::new(own.scope.clone(), 1),
+            AT,
+        );
+
+        let cases = [
+            (
+                &invisible,
+                Some(RecordRejection::NotFound),
+                "BOD_NOT_FOUND",
+                404,
+            ),
+            (&permitted, None, "", 0),
+            (
+                &denied,
+                Some(RecordRejection::ScopeDenied),
+                "BOD_SCOPE_DENIED",
+                403,
+            ),
+        ];
+        for (access, expected, code, status) in cases {
+            let actual = rejection(true, access);
+            assert_eq!(actual, expected, "分档错误：{access:?}");
+            if let Some(actual) = actual {
+                assert_eq!(actual.as_code(), code);
+                assert_eq!(actual.http_status(), status);
+            }
+        }
+
+        // 主体先于对象：未认证时答案与对象无关，否则改一个坏凭据打两个对象
+        // 就能凭返回码判断哪个存在。
+        for access in [&invisible, &permitted, &denied] {
+            assert_eq!(
+                rejection(false, access),
+                Some(RecordRejection::ApiDenied),
+                "未认证必须统一答 API 拒绝，不得泄漏对象状态"
+            );
+        }
+        assert_eq!(
+            RecordRejection::ApiDenied.as_code(),
+            crate::delivery_api::DENIED_CODE,
+            "同一档码不得有两个字面量"
+        );
+
+        // 文案也是契约的一部分：§8.1 要求「可见但缺权」提示改主体或申请授权；
+        // 而 404 的正文是第二个可能泄漏存在性的地方，不许回显对象。
+        assert!(
+            RecordRejection::ScopeDenied.message().contains("申请授权"),
+            "缺权要给出下一步，否则调用方只能猜"
+        );
+        assert!(
+            !RecordRejection::NotFound.message().contains("issue-"),
+            "不可见的文案不得回显对象 ID"
+        );
     }
 
     /// 2.2 / AZ06：撤权之后续传与离线重放受限。

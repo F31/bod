@@ -649,6 +649,23 @@
     同理：`StageFacts` 的装配失败必须返回「取不到事实」并记录原因，**不得**降级为
     「全部可见」或「全部不可见」——后者会把一个基础设施故障伪装成「你没有权限」。
 
+27. **判定输入与措辞输入必须能机械分开，阶段拆分必须能分别归因**
+    （`coverage_receipt::verdict_does_not_depend_on_any_drafter`、
+    `authorization::visibility_and_target_granularity_fail_for_different_reasons`）。
+    三条都靠结构而不是注释：
+    - **哨兵要能挡住新增字段**。判「结论不依赖草稿器」时，把判定输入的字段**穷尽解构**
+      （`let CoverageInput { tuple, deployment, .. 逐个列出 } = input`）；写成 `..` 或
+      `input.population_known` 之类就没用了——`..` 会把将来新增的 `drafted_summary` 吸收掉，
+      用例照样全绿而判定已经依赖了措辞。
+    - **同一档对外码只能有一个来源**。`delivery_api::DENIED_CODE` 由
+      `RecordRejection::ApiDenied.as_code()`（`const fn`）派生；字面量各写一遍，
+      改档位时必有一处漏改，而这种漏改不会红。
+    - **合成一步的判定说不清是哪条在挡**。可见性（有立场）与目标粒度（哪一个目标）分开写，
+      否则「内部记录不该被客户看到」与「兄弟客户的记录不该被看到」在测试里只观察到一个「不可见」，
+      将来放宽其中一条时无人能判断改对没有。
+    `target_visible` 对「无客户维度的记录」返回 `true`（粒度不适用）由阶段二挡下，
+    是刻意的：两阶段各自只回答自己的问题。
+
 ## 验证与完成规则
 
 - 每个切片自带实现、测试与验证索引；不把测试路径存在当作测试通过。

@@ -33,7 +33,7 @@ pub const MAX_IDEMPOTENCY_KEY: usize = 128;
 /// 幂等相关的拒绝原因。码是稳定字符串：客户端与日志按码分支，改码等于改契约。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdempotencyError {
-    /// 公司为空：键没有作用域，两条不同租户的同名键会互相顶掉。
+    /// 公司为空：键没有作用域，两条不同公司的同名键会互相顶掉。
     EmptyCompanyId,
     EmptyKey,
     KeyTooLong(usize),

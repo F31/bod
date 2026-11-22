@@ -712,7 +712,7 @@
       },
       "TargetRef": {
         "additionalProperties": false,
-        "description": "客户目标：客户 × 环境 ×（可选）部署单元。\n\n没有 `company_id`：Company 由主体解析得出，不由请求体声明——请求体声明归属\n等于允许调用者指定别人的租户。",
+        "description": "客户目标：客户 × 环境 ×（可选）部署单元。\n\n没有 `company_id`：Company 由主体解析得出，不由请求体声明——请求体声明归属\n等于允许调用者指定别人的公司。",
         "properties": {
           "customer_id": {
             "description": "客户标识。同名环境分属不同客户时靠它区分。",

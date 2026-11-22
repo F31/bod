@@ -29,7 +29,7 @@ const MAX_PROVIDER_ID: usize = 256;
 /// 来源相关的拒绝原因。码是稳定字符串：客户端与日志按码分支，改码等于改契约。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceError {
-    /// 公司为空：五元组的第一段不成立（多租户下身份必须能定位到公司）。
+    /// 公司为空：五元组的第一段不成立（换公司后身份必须能重新定位）。
     EmptyCompanyId,
     /// 有稳定 ID 却没给对象类型：五元组不成立，属调用方漏字段（不是「只有 URL」）。
     MissingObjectType,

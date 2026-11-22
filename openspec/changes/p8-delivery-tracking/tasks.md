@@ -120,6 +120,12 @@
       Company 才是数据边界（V2.9.9 勘误 §5.11）。
       出口条件：三档拒绝码（`BOD_API_DENIED` / `BOD_NOT_FOUND` / `BOD_SCOPE_DENIED`）各有命名用例；
       客户协作者读到兄弟目标返回 `BOD_NOT_FOUND` 而非 403；`x-bod-status` 由 `planned` 改 `served`。
+      **轨 A 已具备的前置（判定层，未接线）**：三档码由 `authorization::RecordRejection` 给出并各有命名用例
+      （`rejection_codes_are_three_and_the_subject_stage_comes_first`：主体先于对象，未认证时答案与对象无关）；
+      `record_visible` 已拆为 `is_visible`（阶段二）与 `target_visible`（阶段四），可分别归因
+      （`visibility_and_target_granularity_fail_for_different_reasons`）；
+      `delivery_api::DENIED_CODE` 改由 `RecordRejection::ApiDenied` 派生，同一档码不再有两个字面量。
+      仍缺 B1/B2/B3：路由上没有任何一处调用这些函数，`x-bod-status` 仍是 `planned`。
 
 ## 4. 共用覆盖投影（`I-72`）
 
@@ -131,6 +137,9 @@
 
 - [ ] 5.1 草稿装配（目标、收件范围、证据修订、引用、缺口、文本修订）与「保存不外发」。
 - [ ] 5.2 无模型路径：规则摘要 + 人工编辑，结论与有模型时一致。
+      判定侧的钉子已提前落地（`verdict_does_not_depend_on_any_drafter`）：`CoverageInput` 只有六组事实，
+      用例用穷尽解构做编译期哨兵——将来给判定加任何草稿/摘要字段都会先编译失败，逼着先回答
+      「它是不是判定输入」。草稿装配本身仍未做。
 - [ ] 5.3 双点重验：命令受理点与出站点各验授权/证据修订/目标/账号；变化则进待重审并提示差异。
 - [ ] 5.4 发送结果未知的对账；渠道无幂等能力时标待核实，不重发、不记失败。
 

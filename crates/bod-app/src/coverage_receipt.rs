@@ -1076,6 +1076,71 @@ mod tests {
         }
     }
 
+    /// V2.9.9 §12：「AI 起草」只影响措辞，不影响结论。
+    ///
+    /// 判定输入必须是**事实**，不能是文本：`CoverageInput` 里没有任何草稿 / 摘要 / 模型输出
+    /// 字段，所以同一组事实必然得到同一个结论，草稿器有没有、用的是规则还是模型，都改不了它。
+    ///
+    /// 这条用例还兼作**编译期哨兵**：下面的穷尽解构一旦遇到新增字段就编译不过，
+    /// 逼着加字段的人先回答「它是不是判定输入」。只在运行时比较结论抓不到这件事——
+    /// 新字段若只影响一个分支，多数用例照样全绿。
+    #[test]
+    fn verdict_does_not_depend_on_any_drafter() {
+        /// 穷尽解构：字段集合就是判定输入的集合。新增字段 → 编译失败。
+        fn only_facts(input: &CoverageInput) -> usize {
+            let CoverageInput {
+                tuple,
+                deployment,
+                verification,
+                switch,
+                population_known,
+                installation,
+            } = input;
+            let _ = (
+                deployment,
+                verification,
+                switch,
+                population_known,
+                installation,
+            );
+            1 + tuple.unit_id.len()
+        }
+
+        let covered = covered_input("group-a");
+        let mut unknown_population = covered_input("group-b");
+        unknown_population.population_known = false;
+        let mut unknown_switch = covered_input("group-c");
+        unknown_switch.switch = SwitchState::Unknown;
+
+        let cases: [(&CoverageInput, &str, Option<&str>); 3] = [
+            (&covered, "covered", None),
+            (
+                &unknown_population,
+                "pending-verification",
+                Some("受影响人群未知"),
+            ),
+            (
+                &unknown_switch,
+                "pending-verification",
+                Some("功能开关状态为 unknown"),
+            ),
+        ];
+        for (input, kind, reason) in cases {
+            assert!(only_facts(input) > 0, "哨兵必须真的被调用");
+            let first = judge_coverage(input);
+            assert_eq!(first.as_str(), kind, "结论只看事实：{input:?}");
+            match (reason, &first) {
+                (Some(expected), CoverageVerdict::PendingVerification { reason }) => {
+                    assert_eq!(reason, expected, "原因也要说得出是哪一条事实不成立")
+                }
+                (Some(_), other) => panic!("应待核实并带原因，实际 {other:?}"),
+                (None, _) => assert!(first.is_covered(), "事实齐备就必须给覆盖结论"),
+            }
+            // 重复判定同值：结论不随调用次数、时间或草稿器状态漂移。
+            assert_eq!(judge_coverage(input), first);
+        }
+    }
+
     /// 4.2：离线安装只认授权实施人的回执，并标人工来源。
     #[test]
     fn offline_install_receipt_is_manual_source() {

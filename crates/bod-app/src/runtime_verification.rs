@@ -1368,7 +1368,7 @@ mod tests {
         ))
         .push(PlanItem::new(
             "权限与数据读写",
-            "跨租户读被拒绝",
+            "跨公司读被拒绝",
             CoverageArea::PermissionAndData,
             CheckKind::Api,
             "curl",
@@ -1679,7 +1679,7 @@ mod tests {
         let spec = GateSpec::new(vec![GateRule::required("permission", "权限回归是发布前置")]);
         let results = vec![CheckResult::failing(
             "permission",
-            "跨租户读",
+            "跨公司读",
             FailureSignal::AssertionFailed,
             "2026-11-20T10:00:00Z",
         )];
@@ -1772,7 +1772,7 @@ mod tests {
         let spec = GateSpec::new(vec![GateRule::required("permission", "权限必须断言")]);
         let result = CheckResult::failing(
             "permission",
-            "跨租户读",
+            "跨公司读",
             FailureSignal::ScreenshotOnly,
             "2026-11-20T10:00:00Z",
         );

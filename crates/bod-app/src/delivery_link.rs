@@ -30,7 +30,7 @@ use crate::domain::artifact::Digest;
 /// 关联追加的拒绝原因。码是稳定字符串：客户端与日志按码分支，改码等于改契约。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkError {
-    /// 公司为空：关联没有租户，写进去就查不出来。
+    /// 公司为空：关联没有公司，写进去就查不出来。
     EmptyCompanyId,
     EmptyTrackingId,
     /// 没有记录「谁追加的」：关联是责任归属，不能空。

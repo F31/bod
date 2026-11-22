@@ -33,9 +33,10 @@ pub const PREFIX: &str = "/api/v1";
 
 /// 每条计划中路由统一用在 401 上的拒绝码。
 ///
-/// 名字只说「API 拒绝」，不说「范围不足」：当前根本没有判定范围，用
-/// `BOD_SCOPE_DENIED` 会把未实现的判定说成已实现的判定。
-pub const DENIED_CODE: &str = "BOD_API_DENIED";
+/// 名字只说「API 拒绝」，不说「范围不足」：字符串由 `RecordRejection` 派生（单一来源），
+/// 但路由**只用第一档**——§8.1 的可见性与动作判定尚未接线，此时回 `BOD_SCOPE_DENIED`
+/// 会把未实现的判定说成已实现的判定。三档码齐备而只用一档，是当前实现进度的如实表述。
+pub const DENIED_CODE: &str = crate::authorization::RecordRejection::ApiDenied.as_code();
 
 /// 计划中操作的统一 501 码。
 pub const NOT_IMPLEMENTED_CODE: &str = "BOD_NOT_IMPLEMENTED";
@@ -257,7 +258,7 @@ pub fn is_served_action(code: &str) -> Option<bool> {
 /// 客户目标：客户 × 环境 ×（可选）部署单元。
 ///
 /// 没有 `company_id`：Company 由主体解析得出，不由请求体声明——请求体声明归属
-/// 等于允许调用者指定别人的租户。
+/// 等于允许调用者指定别人的公司。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TargetRef {

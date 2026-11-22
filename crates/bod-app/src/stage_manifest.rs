@@ -1619,7 +1619,7 @@ mod tests {
     fn package() -> EvidencePackage {
         let mut package = EvidencePackage::new(
             DeliveryRef::new("stage-1", "rev-2"),
-            "配额查询在跨租户场景返回拒绝，测试通过",
+            "配额查询在跨公司场景返回拒绝，测试通过",
         );
         package.authorization_index.push("auth-7".to_string());
         package.timeline.push(TimelineEvent {
