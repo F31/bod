@@ -105,6 +105,19 @@
       等于把「没有过滤」发布成「已过滤」。判定函数已在 `authorization`
       （`filter_records` / `access_record`），缺口是 `StageFacts` 的只读装配端口与
       `Principal` 的传参，不是重写判定。
+      **盘点更正（V2.9.9 规格审阅）**：`StageFacts` 六组事实里只有 `grants` 能直接查。
+      `members`(001) **没有 `project_id`**；`customer_bindings` / `release_operators` /
+      `assignments` / `revoked_at_revision` **无表或无从派生**；`Principal` 在**生产代码零构造**，
+      而 `Auth::Bearer` 只证明「同一用户在本机」、不携带身份。所以本项的真实顺序是
+      **补 schema → 定主体来源 → 装配 → 路由**，直接上 GET 会装配出空事实，
+      让每个请求都 `BOD_NOT_FOUND` 且与「对象不存在」不可区分。分解见
+      `docs/reports/v299-spec-review-and-plan.md` §2 轨 B（B1 迁移 / B2 装配端口 /
+      B3 `Principal` 传参 / B4 装配失败不降级 / B5 转 served / B6 `assignments` 语义）。
+      B1 的三张表：`project_members(company, project, principal, revision, active)`、
+      `customer_bindings(company, principal, customer)`、
+      `release_operators(company, principal)`；撤权修订另找来源（`config_revisions` 或专用表）。
+      `members`(001) 保持 Company 级身份，不塞 `project_id`——Project 是授权边界，
+      Company 才是数据边界（V2.9.9 勘误 §5.11）。
       出口条件：三档拒绝码（`BOD_API_DENIED` / `BOD_NOT_FOUND` / `BOD_SCOPE_DENIED`）各有命名用例；
       客户协作者读到兄弟目标返回 `BOD_NOT_FOUND` 而非 403；`x-bod-status` 由 `planned` 改 `served`。
 
