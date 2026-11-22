@@ -6,6 +6,26 @@
 > `openspec/changes/archive/2026-11-20-p1-single-executor-delivery/tasks.md`；
 > 后续切片由 `openspec/changes/` 下对应 Change 驱动。修改本声明需同步现行规格。
 
+## 现行规格版本（2026-11-22 起）
+
+**产品与架构规格以 v1.0 为准**：`docs/智能体协作与可验证交付规范-v1.0.md`、
+`docs/bod智能体协作与可验证交付技术架构规格-v1.0.md`。V2.9.9 是承接基线，不是替代关系——
+v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
+`coverage_receipt::judge_coverage`，所以不存在「为 v1.0 重写判定层」这回事。
+
+切片对应关系（v1.0 技术规格 §9）：
+
+| 切片 | 载体 | 状态 |
+|---|---|---|
+| 1 交付基线 | `openspec/changes/p8-delivery-tracking` | 未完成（6 条交付路由仅 `GET /{id}` 为 served） |
+| 2 在线协作 | `openspec/changes/p9-adaptive-collaboration` | 已立变更，任务全未开始 |
+| 3 离线核验 | 未立变更（V05 无实现） | 计划 |
+| 4 离线校准 | 未立变更（`feedback_knowledge` 仅测试） | 计划 |
+
+**规格库存的口径要点**：`openspec/specs/` 只含已归档的 P0+P1（13 capability / 78 需求）；
+P2–P8 的需求还在各自未归档 change 的 `specs/` delta 里。因此「条款 → 实现」的映射
+必须同时查 `specs/` 与 `changes/*/specs/`，只看 `specs/` 会得出「大部分能力都不存在」的错误结论。
+
 ## 当前切片
 
 - **阶段**：P0 最小可信核心，D0—D7 全部完成并**已归档**（任务 1.1—1.4、2.1—2.7、3.1—3.5、4.1—4.6、5.1—5.6、6.1—6.6、7.1—7.6、8.1—8.4；44/44 勾选，`openspec archive` 于 2026-11-19 将 9 份 spec delta 的 57 条需求、66 个场景同步进 `openspec/specs/`）。P1 单执行者交付全部完成并**已归档**（1.x—5.x 全部勾选，`openspec archive` 于 2026-11-20 将 4 份 delta 的 21 条需求、21 个场景同步进 `openspec/specs/`；现行合计 13 个 capability / 78 条需求 / 87 个场景）。
@@ -766,3 +786,13 @@
   `pub mod` 声明不算引用，根文件的 `pub use` 只记 re-export 不计可达。
   它是读数不是门禁（成功即退 0）；`--check verification/reach-baseline.tsv` 才在
   「新增不可达 / 原可达退化」时退 1。行数按逻辑行计，末尾无换行的文件比 `wc -l` 多 1。
+- **新增判定层必须同时给出生产调用点**。一个模块如果只被 `#[cfg(test)]` 引用，
+  它在 `reach` 报表里是「仅测试」或「孤岛」，**不算能力交付**。要么在同一 Change 内接上
+  路由 / CLI / 命令层的真实调用者，要么明确写进 `tasks.md` 的「待接线」清单并说明由哪个切片接。
+  判据：变更出口时 `reach --check` 不得新增不可达项；新增模块首次出现即为不可达，必须在提交说明里解释。
+- **不可达比例是架构指标，不是细节**。截至 2026-11-22：94 个模块中 22 个不可达（25,399 行 / 23.6%）。
+  每次切片出口都要报这个比例；它上升时必须说明「为什么不影响本轮交付」，不得只报测试总数。
+- **名字相似不等于已实现**。登记某条款「已有落点」前，必须指出**生产入口**（路由 / CLI / 命令）。
+  反例：`evidence_publication` 是文档脱敏与发布审批，**不是** v1.0 的 V05（限域证据包导出 +
+  完整性校验 + 记录型执行器复演）；`resource_state` 只是 `domain::rules` 的 re-export 壳。
+  写「已实现」而给不出入口，按未实现处理。
