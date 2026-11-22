@@ -602,6 +602,21 @@
     目标身份不 trim（`"prod "` 是另一条客户记录），但 `None` 与 `Some("")` 都是「整个环境」。
     已关闭的跟踪项不再接受关联：写入口必须与 `allowed_actions` 同口径。
 
+23. **禁止把新领域塞进 `store.rs` 主文件**
+    （`crates/bod-app/src/store.rs` + `src/store/*.rs`）。主文件只放**跨领域**的东西：
+    迁移表、连接与事务生命周期（`open` / `transaction` / `commit` / `rollback`）、
+    `StoreError`、行结构、以及被多个领域共用的编码辅助（`deny_reason_str` 之类）。
+    具体领域的读写放进同名子模块：`store/delivery.rs`、`store/audit.rs`、`store/queue.rs`、
+    `store/budget.rs`、`store/execution.rs`、`store/artifact.rs`、`store/project.rs`、
+    `store/governance.rs`、`store/maintenance.rs`、`store/rows.rs`。
+    子模块用 `impl SqliteStore` / `impl<'a> UnitOfWork<'a>` 扩展同一对类型（私有字段对后代模块可见），
+    文件头写清「本模块负责哪一域的不变量」。
+    **禁止**再往主文件加 `pub fn`：主文件超过 600 行就该问一句「这是哪个域漏了」。
+    新增领域 = 新增文件 + 在 `mod.rs` 注册 + 在 `pub use` 里按需重导出，
+    不要靠「先写进 store.rs 回头再拆」——CR-005 就是那么涨到 8,588 行的。
+    子模块**不需要**单独的可达性登记：`xtask reach` 按顶层模块归并，
+    拆分文件不改变读数（`module_name` 只取 `src/` 之后的第一段）。
+
 ## 验证与完成规则
 
 - 每个切片自带实现、测试与验证索引；不把测试路径存在当作测试通过。

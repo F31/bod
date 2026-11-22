@@ -124,7 +124,7 @@ pub fn collect(root: &Path, crate_name: &str) -> Result<Report, String> {
     let sources = read_tree(root, &src_dir)?;
     let referrers = workspace_sources(root)?;
 
-    let mut rows = Vec::new();
+    let mut rows: Vec<ModuleRow> = Vec::new();
     for (rel_path, text) in &sources {
         let Some(name) = module_name(rel_path) else {
             // `lib.rs` / `main.rs` 是根，不是模块本体。
@@ -138,7 +138,12 @@ pub fn collect(root: &Path, crate_name: &str) -> Result<Report, String> {
         let mut test_files = Vec::new();
         let mut reexported_in = Vec::new();
         for (other, other_text) in &referrers {
-            if other == rel_path || !mentions_module(other_text, &name) {
+            // 同一个顶层模块内部的互相引用不算「外部引用」：
+            // `store/delivery.rs` 里 `use crate::store::StoreError` 不是可达性证据。
+            if module_name(other).as_deref() == Some(name.as_str()) {
+                continue;
+            }
+            if !mentions_module(other_text, &name) {
                 continue;
             }
             if is_test_path(other) {
@@ -158,14 +163,25 @@ pub fn collect(root: &Path, crate_name: &str) -> Result<Report, String> {
             }
         }
 
-        rows.push(ModuleRow {
-            name,
-            lines: text.lines().count(),
-            registered,
-            production_files,
-            test_files,
-            reexported_in,
-        });
+        // 一个顶层模块可能由多个文件组成（`store.rs` + `store/*.rs`）：
+        // 行数累加，引用者并集。这样拆分不改变读数。
+        match rows.iter_mut().find(|row| row.name == name) {
+            Some(existing) => {
+                existing.lines += text.lines().count();
+                existing.registered |= registered;
+                merge_into(&mut existing.production_files, production_files);
+                merge_into(&mut existing.test_files, test_files);
+                merge_into(&mut existing.reexported_in, reexported_in);
+            }
+            None => rows.push(ModuleRow {
+                name,
+                lines: text.lines().count(),
+                registered,
+                production_files,
+                test_files,
+                reexported_in,
+            }),
+        }
     }
 
     rows.sort_by(|left, right| {
@@ -254,15 +270,27 @@ fn display_rel(root: &Path, path: &Path) -> String {
 
 /// 文件名 → 模块名。`lib.rs` / `main.rs` 返回 `None`；`mod.rs` 取父目录名。
 fn module_name(rel_path: &str) -> Option<String> {
-    let file = rel_path.rsplit('/').next()?;
-    let stem = file.strip_suffix(".rs")?;
+    // 模块身份取 `src/` 之后的第一段：`store.rs` 与 `store/delivery.rs` 都属于
+    // 顶层模块 `store`。子模块是本 crate 的内部结构（inherent impl 扩展），
+    // 没有独立的外部调用方，按文件逐个算「模块」会把拆分误报成一批新孤岛。
+    let after_src = rel_path
+        .split("/src/")
+        .nth(1)
+        .unwrap_or_else(|| rel_path.rsplit('/').next().unwrap_or(rel_path));
+    let first = after_src.split('/').next()?;
+    let stem = first.strip_suffix(".rs").unwrap_or(first);
     match stem {
         "lib" | "main" => None,
-        "mod" => rel_path
-            .rsplit('/')
-            .nth(1)
-            .map(std::string::ToString::to_string),
         other => Some(other.to_string()),
+    }
+}
+
+/// 合并引用者列表并去重（同一模块的多个文件会给出重复条目）。
+fn merge_into(dst: &mut Vec<String>, src: Vec<String>) {
+    for item in src {
+        if !dst.contains(&item) {
+            dst.push(item);
+        }
     }
 }
 
@@ -613,6 +641,24 @@ mod tests {
             Some("store")
         );
         assert_eq!(module_name("crates/x/src/db/mod.rs").as_deref(), Some("db"));
+    }
+
+    /// 子模块按顶层模块归并：拆分文件不产生新「模块」。
+    #[test]
+    fn submodule_files_belong_to_their_top_level_module() {
+        assert_eq!(
+            module_name("crates/x/src/store/delivery.rs").as_deref(),
+            Some("store")
+        );
+        assert_eq!(
+            module_name("crates/x/src/store/tests.rs").as_deref(),
+            Some("store")
+        );
+        // 深层子模块也一样。
+        assert_eq!(
+            module_name("crates/x/src/store/inner/deep.rs").as_deref(),
+            Some("store")
+        );
     }
 
     #[test]
