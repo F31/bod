@@ -22,6 +22,7 @@ use crate::coverage_receipt::{
     InstallationReceipt, SwitchState, VerificationConclusion, judge_coverage,
 };
 use crate::delivery_api::{self, DeliveryTrackingView, EvidenceStamp, TargetCoverage, TargetRef};
+use crate::delivery_link::WorkPackageLink;
 use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
@@ -321,6 +322,10 @@ pub struct TrackingView {
     pub targets: Vec<TargetCoverageView>,
     /// 证据时间线，最新在前。
     pub evidence: Vec<EvidenceStamp>,
+    /// 后补的内部工作包关联（3.4），按关联时间升序。
+    /// **不进契约响应**：`GET /delivery-tracking/{id}` 的形状在 2.2 已冻结；
+    /// 它现在只在 `bod tracking --id` 里显示，用于核对「后补的关联落到了哪条跟踪项」。
+    pub work_packages: Vec<WorkPackageLink>,
 }
 
 impl TrackingView {
@@ -649,6 +654,20 @@ pub fn render_one(view: &TrackingView) -> String {
     } else {
         out.push_str("  内部关联：无（外部交付不要求内部运行存在）\n");
     }
+    if view.work_packages.is_empty() {
+        out.push_str("  内部工作包：无（外部交付不要求工作包；后来补入的会追加在这里）\n");
+    } else {
+        out.push_str(&format!("  内部工作包：{} 个\n", view.work_packages.len()));
+        for link in &view.work_packages {
+            out.push_str(&format!(
+                "  - {}（{}，{}）\n",
+                link.work_package_revision,
+                link.linked_by,
+                // 时间用 UTC 字符串：毫秒数在终端里读不出「什么时候补的」。
+                crate::conformance_report::utc_stamp(link.linked_at_ms)
+            ));
+        }
+    }
     if view.targets.is_empty() {
         out.push_str("  目标：0 个（没有目标就没有交付对象，覆盖结论无从谈起）\n");
     } else {
@@ -934,6 +953,7 @@ mod tests {
             tracking: tracking(),
             targets: vec![covered, pending],
             evidence: Vec::new(),
+            work_packages: Vec::new(),
         };
         // 没有观察的目标同时缺三样：制品对应、人群、验证结论。
         assert_eq!(
@@ -964,6 +984,7 @@ mod tests {
                 VerificationConclusion::Passed,
             )],
             evidence: Vec::new(),
+            work_packages: Vec::new(),
         };
         let candidates = view.action_candidates();
         assert!(!candidates.is_empty(), "已覆盖的目标至少有候选动作");
@@ -1003,6 +1024,7 @@ mod tests {
                 source: "connector".to_string(),
                 observed_at: "2026-11-21T00:01:40Z".to_string(),
             }],
+            work_packages: Vec::new(),
         };
         let dto = view.to_dto().expect("版本 1 应可投影");
         let rendered = serde_json::to_value(&dto).expect("应可序列化");
@@ -1034,6 +1056,7 @@ mod tests {
             tracking: row,
             targets: Vec::new(),
             evidence: Vec::new(),
+            work_packages: Vec::new(),
         };
         let dto = view.to_dto().expect("应可投影");
         assert!(dto.owner.is_none());

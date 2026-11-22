@@ -9,6 +9,7 @@
 
 use bod_app::config::BodConfig;
 use bod_app::coverage_receipt::SwitchState;
+use bod_app::delivery_link::{AppendLinkCommand, LinkRef};
 use bod_app::delivery_tracking::{
     ObservationKind, ObservationRow, TargetRow, TrackingRow, TrackingState,
 };
@@ -220,6 +221,54 @@ fn missing_db_flag_is_refused() {
     let (code, _stdout, stderr) = run(&["tracking"]);
     assert_ne!(code, 0);
     assert!(stderr.contains("--db"), "{stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// 后补的内部工作包（P8 3.4）
+// ---------------------------------------------------------------------------
+
+/// 追加的内部工作包在详情里可见，且版本随之推进。
+///
+/// 3.4 没有写命令入口（§34.12 的主体判定未实现），所以这里用库层入口造事实，
+/// 再用唯一的读出口核对：写进去的东西必须看得见，否则等于没有记录。
+#[test]
+fn tracking_detail_shows_later_work_packages() {
+    let path = db_path();
+    seed(&path);
+    {
+        let mut store = SqliteStore::open(&path, &BodConfig::default()).expect("应可建库");
+        let uow = store.transaction().expect("开启事务");
+        uow.append_delivery_link(
+            &AppendLinkCommand {
+                idempotency_key: "k-wp".to_string(),
+                company_id: "company-default".to_string(),
+                tracking_id: "dt-1".to_string(),
+                link: LinkRef::WorkPackage("wp-17".to_string()),
+                targets: Vec::new(),
+                expected_version: 1,
+                linked_by: "alice".to_string(),
+            },
+            1_763_715_601_000,
+        )
+        .expect("工作包关联应可追加");
+        uow.commit().expect("提交事务");
+    }
+    let db = path.to_string_lossy().to_string();
+    let (code, stdout, stderr) = run(&["tracking", "--db", &db, "--id", "dt-1"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("内部工作包：1 个"), "{stdout}");
+    assert!(stdout.contains("wp-17"), "{stdout}");
+    assert!(stdout.contains("alice"), "{stdout}");
+    assert!(stdout.contains("版本：2"), "追加后版本要推进：{stdout}");
+    // 补工作包不等于伪造运行：内部引用仍然是空。
+    assert!(stdout.contains("内部关联：无"), "{stdout}");
+
+    // 工作包不进 2.2 冻结的响应体：`--json` 形状不受影响。
+    let (code, stdout, stderr) = run(&["tracking", "--db", &db, "--id", "dt-1", "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(value["version"], serde_json::json!(2));
+    assert!(value.get("work_packages").is_none(), "{stdout}");
 }
 
 // ---------------------------------------------------------------------------

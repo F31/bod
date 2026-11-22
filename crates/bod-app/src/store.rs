@@ -9,13 +9,14 @@ use crate::authorization::StageAction;
 use crate::config::BodConfig;
 use crate::coverage_receipt::VerificationConclusion;
 use crate::delivery_idempotency::{IdempotencyError, Receipt, Replay, ResultKind, classify};
+use crate::delivery_link::{AppendLinkCommand, LinkOutcome, NormalizedTarget, WorkPackageLink};
 use crate::delivery_source::{
     COMMAND_IMPORT_SOURCE, ImportOutcome, ImportSourceCommand, LinkedSource, SourceError,
     SourceIdentity, SourceResolution,
 };
 use crate::delivery_tracking::{
-    DeliveryError, ObservationKind, ObservationRow, TargetRow, TrackingRow, TrackingView,
-    evidence_stamps, project_target, verification_conclusion,
+    DeliveryError, ObservationKind, ObservationRow, TargetRow, TrackingRow, TrackingState,
+    TrackingView, evidence_stamps, project_target, verification_conclusion,
 };
 use crate::domain::artifact::{
     AcceptanceBinding, AcceptanceDecision, AcceptanceRecord, Artifact, ArtifactKind,
@@ -58,9 +59,9 @@ use std::path::Path;
 /// 012 为 P2 历史争议与接受五元组冻结，013 为 P2 专项边界层级与组织元数据，
 /// 014 为 decisions 不可变 trigger（P2 3.4 加固），015 为业务审计事件（CR-002），
 /// 016 为 §11 交付跟踪（P8 3.1：跟踪项/目标/追加式观察）；
-/// 016 为 §11 交付跟踪（P8 3.1：跟踪项/目标/追加式观察）；
 /// 017 为来源身份（P8 3.2：五元组/候选/追加式修订）；
-/// 018 为去重语义（P8 3.3：命令回执/来源关系）。
+/// 018 为去重语义（P8 3.3：命令回执/来源关系）；
+/// 019 为关联追加（P8 3.4：内部工作包关联；目标关联与版本推进复用 016 的表与列）。
 /// 新增迁移只能追加，不可原地改写（§33.7）。
 /// P7 基准统一页缓存：负数按 KiB 解释，64 MiB；避免依赖 SQLite 默认 2 MiB。
 const BENCH_CACHE_SIZE_KIB: i64 = 65_536;
@@ -84,6 +85,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/016_delivery_tracking.sql"),
     include_str!("../migrations/017_delivery_sources.sql"),
     include_str!("../migrations/018_delivery_idempotency.sql"),
+    include_str!("../migrations/019_delivery_links.sql"),
 ];
 
 /// 与 `MIGRATIONS` 一一对应的文件名，供迁移登记与 checksum 校验使用。
@@ -106,6 +108,7 @@ pub const MIGRATION_NAMES: &[&str] = &[
     "016_delivery_tracking.sql",
     "017_delivery_sources.sql",
     "018_delivery_idempotency.sql",
+    "019_delivery_links.sql",
 ];
 
 /// 已编译进二进制的迁移脚本（文件名 → SQL 正文）。
@@ -207,7 +210,6 @@ fn delivery_row_error(
 }
 
 fn map_tracking_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackingRow> {
-    use crate::delivery_tracking::TrackingState;
     let state_text: String = row.get(6)?;
     let state = TrackingState::parse(&state_text).map_err(|err| delivery_row_error(6, err))?;
     Ok(TrackingRow {
@@ -432,6 +434,30 @@ fn is_unique_violation(err: &rusqlite::Error) -> bool {
     )
 }
 
+/// 跟踪项已关联的内部工作包（3.4），按关联时间升序。裸 `Connection` 版本：
+/// 读视图在 `SqliteStore` 上、写路径在 `UnitOfWork` 上，两处共用一份 SQL。
+fn work_package_links(
+    conn: &rusqlite::Connection,
+    company_id: &str,
+    tracking_id: &str,
+) -> Result<Vec<WorkPackageLink>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT tracking_id, work_package_revision, linked_by, linked_at_ms
+         FROM delivery_tracking_work_packages
+         WHERE company_id = ?1 AND tracking_id = ?2
+         ORDER BY linked_at_ms ASC, work_package_revision ASC",
+    )?;
+    let rows = stmt.query_map(params![company_id, tracking_id], |row| {
+        Ok(WorkPackageLink {
+            tracking_id: row.get(0)?,
+            work_package_revision: row.get(1)?,
+            linked_by: row.get(2)?,
+            linked_at_ms: row.get(3)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+}
+
 /// 按五元组查身份。查不到返回 `None`；**不做模糊匹配**——那会让两个来源悄悄合并。
 fn find_source_id(
     conn: &rusqlite::Connection,
@@ -599,6 +625,10 @@ pub enum StoreError {
     /// 幂等键冲突或回执不可读（3.3）。单独一档：它的处置方式是「换键」或「查回执」，
     /// 不是重试——重试同一个键只会得到同一个答案。
     Idempotency(IdempotencyError),
+    /// 关联追加的拒绝原因（3.4）：引用没给/给了两个、期望版本不一致、跟踪项已关闭。
+    /// 与 `Delivery` 分开：这些错误的处置是「改请求」或「按当前版本重提」，
+    /// 而不是去补证据。
+    Link(crate::delivery_link::LinkError),
 }
 
 impl fmt::Display for StoreError {
@@ -617,6 +647,7 @@ impl fmt::Display for StoreError {
             Self::Delivery(err) => write!(f, "交付跟踪失败: {}", err.explain()),
             Self::Source(err) => write!(f, "来源身份失败: {}", err.explain()),
             Self::Idempotency(err) => write!(f, "幂等键冲突: {}", err.explain()),
+            Self::Link(err) => write!(f, "关联追加失败: {}", err.explain()),
         }
     }
 }
@@ -650,6 +681,12 @@ impl From<crate::delivery_source::SourceError> for StoreError {
 impl From<IdempotencyError> for StoreError {
     fn from(value: IdempotencyError) -> Self {
         Self::Idempotency(value)
+    }
+}
+
+impl From<crate::delivery_link::LinkError> for StoreError {
+    fn from(value: crate::delivery_link::LinkError) -> Self {
+        Self::Link(value)
     }
 }
 
@@ -805,9 +842,10 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
-    /// 读一个跟踪项的完整视图（P8 3.1）：跟踪项 + 目标 + 观察 + 各目标的验证结论。
+    /// 读一个跟踪项的完整视图（P8 3.1，3.4 起含内部工作包关联）：
+    /// 跟踪项 + 目标 + 观察 + 各目标的验证结论 + 后补的工作包。
     ///
-    /// 查询条数固定（4 条），不随目标数量增长：观察与验证记录一次 JOIN 取回，
+    /// 查询条数固定（5 条），不随目标数量增长：观察与验证记录一次 JOIN 取回，
     /// 再在内存里按目标归并。**不写库**：读路径不产生审计、不改任何状态。
     ///
     /// 覆盖结论在这里算出（`project_target` → `judge_coverage`），不从表里读——
@@ -871,6 +909,7 @@ impl SqliteStore {
             tracking,
             targets: projected,
             evidence,
+            work_packages: self.list_work_package_links(company_id, tracking_id)?,
         }))
     }
 
@@ -924,6 +963,18 @@ impl SqliteStore {
         source_id: &str,
     ) -> Result<Option<String>, StoreError> {
         lookup_tracking_for_source(&self.conn, company_id, source_id).map_err(StoreError::Sql)
+    }
+
+    /// 读跟踪项已关联的内部工作包（P8 3.4），按关联时间升序。
+    ///
+    /// 只读：`bod tracking --id` 用它把「后补的内部工作包」显示出来。
+    /// 不参与覆盖判定——工作包存在不等于交付完成，证据仍然只有观察。
+    pub fn list_work_package_links(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+    ) -> Result<Vec<WorkPackageLink>, StoreError> {
+        work_package_links(&self.conn, company_id, tracking_id)
     }
 
     /// 读一个来源身份。查不到返回 `None`——「不知道」与「没有」要分开。
@@ -4092,6 +4143,297 @@ impl<'a> UnitOfWork<'a> {
         ))
     }
 
+    // --- 关联追加（P8 3.4）--------------------------------------------------
+
+    /// 读跟踪项的写入闸门：当前版本与状态。
+    ///
+    /// 单独一条查询而不是复用 `delivery_tracking_view`：追加只需要两个标量，
+    /// 读全量视图会把目标、观察、验证结论都算一遍，而那些值在读到时可能已经变了。
+    fn delivery_tracking_gate(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+    ) -> Result<(i64, TrackingState), StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT resource_version, state FROM delivery_tracking
+                 WHERE company_id = ?1 AND tracking_id = ?2",
+                params![company_id, tracking_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((version, state)) = row else {
+            return Err(DeliveryError::TrackingNotFound(tracking_id.to_string()).into());
+        };
+        Ok((version, TrackingState::parse(&state)?))
+    }
+
+    /// 追加一条关联（P8 3.4）：来源或内部工作包，连同要确保存在的客户目标。
+    ///
+    /// 顺序固定：校验 → 读回执 → 期望版本闸门 → 挂关系 → 补目标 → 有实际新增才推进版本
+    /// → 写回执，整段在 `SAVEPOINT` 里。四条语义各有测试：
+    ///
+    /// 1. **期望版本不一致就什么都不写**。不做「尽力而为」的合并：那次写入是照着
+    ///    另一个状态做的决定，合并进去等于替调用方改主意。
+    /// 2. **纯重复不推进版本**。关系和目标都已存在时 `appended=false`、版本不动；
+    ///    若照样 +1，两个客户端会互相把对方的期望版本判过期，重试变成必冲突——
+    ///    「重试不重复建项」就成了空话。
+    /// 3. **已关闭的跟踪项不再追加**。与视图同口径：`allowed_actions` 在关闭时本来
+    ///    就不给 `link-source`，写入口若还放行，视图与事实就分家了。
+    /// 4. **重放返回首次结果，不回今天的版本**。当前版本可能已经更新，客户端拿它去追加
+    ///    会得到 409 而不是静默覆盖——那是安全的一侧。
+    pub fn append_delivery_link(
+        &self,
+        command: &AppendLinkCommand,
+        now_ms: i64,
+    ) -> Result<LinkOutcome, StoreError> {
+        use crate::delivery_link::{COMMAND_APPEND_LINK, LinkError, LinkRef};
+
+        command.validate()?;
+        let targets = command.normalized_targets()?;
+        let key = crate::delivery_idempotency::validate_key(&command.idempotency_key)?;
+        let owned = command.payload_fields(&targets);
+        let borrowed: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        let fingerprint = crate::delivery_idempotency::payload_fingerprint(&borrowed)?;
+
+        if let Replay::Replayed(receipt) = classify(
+            find_receipt(self.conn, &command.company_id, key)?,
+            COMMAND_APPEND_LINK,
+            &fingerprint,
+        )? {
+            return LinkOutcome::replayed_from(&receipt.result_detail).map_err(|detail| {
+                IdempotencyError::UnreadableReceipt {
+                    key: key.to_string(),
+                    detail,
+                }
+                .into()
+            });
+        }
+
+        self.conn.execute_batch("SAVEPOINT append_delivery_link")?;
+        let outcome = (|| -> Result<LinkOutcome, StoreError> {
+            let (current, state) =
+                self.delivery_tracking_gate(&command.company_id, &command.tracking_id)?;
+            if state != TrackingState::Open {
+                return Err(LinkError::TrackingClosed(command.tracking_id.clone()).into());
+            }
+            let current_version =
+                u64::try_from(current).map_err(|_| DeliveryError::InvalidVersion(current))?;
+            if current_version != command.expected_version {
+                return Err(LinkError::VersionConflict {
+                    expected: command.expected_version,
+                    current: current_version,
+                }
+                .into());
+            }
+
+            let mut appended = false;
+            match &command.link {
+                LinkRef::Source(source_id) => {
+                    let linked = self.link_delivery_tracking_source(
+                        &command.company_id,
+                        source_id,
+                        &command.tracking_id,
+                        &command.linked_by,
+                        now_ms,
+                    )?;
+                    appended |= linked.created;
+                }
+                LinkRef::WorkPackage(revision) => {
+                    appended |= self.append_work_package_link(
+                        &command.company_id,
+                        &command.tracking_id,
+                        revision,
+                        &command.linked_by,
+                        now_ms,
+                    )?;
+                }
+            }
+            let mut created_targets = Vec::new();
+            for target in &targets {
+                if self.ensure_delivery_target(
+                    &command.company_id,
+                    &command.tracking_id,
+                    target,
+                    now_ms,
+                )? {
+                    created_targets.push(target.target_id.clone());
+                    appended = true;
+                }
+            }
+            let version = if appended {
+                self.bump_delivery_version(
+                    &command.company_id,
+                    &command.tracking_id,
+                    current,
+                    now_ms,
+                )?
+            } else {
+                current_version
+            };
+
+            let outcome = LinkOutcome {
+                tracking_id: command.tracking_id.clone(),
+                link_id: command.link_id(),
+                appended,
+                version,
+                created_targets,
+                replayed: false,
+            };
+            let detail = serde_json::to_string(&outcome).map_err(|err| {
+                IdempotencyError::ResultNotRecordable(format!("结果体无法编码为 JSON：{err}"))
+            })?;
+            // 结果种类记 `tracking`：关系是跟踪项的属性，回执要回答的是「哪条跟踪项被改了」。
+            // 新增第三种种类要重建表（`result_kind` 的 CHECK 不受 ALTER 幂等保护），
+            // 而换命令与换载荷已经由 `command` 列分清。
+            self.conn.execute(
+                "INSERT INTO delivery_command_receipts (
+                    company_id, idempotency_key, command, payload_fingerprint,
+                    result_kind, result_id, result_detail, recorded_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    command.company_id,
+                    key,
+                    COMMAND_APPEND_LINK,
+                    fingerprint,
+                    ResultKind::Tracking.as_str(),
+                    command.tracking_id,
+                    detail,
+                    now_ms,
+                ],
+            )?;
+            Ok(outcome)
+        })();
+        match outcome {
+            Ok(value) => {
+                self.conn.execute_batch("RELEASE append_delivery_link")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO append_delivery_link; RELEASE append_delivery_link",
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// 推进跟踪项版本。带上 `resource_version = 当前值` 的条件：
+    /// 读与写之间若有别的写入，这里会写 0 行，按版本冲突报出去而不是覆盖。
+    fn bump_delivery_version(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+        current: i64,
+        now_ms: i64,
+    ) -> Result<u64, StoreError> {
+        use crate::delivery_link::LinkError;
+
+        let changed = self.conn.execute(
+            "UPDATE delivery_tracking
+             SET resource_version = resource_version + 1, updated_at_ms = ?3
+             WHERE company_id = ?1 AND tracking_id = ?2 AND resource_version = ?4",
+            params![company_id, tracking_id, now_ms, current],
+        )?;
+        if changed != 1 {
+            let (latest, _) = self.delivery_tracking_gate(company_id, tracking_id)?;
+            return Err(LinkError::VersionConflict {
+                expected: u64::try_from(current)
+                    .map_err(|_| DeliveryError::InvalidVersion(current))?,
+                current: u64::try_from(latest)
+                    .map_err(|_| DeliveryError::InvalidVersion(latest))?,
+            }
+            .into());
+        }
+        u64::try_from(current + 1).map_err(|_| DeliveryError::InvalidVersion(current + 1).into())
+    }
+
+    /// 确保一个客户目标存在。已存在返回 `false`，且**不改它的验收条件与开关**：
+    /// 那是事实，不归一次关联改写。新建返回 `true`。
+    ///
+    /// 新建目标的开关与人群记为未知：没有证据就没有事实，不默认「已同步」。
+    fn ensure_delivery_target(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+        target: &NormalizedTarget,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT target_id FROM delivery_targets
+                 WHERE company_id = ?1 AND tracking_id = ?2 AND customer_id = ?3
+                   AND environment = ?4 AND deployment_unit = ?5",
+                params![
+                    company_id,
+                    tracking_id,
+                    target.customer_id,
+                    target.environment,
+                    target.deployment_unit
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Ok(false);
+        }
+        let inserted = self.conn.execute(
+            "INSERT INTO delivery_targets (
+                target_id, company_id, tracking_id, customer_id, environment, deployment_unit,
+                acceptance, switch_state, population_known, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', 'unknown', 0, ?7, ?8)",
+            params![
+                target.target_id,
+                company_id,
+                tracking_id,
+                target.customer_id,
+                target.environment,
+                target.deployment_unit,
+                now_ms,
+                now_ms,
+            ],
+        );
+        match inserted {
+            Ok(_) => Ok(true),
+            // 并发下另一个写入者刚建成同一目标：按已有处理，不报读不懂的唯一约束错误。
+            Err(err) if is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// 追加内部工作包关联。同一修订重复提交返回 `false`，不新增也不报错。
+    fn append_work_package_link(
+        &self,
+        company_id: &str,
+        tracking_id: &str,
+        work_package_revision: &str,
+        linked_by: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let inserted = self.conn.execute(
+            "INSERT INTO delivery_tracking_work_packages (
+                company_id, tracking_id, work_package_revision, linked_by, linked_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                company_id,
+                tracking_id,
+                work_package_revision,
+                linked_by,
+                now_ms
+            ],
+        );
+        match inserted {
+            Ok(_) => Ok(true),
+            Err(err) if is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub fn get_appointment(
         &self,
         company_id: &str,
@@ -7229,10 +7571,11 @@ mod tests {
             )
             .expect("应能查询表目录");
         assert_eq!(
-            count, 59,
+            count, 60,
             "应创建 9 张 D1 + 3 张 D2 + 4 张 D3 + 6 张 D4 + 10 张 D5 + 5 张 D6 + 12 张 P2 表 \
              + 1 张审计表 + 3 张交付跟踪表（016）+ 4 张来源表（017：身份/候选/修订/观察关联）\
-             + 2 张去重表（018：命令回执/来源关系）"
+             + 2 张去重表（018：命令回执/来源关系）\
+             + 1 张关联表（019：内部工作包关联）"
         );
     }
 
@@ -7740,5 +8083,506 @@ mod tests {
             "DELETE FROM delivery_command_receipts WHERE idempotency_key = 'k-1'",
         );
         assert!(delete.is_err(), "删除回执必须被拒绝");
+    }
+
+    // -----------------------------------------------------------------------
+    // 关联追加与期望版本（P8 3.4）
+    // -----------------------------------------------------------------------
+
+    use crate::delivery_api::TargetRef;
+    use crate::delivery_link::{COMMAND_APPEND_LINK, LinkError, LinkRef};
+
+    fn link_target(customer: &str, unit: Option<&str>) -> TargetRef {
+        TargetRef {
+            customer_id: customer.to_string(),
+            environment: "prod".to_string(),
+            deployment_unit: unit.map(str::to_string),
+        }
+    }
+
+    fn link_command(
+        key: &str,
+        link: LinkRef,
+        targets: Vec<TargetRef>,
+        expected_version: u64,
+    ) -> AppendLinkCommand {
+        AppendLinkCommand {
+            idempotency_key: key.to_string(),
+            company_id: "company-default".to_string(),
+            tracking_id: "dt-1".to_string(),
+            link,
+            targets,
+            expected_version,
+            linked_by: "alice".to_string(),
+        }
+    }
+
+    fn register_pull_request(store: &mut SqliteStore, source_id: &str) {
+        with_uow(store, |uow| {
+            uow.register_source(
+                source_id,
+                &SourceIdentity {
+                    company_id: "company-default".to_string(),
+                    project_id: "project-1".to_string(),
+                    connection_id: "gh-1".to_string(),
+                    object_type: "pull-request".to_string(),
+                    provider_object_id: "PR_kw318".to_string(),
+                },
+                "acme/web#318",
+                "alice",
+                900,
+            )
+            .map(|_| ())
+        })
+        .expect("来源身份应可登记");
+    }
+
+    fn insert_open_tracking(store: &mut SqliteStore) {
+        with_uow(store, |uow| {
+            uow.insert_delivery_tracking(&delivery_tracking("company-default", "dt-1"))
+        })
+        .expect("跟踪项应可写入");
+    }
+
+    /// 一个来源、两个客户：共享来源不合并客户记录，A 的部署也不能成为 B 的证据。
+    ///
+    /// 模型上的答案是**一条跟踪项 + 两个目标**，不是两条跟踪项（018 的主键决定：
+    /// 一个来源身份只承载一条跟踪关系）。所以「不合并」必须落在目标这一层。
+    #[test]
+    fn shared_source_keeps_each_customer_record_separate() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        register_pull_request(&mut store, "src-1");
+        insert_open_tracking(&mut store);
+
+        let outcome = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::Source("src-1".to_string()),
+                    vec![link_target("acme", Some("web")), link_target("beta", None)],
+                    1,
+                ),
+                1_000,
+            )
+        })
+        .expect("追加应成功");
+        assert!(outcome.appended);
+        assert_eq!(outcome.version, 2);
+        assert_eq!(outcome.created_targets.len(), 2);
+        assert_eq!(count_rows(&store, "delivery_tracking"), 1);
+        assert_eq!(count_rows(&store, "delivery_tracking_sources"), 1);
+        assert_eq!(count_rows(&store, "delivery_targets"), 2);
+
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("应可读取")
+            .expect("应存在");
+        let acme_target = view
+            .targets
+            .iter()
+            .find(|target| target.target.customer_id == "acme")
+            .expect("应有 acme 目标")
+            .target
+            .target_id
+            .clone();
+
+        // 只给 acme 记一次部署。
+        with_uow(&mut store, |uow| {
+            uow.append_delivery_observation(&delivery_observation(
+                "o-1",
+                &acme_target,
+                ObservationKind::Deployment,
+                1_100,
+                "rev-1",
+                "sha256:abc",
+                "部署到客户 A",
+            ))
+        })
+        .expect("部署观察应可写入");
+
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("应可读取")
+            .expect("应存在");
+        let acme = view
+            .targets
+            .iter()
+            .find(|target| target.target.customer_id == "acme")
+            .expect("应有 acme 目标");
+        let beta = view
+            .targets
+            .iter()
+            .find(|target| target.target.customer_id == "beta")
+            .expect("应有 beta 目标");
+        assert_eq!(acme.evidence_revision.as_deref(), Some("o-1"));
+        assert!(
+            beta.evidence_revision.is_none(),
+            "客户 A 的部署不得出现在客户 B 的证据里"
+        );
+        // 制品摘要没有流到 B：它的覆盖元组仍然不完整，A 的则已经完整。
+        assert!(
+            !acme
+                .gaps
+                .contains(&crate::delivery_tracking::GAP_NO_ARTIFACT_MAPPING)
+        );
+        assert!(
+            beta.gaps
+                .contains(&crate::delivery_tracking::GAP_NO_ARTIFACT_MAPPING)
+        );
+        assert_eq!(acme.target.deployment_unit, "web");
+        assert!(beta.target.deployment_unit.is_empty());
+    }
+
+    /// 目标给两遍是一条指令：只建一行，版本只推进一次。
+    #[test]
+    fn duplicate_targets_in_one_command_create_one_row() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        register_pull_request(&mut store, "src-1");
+        insert_open_tracking(&mut store);
+
+        let outcome = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::Source("src-1".to_string()),
+                    vec![link_target("acme", None), link_target("acme", None)],
+                    1,
+                ),
+                1_000,
+            )
+        })
+        .expect("追加应成功");
+        assert_eq!(outcome.created_targets.len(), 1);
+        assert_eq!(outcome.version, 2);
+        assert_eq!(count_rows(&store, "delivery_targets"), 1);
+    }
+
+    /// 期望版本不一致：**什么都不写**。不做事后合并，也不留回执。
+    #[test]
+    fn stale_expected_version_writes_nothing() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        insert_open_tracking(&mut store);
+
+        let err = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::Source("src-1".to_string()),
+                    vec![link_target("acme", None)],
+                    5,
+                ),
+                1_000,
+            )
+        })
+        .expect_err("期望版本不一致必须拒绝");
+        match err {
+            StoreError::Link(LinkError::VersionConflict { expected, current }) => {
+                assert_eq!(expected, 5);
+                assert_eq!(current, 1, "冲突里要带当前版本，客户端不必再读一次");
+            }
+            other => panic!("应为版本冲突：{other:?}"),
+        }
+        assert_eq!(count_rows(&store, "delivery_targets"), 0);
+        assert_eq!(count_rows(&store, "delivery_tracking_sources"), 0);
+        assert_eq!(
+            count_rows(&store, "delivery_command_receipts"),
+            0,
+            "被拒绝的命令不得留下回执"
+        );
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("应可读取")
+            .expect("应存在");
+        assert_eq!(view.tracking.resource_version, 1);
+    }
+
+    /// 换键重复同一载荷：什么都不追加，版本也不动。
+    ///
+    /// 版本若照样 +1，两个客户端会互相把对方的期望版本判过期，重试变成必冲突。
+    #[test]
+    fn repeating_with_another_key_appends_nothing_and_keeps_the_version() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        register_pull_request(&mut store, "src-1");
+        insert_open_tracking(&mut store);
+
+        let command = |key: &str, expected: u64| {
+            link_command(
+                key,
+                LinkRef::Source("src-1".to_string()),
+                vec![link_target("acme", None)],
+                expected,
+            )
+        };
+        let first = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(&command("k-1", 1), 1_000)
+        })
+        .expect("首次追加应成功");
+        assert!(first.appended);
+
+        let again = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(&command("k-2", 2), 1_100)
+        })
+        .expect("换键重复应成功");
+        assert!(!again.appended, "关系与目标都在，本次没有新增");
+        assert_eq!(again.version, 2, "纯重复不得推进版本");
+        assert!(again.created_targets.is_empty());
+        assert!(!again.replayed, "换键不是重放：这是另一条命令");
+        assert_eq!(count_rows(&store, "delivery_targets"), 1);
+        assert_eq!(count_rows(&store, "delivery_tracking_sources"), 1);
+        assert_eq!(
+            count_rows(&store, "delivery_command_receipts"),
+            2,
+            "两条命令各自留回执"
+        );
+    }
+
+    /// 重放返回**首次**结果（含当时的版本），不按今天的状态重算。
+    ///
+    /// 客户端若拿重放给的旧版本去追加，会得到 409 而不是静默覆盖——安全的一侧。
+    #[test]
+    fn replay_returns_the_first_result_not_todays_version() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        register_pull_request(&mut store, "src-1");
+        insert_open_tracking(&mut store);
+
+        let first = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::Source("src-1".to_string()),
+                    vec![link_target("acme", None)],
+                    1,
+                ),
+                1_000,
+            )
+        })
+        .expect("首次追加应成功");
+        assert_eq!(first.version, 2);
+
+        let second = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-2",
+                    LinkRef::WorkPackage("wp-17".to_string()),
+                    vec![link_target("beta", None)],
+                    2,
+                ),
+                1_100,
+            )
+        })
+        .expect("第二次追加应成功");
+        assert_eq!(second.version, 3);
+
+        let replay = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::Source("src-1".to_string()),
+                    vec![link_target("acme", None)],
+                    1,
+                ),
+                1_200,
+            )
+        })
+        .expect("重放应成功");
+        assert!(replay.replayed);
+        assert!(replay.appended, "首次执行确实追加了：这是当时的回答");
+        assert_eq!(
+            replay.version, 2,
+            "重放给的是首次执行后的版本，不是今天的 3"
+        );
+        assert_eq!(replay.link_id, first.link_id);
+        assert_eq!(count_rows(&store, "delivery_command_receipts"), 2);
+
+        // 拿着重放给的旧版本继续追加：409，而不是把别人的写入覆盖掉。
+        let err = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-3",
+                    LinkRef::WorkPackage("wp-18".to_string()),
+                    Vec::new(),
+                    2,
+                ),
+                1_300,
+            )
+        })
+        .expect_err("旧版本必须冲突");
+        assert!(matches!(
+            err,
+            StoreError::Link(LinkError::VersionConflict {
+                expected: 2,
+                current: 3
+            })
+        ));
+    }
+
+    /// 后来补入的内部工作包：追加关联，不动外部来源，也不伪造内部运行（D3）。
+    #[test]
+    fn a_later_work_package_is_appended_without_touching_the_external_source() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        register_pull_request(&mut store, "src-1");
+        insert_open_tracking(&mut store);
+
+        let linked = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::Source("src-1".to_string()),
+                    vec![link_target("acme", None)],
+                    1,
+                ),
+                1_000,
+            )
+        })
+        .expect("来源关联应成功");
+        assert_eq!(linked.version, 2);
+
+        let appended = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-2",
+                    LinkRef::WorkPackage("wp-17".to_string()),
+                    Vec::new(),
+                    2,
+                ),
+                1_100,
+            )
+        })
+        .expect("工作包关联应成功");
+        assert!(appended.appended);
+        assert_eq!(appended.version, 3);
+
+        assert_eq!(
+            store
+                .find_tracking_for_source("company-default", "src-1")
+                .expect("应可读取")
+                .as_deref(),
+            Some("dt-1"),
+            "外部来源关系必须原样保留"
+        );
+        let links = store
+            .list_work_package_links("company-default", "dt-1")
+            .expect("应可读取");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].work_package_revision, "wp-17");
+        assert_eq!(links[0].linked_by, "alice");
+
+        // 重复追加同一修订：幂等，版本不动。
+        let again = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-3",
+                    LinkRef::WorkPackage("wp-17".to_string()),
+                    Vec::new(),
+                    3,
+                ),
+                1_200,
+            )
+        })
+        .expect("重复关联应成功");
+        assert!(!again.appended);
+        assert_eq!(again.version, 3);
+        assert_eq!(count_rows(&store, "delivery_tracking_work_packages"), 1);
+
+        // 补工作包不等于伪造运行：三个内部引用列仍然是空。
+        let view = store
+            .delivery_tracking_view("company-default", "dt-1")
+            .expect("应可读取")
+            .expect("应存在");
+        assert!(
+            !view.tracking.has_internal_anchor(),
+            "工作包关联不得写成 run_uid/attempt_id"
+        );
+        assert_eq!(view.work_packages.len(), 1);
+    }
+
+    /// 已关闭的跟踪项不再接受关联。与视图同口径：关闭时 `allowed_actions` 本来就不给链接。
+    #[test]
+    fn closed_tracking_takes_no_new_links() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        let mut row = delivery_tracking("company-default", "dt-1");
+        row.state = TrackingState::Closed;
+        with_uow(&mut store, |uow| uow.insert_delivery_tracking(&row)).expect("跟踪项应可写入");
+
+        let err = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::WorkPackage("wp-17".to_string()),
+                    Vec::new(),
+                    1,
+                ),
+                1_000,
+            )
+        })
+        .expect_err("关闭后追加必须拒绝");
+        assert!(matches!(
+            err,
+            StoreError::Link(LinkError::TrackingClosed(_))
+        ));
+        assert_eq!(count_rows(&store, "delivery_tracking_work_packages"), 0);
+        assert_eq!(count_rows(&store, "delivery_command_receipts"), 0);
+    }
+
+    /// 导入用过的键不能拿来追加关联：一个键只属于一条命令。
+    #[test]
+    fn a_key_used_by_import_cannot_be_reused_for_a_link() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        with_uow(&mut store, |uow| {
+            uow.import_delivery_source(&import_command("k-1", "dt-1", "src-1"), 1_000)
+        })
+        .expect("导入应成功");
+
+        let err = with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::WorkPackage("wp-17".to_string()),
+                    Vec::new(),
+                    1,
+                ),
+                1_100,
+            )
+        })
+        .expect_err("换命令必须冲突");
+        assert!(
+            matches!(
+                err,
+                StoreError::Idempotency(IdempotencyError::KeyReusedForOtherCommand { .. })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(count_rows(&store, "delivery_tracking_work_packages"), 0);
+    }
+
+    /// 回执要能回答「这条命令做了什么、落到哪条跟踪项」。
+    #[test]
+    fn link_receipt_records_the_command_and_its_result() {
+        let mut store = SqliteStore::in_memory(&config()).expect("内存库应可打开");
+        register_pull_request(&mut store, "src-1");
+        insert_open_tracking(&mut store);
+        with_uow(&mut store, |uow| {
+            uow.append_delivery_link(
+                &link_command(
+                    "k-1",
+                    LinkRef::Source("src-1".to_string()),
+                    vec![link_target("acme", None)],
+                    1,
+                ),
+                1_000,
+            )
+        })
+        .expect("追加应成功");
+
+        let receipt = store
+            .find_command_receipt("company-default", "k-1")
+            .expect("应可读取")
+            .expect("回执应存在");
+        assert_eq!(receipt.command, COMMAND_APPEND_LINK);
+        assert_eq!(receipt.result_kind, ResultKind::Tracking);
+        assert_eq!(receipt.result_id, "dt-1");
+        let outcome = LinkOutcome::replayed_from(&receipt.result_detail).expect("应可解析");
+        assert!(outcome.link_id.starts_with("dl-"), "{}", outcome.link_id);
+        assert_eq!(outcome.version, 2);
     }
 }

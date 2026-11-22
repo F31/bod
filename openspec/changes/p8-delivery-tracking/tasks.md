@@ -60,7 +60,24 @@
       与「失败不污染键」）+ 10 个 `delivery_idempotency` 单测 + 2 个来源模块单测。
       **未做**：`POST /api/v1/delivery-sources/imports` 仍 `planned`，写入入口（含审计
       `append_audit_event` 与 §34.12 主体判定）随 3.5 落地——本段只有库层入口与用例。
-- [ ] 3.4 目标关联与 `expected_version` 追加语义；共享来源不合并不同客户记录。
+- [x] 3.4 目标关联与 `expected_version` 追加语义；共享来源不合并不同客户记录。
+      **结果**：`019_delivery_links.sql` 一张表（`delivery_tracking_work_packages`），
+      目标关联与版本推进复用 016 的 `delivery_targets` 与 `resource_version`——目标身份索引
+      本身就是去重键，再加一张关联表会让同一件事有两个来源。
+      `delivery_link` 模块：引用恰好一个（`from_options`）、目标归一（`None` 与 `Some("")`
+      都是整个环境，身份不 trim）、派生 `link_id`/`target_id`（长度前缀 + sha256，重试落同一行）。
+      `UnitOfWork::append_delivery_link`：校验 → 读回执 → 期望版本闸门（不一致**什么都不写**）
+      → 挂关系 → 补目标 → **有实际新增才 +1** → 写回执，整段 `SAVEPOINT`。
+      纯重复 `appended=false` 且版本不动（否则双方互相判过期，重试变必冲突）；重放返回首次
+      执行后的版本，拿它继续追加会 409 而非覆盖；已关闭的跟踪项不再接受关联（与
+      `allowed_actions` 同口径）。
+      **不合并不同客户记录**落在目标层：一个来源 + 两个客户 = 一条跟踪项 + 两个目标，
+      A 的部署不进 B 的证据（`shared_source_keeps_each_customer_record_separate`）。
+      11 个 `delivery_link` 单测 + 7 个 store 用例 + 1 个 CLI 端到端用例。
+      **未做**：`POST /api/v1/delivery-tracking/{id}/links` 仍 `planned`（§34.12 未实现），
+      所以仍无写入口；工作包关联只在 `bod tracking --id` 的文本里可见，不进 2.2 冻结的
+      响应体；新追加的目标没有验收条件（请求体没有该字段），而 `acceptance` 目前也不是
+      判定的输入——已记进 design 的 Open Questions。
 - [ ] 3.5 关联与补证入现有 Company 单写事务；连接器与人工证据冲突保留两者并进待核实。
 
 ## 4. 共用覆盖投影（`I-72`）
