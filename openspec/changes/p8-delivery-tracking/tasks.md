@@ -278,7 +278,9 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 
 ### 7.5 路由收口顺序
 
-- [ ] 7.5.1 前置：**主体装配入口**（见 7.6）。在此之前任何路由转 served 都只是「测试里能读」。
+- [x] 7.5.1 前置：**主体装配入口**（见 7.6）。在此之前任何路由转 served 都只是「测试里能读」。
+      **已满足（commit `079d679`）**：`serve --db` 之后 GET 由真实请求读通（200），
+      未装配仍 401。下面的 7.5.2 因此可以逐条推进。
 - [ ] 7.5.2 `POST /delivery-tracking/imports` → `POST /delivery-tracking/{id}/links`
       → `POST /delivery-observations` → `POST /feedback-receipts/{id}/drafts`
       → `POST .../drafts/{draft_id}/send`，逐条转 `served` 并同步 `x-bod-status`。
@@ -286,10 +288,12 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 
 ### 7.6 主体模型（唯一硬分叉点）
 
-- [ ] 7.6.1 写 ADR：依据 v1.0 技术规格 §1「互不信任租户按 OS 身份或部署边界隔离」
+- [x] 7.6.1 写 ADR：依据 v1.0 技术规格 §1「互不信任租户按 OS 身份或部署边界隔离」
       与 §0.4「先确定目标和对象可见性，再判动作授权」，主体由**宿主装配时按本地身份确定**，
       请求体/请求头**不得自报**主体。否决 `X-Bod-Actor` 方案：自报主体会让租户隔离失效，
       并使审计归属可被调用方改写。
+      **已落（commit `86607c2`，2026-11-22 晚）**：`adr/0007-subject-and-target-authorization.md`
+      第 6 条 + 三条撤销条件；落地记录见同文件末尾（含「为什么只读挂载不违反 8.1」的判据）。
 - [x] 7.6.2 落地：`HostServer` 的真实启动路径调用 `with_delivery(read, actor)`；
       完成判据——未带任何自报头的真实请求返回 200 而不是 401，且换一个 id 仍按目标过滤。
       **已落（2026-11-22 深夜）**，三处落点与五条证据：
