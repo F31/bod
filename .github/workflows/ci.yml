@@ -55,17 +55,24 @@ jobs:
           if-no-files-found: warn
       # artifact 要登录才能下载，日志本身也是 403——但**注解是公开可读的**
       # （`/repos/{owner}/{repo}/check-runs/{id}/annotations`）。所以把失败用例名
-      # 顶到注解里，让这条红灯至少能被匿名诊断。
-      - name: 把失败用例名写进注解
+      # 与失败段原文顶到注解里，让这条红灯至少能被匿名诊断。
+      #
+      # `set +e`：上面那次就是被 `-e` + `pipefail` 坑死的——`grep` 没匹配到行时退出 1，
+      # 整个赋值失败，步骤直接红，注解反而没写出去。诊断步骤自己不许再失败一次。
+      - name: 把失败摘要写进注解
         if: failure()
         shell: bash
         run: |
-          names=$(grep -E '^    [A-Za-z0-9_]+(::[A-Za-z0-9_]+)+$' "$RUNNER_TEMP/cargo-test.log" \
+          set +e
+          log="$RUNNER_TEMP/cargo-test.log"
+          names=$(grep -E '^    [A-Za-z0-9_]+(::[A-Za-z0-9_]+)+$' "$log" 2>/dev/null \
             | sed 's/^ *//' | sort -u | head -10 | paste -sd, -)
-          if [ -z "$names" ]; then
-            names="没能从日志里认出用例名（可能不是用例失败，而是编译/启动失败）"
-          fi
+          [ -z "$names" ] && names="（没认出用例名：可能不是断言失败，见下一条注解）"
           echo "::error title=cargo test 失败用例::${names}"
+          body=$(awk '/^failures:$/{flag=1} flag' "$log" 2>/dev/null | head -120 | cut -c1-200 | tr '\n' '~')
+          [ -z "$body" ] && body=$(tail -40 "$log" 2>/dev/null | cut -c1-200 | tr '\n' '~')
+          echo "::error title=cargo test 失败段::$(printf '%s' "$body" | cut -c1-6000)"
+          exit 0
       - name: 门禁 G-1/G-50
         run: cargo run -q -p xtask -- verify --stage P0
       - name: 迁移检查
