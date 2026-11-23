@@ -441,23 +441,26 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
       它挡得住「新孤岛」，挡不住「既有模块膨胀」。因此不得用它证明「不可达比例没有上升」；
       那个比例要单独读数，并写清命令（本文件以外的报告也一样）。
 
-### 7.10 持续集成长期红灯（2026-11-23 发现，**未解决**）
+### 7.10 持续集成长期红灯（2026-11-23 发现）
 
-- [ ] 7.10.1 CI 的「全量测试」步骤一直在失败，**连纯文档提交也失败**。
-      证据（`GET /repos/F31/bod/actions/runs?per_page=20`，2026-11-23 09:5x 查询）：
-      最近 20 条里 `rust (linux)` 与 `rust (windows)` 两个 job 全红，失败步骤固定是
-      「全量测试」（step 7 / step 5）；`openspec (linux)` 与 `workbench (linux)` 全绿。
-      其中 `cfc3a4a`、`8905bde`、`4fa40f0` 是纯文档提交，照样红——所以这不是某次代码
-      回归，是**本机与 CI 运行环境不一致**（至少从 2026-11-21 晚的 `06c90b0` 起如此）。
-      **后果（比红灯本身更该记住）**：本机 `cargo test --workspace` 一直是 0 failed，
-      但那条结论从未被 CI 佐证过。所以本文件里所有「全量 N/0」都只能写成**本机读数**，
-      不得写成「CI 通过」。
-      **堵在哪**：匿名访问 `GET /actions/jobs/{id}/logs` 返回 403，失败用例名拿不到；
-      WSL 与 `ubuntu-latest` 近似但不相同（本地 WSL 全量 1450 / 0，复现不出来）。
-      所以第一步不是猜用例，是**让红灯可诊断**。
-      **已做的一步（2026-11-23）**：linux job 的「全量测试」改成 `... | tee
-      $RUNNER_TEMP/cargo-test.log`，并加 `if: failure()` 的 `upload-artifact`（名字
-      `cargo-test-linux`）。下一次红就能取到失败用例名；windows job 暂未加，
-      等 linux 那份有结论再补——两个平台同时改，出问题分不清是日志改动还是用例。
-      另记一句：step 7 一红，后面 8–11（G-1/G-50、迁移检查、不可达基线、规格索引）
-      全部 skipped，所以 7.9 那条 `reach --check` 在 CI 上**从来没跑过**。
+- [x] 7.10.1 **让红灯可诊断**（commit `be9a843`、`18c08f4`）。
+      linux job 的「全量测试」改成 `... | tee $RUNNER_TEMP/cargo-test.log`，失败时
+      `upload-artifact`；再把失败用例名与失败段原文写成 **check-run 注解**——
+      日志与 artifact 都要登录，注解是公开可读的。
+      **第一次改进自己坏了**：诊断步骤被 `-e` + `pipefail` 干掉（`grep` 没匹配到行退出 1），
+      step 9 反而红，注解一个字都没写出去。已改 `set +e` 且失败段兜底取 `tail`。
+      教训：诊断代码也要按「它自己不能失败」写。
+- [x] 7.10.2 拿到第一个失败用例名（`be9a843` 的注解）：
+      `impact_sample::tests::real_commit_sample_is_selective_and_keeps_unknown`
+      ——`xtask` 用例，跑 `HEAD~1..HEAD` 的真实提交。
+      **根因**：`actions/checkout` 默认 `fetch-depth: 1`，浅克隆没有父提交。
+      本地复现：`git clone --depth 1` 后 `git rev-parse HEAD~1` →
+      `fatal: ambiguous argument 'HEAD~1'`。
+      这解释了为什么**连纯文档提交也红**：红的是环境假设，不是代码。
+      修复（commit `99e315d`）：两个 rust job 都加 `fetch-depth: 0`；
+      用例的失败信息改写为点名「浅克隆需要 fetch-depth: 0」，别让下一个人去翻判定逻辑。
+- [ ] 7.10.3 `99e315d` 之后**仍然红**，说明还有第二个成因（或 `fetch-depth: 0` 没有生效）。
+      下一个失败用例名等 `18c08f4` 的注解。在拿到之前不要猜、也不要写「已修复」。
+      **同时**：7.9 的 `reach --check` 与迁移检查都在 `全量测试` 之后的步骤里，
+      step 7 一红它们全部 skipped——所以那条弱门禁在 CI 上**从来没跑过**。
+      这条不解决，任何「CI 绿了」的说法都只覆盖到测试这一步。
