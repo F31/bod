@@ -310,14 +310,17 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 - [x] 7.5.1 前置：**主体装配入口**（见 7.6）。在此之前任何路由转 served 都只是「测试里能读」。
       **已满足（commit `079d679`）**：`serve --db` 之后 GET 由真实请求读通（200），
       未装配仍 401。下面的 7.5.2 因此可以逐条推进。
-- [ ] 7.5.2 `POST /delivery-tracking/imports` → `POST /delivery-tracking/{id}/links`
-      → `POST /delivery-observations` → `POST /feedback-receipts/{id}/drafts`
-      → `POST .../drafts/{draft_id}/send`，逐条转 `served` 并同步 `x-bod-status`。
-      每条转 served 时必须同时给出「谁调用它」的证据（CLI 或工作台），否则不转。
-      **⚠ 前置未满足**：本项与 7.6.2 在「谁是写者」上互斥——控制面一旦持可写连接，
-      就成了本 Change 非目标里明确排除的「第二业务写入者」。转 served 之前必须先由
-      **7.7（ADR-0009）**裁定写者归属，并先完成 **7.8（动作可用性判定）**，
-      否则视图会在路由还没开时就宣称「可做」。两项都不满足时本项保持未勾，不得分批转。
+- [x] 7.5.2 **原计划（五条 POST 逐条转 served）已被 ADR-0009 作废**（2026-11-23 裁定选 B）。
+      保留原文在这里不是为了留痕好看，而是为了记住它为什么错：它假设「接口是写入入口」，
+      而本 Change 的非目标明写「不建第二业务写入者」。两条同时成立是不可能的。
+      按 B，五条 `POST` **保持 `planned`**，`x-bod-status` 不改——这不是未完成，是决定。
+      只有在 ADR-0009 改判为 A（并同时落下宿主锁与 epoch）时，才恢复「逐条转 served」。
+- [ ] 7.5.3 B 之下的等价物：为每条写入给出 **CLI 子命令**，顺序不变
+      （imports → links → observations → drafts → send），每条都要有：
+      子命令 + 真实库上的端到端用例 + 「谁调用它」的一句话（哪类角色、在什么场合跑）。
+      第一条是 `bod tracking import`——它同时是 `allowed_actions` 在 CLI 面上第一次非空的
+      触发点，所以做它时要一起补 `stage_facts` 与主体装配（见 7.8 的哨兵用例）。
+      一条没做完之前不开下一条。
 
 ### 7.6 主体模型（唯一硬分叉点）
 
@@ -350,38 +353,41 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 成为本 Change 非目标里明确排除的「第二业务写入者」（`proposal.md` §5）。这不是排期问题，
 是自相矛盾，必须先裁定。
 
-- [ ] 7.7.1 签 `adr/0009-writer-ownership.md`：三选项 A（控制面唯一写者）/ B（写入只走 CLI）/
-      C（混合）。建议 B 作切片 1 出口形态、A 作 p9 目标形态；切换触发条件已写在 ADR 里。
-- [ ] 7.7.2 若裁为 A：**同一提交**里落宿主独占写锁 + running epoch + 双开被拒用例，
-      并改写 `proposal.md` 的非目标。锁与写路由不得分两次提交——中间态就是无防护双开。
-- [ ] 7.7.3 若裁为 B：五条 `POST` 保持 `planned`，支持矩阵写明「交付写入不经 HTTP」，
-      并把 `bod observe` / `bod tracking` / `bod sources` 改成 `open_existing_readonly`。
-      现状是这三个 help 写着「只读」的命令都走 `SqliteStore::open`——每次打开跑全部 20 个迁移，
-      目标路径不存在时还会 `create_dir_all` 建库。**「只读」目前是假的。**
-- [ ] 7.7.4 遗留登记：即便选 B，两个 CLI 进程之间仍无锁。WAL 会把写串行化、不损坏数据，
-      但「宿主独占写锁 + epoch」这条要求仍未实现；支持矩阵不得声称「已防双开」，
-      直到单实例锁独立落地（锁文件位置、僵死检测、重启接管、与 `$BOD_HOME` 的关系）。
+- [x] 7.7.1 签 `adr/0009-writer-ownership.md`：**2026-11-23 裁定选 B**（写入只走 CLI）。
+      A 保留为 p9/p10 的目标形态，切换触发条件是「出现非本机进程必须写入的真实需求」。
+- [x] 7.7.2 若裁为 A 的那一支：**不适用**（裁定为 B）。留作 A 之下的硬约束备案——
+      届时锁与写路由必须同一提交，中间态就是无防护双开。
+- [x] 7.7.3 三个「只读」命令改为只读挂载（commit `7ae60cf`）：`observe` / `tracking` / `sources`
+      此前都走 `SqliteStore::open`，每次打开跑 20 个迁移、缺路径还 `create_dir_all` 建库。
+      现改为 `open_existing_readonly`，缺库报 `MissingDatabase`。用例
+      `read_commands_refuse_missing_db_instead_of_creating_it` 对三条命令各跑一次真实二进制。
+- [ ] 7.7.4 遗留登记（已写进支持矩阵第 1 行）：即便选 B，**两个 CLI 进程之间仍无锁**。
+      WAL 把写串行化、不损坏数据，但「宿主独占写锁 + epoch」仍未实现，
+      所以任何报告都不得声称「已防双开」。单实例锁要独立设计（锁文件位置、僵死检测、
+      重启接管、与 `$BOD_HOME` 的关系），不在本 Change 内顺手做。
 
 ### 7.8 动作可用性判定（7.5 的前置，与 7.7 的选项无关）
 
-- [ ] 7.8.1 记录现状：`allowed_actions` 由 `is_served_action` 过滤，只认「路由是否 served」；
-      而两个动作码（`link-source` / `draft`）对应的路由都是 `planned`，所以该字段**恒为空**。
-      契约写着「允许动作」，字段却永远给不出——这是承诺与实现不符，不是暂时没数据。
-- [ ] 7.8.2 判定改为「本进程是否真有入口」（served 路由或 CLI 子命令），
-      并给交付域动作补需求映射。`StageAction::requirement()` 只覆盖十个 stage 动作，
-      `link-source` / `draft` 不在其中，现在没有任何一处回答「谁能 link / 谁能 draft」。
-- [ ] 7.8.3 投影必须接受主体：`DeliveryTrackingView::to_dto()` 不带 actor/facts，
-      而 `evaluate_read` 手里有 actor 却不往下传。改签名 `to_dto(facts, actor)`，
-      判定落在 `authorization`（与 `target_visible` 同一处），不在 DTO 构造器里加分支。
-- [ ] 7.8.4 反例记录：`readonly_api`（912 行，当前仅测试可达）里有 `ReadonlyAction` /
-      `authorize_readonly` / `button_hint`，看着像动作授权，实际只判项目级可达，
-      且注释明写「界面提示只用于显示，不参与放行判定」。**不得**当作现成实现复用；
+- [x] 7.8.1 记录现状：`allowed_actions` 由 `is_served_action` 过滤，只认「路由是否 served」；
+      两个动作码（`link-source` / `draft`）的路由都是 `planned`，所以该字段**恒为空**。
+- [x] 7.8.2 判定改为四道关：候选 → 该调用面有入口（`available_on(ActionSurface)`：
+      HTTP 看 `served`、CLI 看 `CLI_ENTRIES`）→ 需求已登记（`action_requirement`，
+      未登记即 fail-closed）→ 当事人满足需求（`authorization::requirement_met`，目前只实现
+      `Membership`，其余需求一律 false）。`CLI_ENTRIES` **是空表**且有哨兵用例。
+- [x] 7.8.3 投影不再自己判：`TrackingView::to_dto(allowed_actions)` 只渲染，
+      判定在 `delivery_api::select_allowed` + `authorization`。`evaluate_read` 把
+      facts 与 actor 一起传下去（此前手里有 actor 却不往下传）。CLI 的 `--json` 传空
+      并注明原因（CLI 面无入口），不假装「这个主体什么都不能做」。
+- [x] 7.8.4 反例记录：`readonly_api`（912 行，仅测试可达）有 `ReadonlyAction` /
+      `authorize_readonly` / `button_hint`，看着像动作授权，实际只判项目级可达，注释明写
+      「界面提示只用于显示，不参与放行判定」。**不得**当作现成实现复用；
       与 `evidence_publication` ≠ V05 属同一类命名坑。
-- [ ] 7.8.5 三条用例（缺一不可）：
-      （a）没有真实入口（路由 planned 且无 CLI）→ 动作码不出现；
-      （b）有入口但主体无权限 → 动作码不出现；
-      （c）有入口且主体有权限 → 出现，且该入口真能执行（CLI 真跑一次或路由真 served）。
-      只有（c）而没有（a）（b），等于把「路由开了」当成「谁都能做」。
+- [x] 7.8.5 用例（`delivery_api::action_rules`，六条）：
+      （a）没入口 → 不列（即使当事人确实有权限）；
+      （b）有入口但需求未登记 → 不列（合成的 `teleport` 码）；
+      （c）有入口 + 是成员 → 列；非成员 → 不列；缺项目 → 不列；
+      外加两条**哨兵**：`CLI_ENTRIES` 变非空时红（要求先装配 facts），
+      `available_on(Http)` 变非空时红（要求把该动作补进断言并加端到端）。
 
 ### 7.9 防复发门禁
 

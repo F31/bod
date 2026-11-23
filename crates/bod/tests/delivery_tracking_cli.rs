@@ -239,7 +239,10 @@ fn read_commands_refuse_missing_db_instead_of_creating_it() {
         let db = path.to_string_lossy().to_string();
         let (code, stdout, stderr) = run(&[command, "--db", &db]);
         assert_ne!(code, 0, "{command} 缺库必须失败，实际 stdout：{stdout}");
-        assert!(stdout.is_empty(), "{command} 失败不该往 stdout 写半份结果：{stdout}");
+        assert!(
+            stdout.is_empty(),
+            "{command} 失败不该往 stdout 写半份结果：{stdout}"
+        );
         assert!(stderr.contains("不存在"), "{command}: {stderr}");
         assert!(!path.exists(), "{command} 不得创建库");
     }

@@ -1149,12 +1149,18 @@ fn tracking(flags: &[String]) -> Result<String, String> {
             .map_err(|err| format!("读取失败：{err}"))?
             .ok_or_else(|| format!("{company} 下没有跟踪项 {tracking_id}"))?;
         if json {
-            let dto = view.to_dto().map_err(|err| format!("投影失败：{err}"))?;
+            // CLI 面上还没有任何动作入口（`delivery_api::CLI_ENTRIES` 是空表），
+            // 所以这里不列动作，也不需要装配主体事实。加第一条 CLI 写命令时要一起补
+            // `stage_facts` 与主体；用例外 `cli_surface_stays_unwired_until_facts_are_assembled`
+            // 会先红，比运行期静默返回空集更早发现问题。
+            let dto = view
+                .to_dto(Vec::new())
+                .map_err(|err| format!("投影失败：{err}"))?;
             let rendered =
                 serde_json::to_string(&dto).map_err(|err| format!("序列化失败：{err}"))?;
             return Ok(format!("{rendered}\n"));
         }
-        return Ok(bod_app::delivery_tracking::render_one(&view));
+        return Ok(bod_app::delivery_tracking::render_one(&view, &[]));
     }
 
     let rows = store

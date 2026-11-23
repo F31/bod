@@ -286,15 +286,19 @@ customer_bindings 从库里读出来。所以 3.6 的工作量在**装配端口*
 
 | # | 维度 | 当前实装 | 已知限制（不得省略） | 证据 |
 |---|---|---|---|---|
-| 1 | 部署边界 | 单宿主、单机、回环监听；非回环地址被 `deployment_boundary` 拒绝 | 远程节点与多宿主高可用不支持（无选主、无一致性后端）；不把单机锁说成分布式 leader election | `authorization::deployment_boundary` 单测 |
-| 2 | 主体来源 | 宿主启动时按本机账户名（`USERNAME`/`USER`/`LOGNAME`）定一次，逐字使用 | **同机多成员共用同一宿主身份时，审计归属记到宿主账户上，无法区分张三与李四**；没有切换主体的入口（刻意如此，ADR-0007 第 6 条）。不得用「支持多用户」掩盖 | `host_handshake::local_principal_id`；`delivery_read_e2e` 第 3 条（自报头无效） |
+| 1 | 部署边界 | 单宿主、单机、回环监听；非回环地址被 `deployment_boundary` 拒绝 | 远程节点与多宿主高可用不支持（无选主、无一致性后端）；**宿主独占写锁与 running epoch 都未实现**——「单写者」靠约定不靠机制，两个 CLI 进程同时写不会被拒（WAL 只保证不损坏，不保证不打架）。不得把单机锁说成分布式 leader election，也不得声称「已防双开」 | `authorization::deployment_boundary` 单测；宿主锁：全仓搜索 `running_epoch` / `write_lock` 只命中事务级与清单字段 |
+| 2 | 主体来源 | 宿主启动时按本机账户名（`USERNAME`/`USER`/`LOGNAME`）定一次，逐字使用。**部署前提：同一台机器上每人使用自己的 OS 账户**（ADR-0007 第 6 条，2026-11-23 确认） | 违反该前提（多人共用同一 OS 账户）时，审计归属会记到该账户上，无法区分张三与李四——这是**部署前提被违反**，不是待实现功能。没有切换主体的入口（刻意如此）。不得写成「支持多用户」 | `host_handshake::local_principal_id`；`delivery_read_e2e` 第 3 条（自报头无效） |
 | 3 | 业务库挂载 | `serve --db` 以只读连接 + `query_only` 挂载既有库；缺省只在 `$BOD_HOME/bod.db` 已存在时挂载 | 不建库、**不迁移**：库比代码旧时装配端口报 503（`BOD_FACTS_UNAVAILABLE`），不静默升级；WAL 有未提交帧且缺 `-shm` 时挂载失败（报错，不降级读主文件） | `store_core::readonly_mount_reads_existing_db_and_refuses_to_write_or_create`；`delivery_read_e2e` 第 4/5 条 |
-| 4 | 交付域 | `GET /api/v1/delivery-tracking/{id}` served（四阶段判定 + 目标粒度过滤） | **只有读路径**：`POST imports` 仍 `planned`，`import_delivery_source` 在测试外没有调用者，跟踪项只能由测试或外部工具写库；`customer_bindings` / `project_members` / `release_operators` 同样**没有生产写入者**，实际可配置的立场只有「指派给本机主体」，客户协作者（`ByTarget`）只能在测试里构造 | `grep "INSERT INTO customer_bindings"` 仅命中测试；`grep "import_delivery_source"` 无生产调用者 |
+| 4 | 交付域 | 读路径 `GET /api/v1/delivery-tracking/{id}` served（四阶段判定 + 目标粒度过滤）；写入按 ADR-0009 **只走 CLI**，但第一条写命令（`bod tracking import`）还没落地 | `POST` 五条保持 `planned`（不是未完成，是决定）；`allowed_actions` 只在「该调用面有入口 + 需求已登记 + 当事人满足需求」三关都过时才列，当前恒空且空得有解释（两条动作路由都 planned、CLI 入口表为空）；跟踪项与 `customer_bindings` / `project_members` / `release_operators` 仍**没有生产写入者**，客户协作者（`ByTarget`）只能在测试里构造 | `delivery_api::action_rules` 六条用例；`INSERT INTO customer_bindings` 仅出现在测试里 |
 | 5 | 平台 | Windows（全量实测）+ WSL Linux（同机全量实测） | 不是发布级矩阵：协议版本 × 客户端 × 执行器组合未登记；双机/跨网络未验证（P6 2.8） | 两平台 `cargo test` 记录 |
 | 6 | 模型调用 | 不接任何模型客户端；草稿＝规则摘要 + 人工编辑 | 未做外部模型投影（ADR-008 的 B2 档）；未验本地模型时延与常驻内存 | `adr/0008-model-invocation-boundary.md` |
 
 第 2 行与第 4 行是这一版最容易误导人的两处：前者会让「谁做的」记错人，后者会让
 「客户协作者按目标过滤」看起来已支持而实际配置不出来。两者都不设默认开关来掩盖。
+
+第 1 行里那句「未实现」是最容易被跳过的一句：`serve` 挂的是只读连接，所以控制面本身
+不是写者；但**两个 CLI 进程之间没有任何锁**。ADR-0009 选定 B（写入只走 CLI）之后这个缺口
+更该说清楚——B 缩小了写者面，没有消除并发写。
 
 ## Open Questions
 

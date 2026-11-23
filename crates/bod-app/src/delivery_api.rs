@@ -161,9 +161,11 @@ fn evaluate_read(
         return Err(deny(RecordRejection::NotFound));
     };
 
+    // 项目标识算一次并留着：动作判定也要用它（「关联来源」「起草」都要求项目成员）。
+    let project = DomainId::new(view.tracking.project_id.as_str());
     let scope = Scope {
         company_id: DomainId::new(actor.company_id.as_str()),
-        project_id: Some(DomainId::new(view.tracking.project_id.as_str())),
+        project_id: Some(project.clone()),
         issue_id: None,
     };
     let mut record = ScopedRecord::new(view.tracking.tracking_id.as_str(), scope);
@@ -209,7 +211,16 @@ fn evaluate_read(
         }
     }
 
-    view.to_dto()
+    // 允许动作：状态上说得通（候选） + 这个面上有入口 + 需求已登记 + 当事人满足。
+    // 四件事分开判，任何一件不成立就不列——「视图说能做」不能比「真能做」宽。
+    let actions = select_allowed(
+        &view.action_candidates(),
+        &available_on(ActionSurface::Http),
+        &facts,
+        &actor.principal,
+        Some(&project),
+    );
+    view.to_dto(actions)
         .map_err(|_| RouteError::new(500, "BOD_TRACKING_UNREADABLE"))
 }
 
@@ -384,10 +395,78 @@ pub fn routes() -> &'static [Route<HostServer>] {
 
 /// `GET /delivery-tracking/{id}` 的 `allowed_actions` 里可能出现的动作码。
 ///
-/// 动作码与路由绑在一张表里，是为了让「视图说能做」与「路径真的能做」不能分家：
-/// 读模型只列 `is_served_action(code) == Some(true)` 的动作。
+/// 一个动作「能不能做」由三件事同时决定，缺一不列：
+/// 在这个**调用面**上有入口（`available_on`）、需求已登记（`action_requirement`）、
+/// 当事人满足需求（`authorization::requirement_met`）。
+/// 之前只看「路由是否 served」，于是 `allowed_actions` 恒为空而契约还写着「允许动作」——
+/// 字段与承诺不符。三件事分开记，是为了让「视图说能做」和「这个主体真能做」不能分家。
 pub const ACTION_LINK_SOURCE: &str = "link-source";
 pub const ACTION_DRAFT: &str = "draft";
+
+/// 调用面。同一个动作码在两个面上能不能做是不同的：HTTP 看路由是否 `served`，
+/// CLI 看有没有对应子命令。合成一个布尔，就等于把两者都说成「已支持」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionSurface {
+    Http,
+    Cli,
+}
+
+/// CLI 入口表：动作码 → 承载它的子命令。
+///
+/// **空表不是忘了填**：ADR-0009 选定「写入只走 CLI」，但第一条写命令
+/// （`bod tracking import`）还没落地，所以现在确实一个入口都没有。
+/// 加条目时必须同时把读命令的主体事实装配上（`store.stage_facts`），
+/// 否则 `select_allowed` 拿不到事实、一律不列——用例
+/// `cli_surface_stays_unwired_until_facts_are_assembled` 会先红。
+pub const CLI_ENTRIES: &[(&str, &str)] = &[];
+
+/// 该调用面上真有入口的动作码。
+pub fn available_on(surface: ActionSurface) -> Vec<&'static str> {
+    match surface {
+        ActionSurface::Http => ACTIONS
+            .iter()
+            .filter(|(code, _, _)| is_served_action(code) == Some(true))
+            .map(|(code, _, _)| *code)
+            .collect(),
+        ActionSurface::Cli => CLI_ENTRIES.iter().map(|(code, _)| *code).collect(),
+    }
+}
+
+/// 动作码需要什么权限。**没登记的动作码永远不列**（fail-closed）：
+/// 漏登记的表现是「少显示一个动作」，而不是「对所有人都放行」。
+pub fn action_requirement(code: &str) -> Option<crate::authorization::StageRequirement> {
+    use crate::authorization::StageRequirement;
+    match code {
+        // 关联来源与起草都是项目成员的日常职责：都不产生对外后果（起草不外发），
+        // 因此不需要批准权或发布权。`send` 将来进入候选时必须给更强的需求，
+        // 不得沿用这一条——它有对外后果。
+        ACTION_LINK_SOURCE | ACTION_DRAFT => Some(StageRequirement::Membership),
+        _ => None,
+    }
+}
+
+/// 允许动作的选择：候选 ∩ 该面有入口 ∩ 需求已登记 ∩ 当事人满足需求。
+///
+/// `entries` 由调用方传入（生产路径传 `available_on(surface)`，用例传构造的切片），
+/// 这样「入口」这件事只有一个实现，而规则本身可以脱离路由表被测试。
+pub fn select_allowed(
+    candidates: &[&'static str],
+    entries: &[&'static str],
+    facts: &crate::authorization::StageFacts,
+    actor: &crate::authorization::Principal,
+    project: Option<&crate::domain::DomainId>,
+) -> Vec<&'static str> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|code| entries.contains(code))
+        .filter(|code| {
+            action_requirement(code).is_some_and(|requirement| {
+                crate::authorization::requirement_met(facts, actor, requirement, project)
+            })
+        })
+        .collect()
+}
 
 /// 动作码 → 承载它的路由。`send` 暂不在此列：草稿能审完之前它连候选都不该出现。
 const ACTIONS: &[(&str, Method, &str)] = &[
@@ -1108,5 +1187,145 @@ mod tests {
             }
             Reply::Upgrade { .. } => panic!("读取产出的是普通响应，不是长连接"),
         }
+    }
+}
+
+#[cfg(test)]
+mod action_rules {
+    //! 「允许动作」的四道关：候选 → 该面有入口 → 需求已登记 → 当事人满足需求。
+    //!
+    //! 这里用**合成的入口切片**来驱动 `select_allowed`，而不是去改路由表或加测试开关：
+    //! 生产路径传的是 `available_on(surface)`，两边调用的是同一个函数，
+    //! 所以「入口表里有什么」可以变，「四道关的顺序与判据」只有一份。
+
+    use super::{
+        ACTION_DRAFT, ACTION_LINK_SOURCE, ActionSurface, CLI_ENTRIES, available_on, select_allowed,
+    };
+    use crate::authorization::{Principal, PrincipalKind, StageFacts};
+    use crate::domain::DomainId;
+
+    const PROJECT: &str = "project-1";
+
+    fn facts() -> StageFacts {
+        let mut facts = StageFacts::default();
+        facts
+            .members
+            .push((PROJECT.to_string(), DomainId::new("user-1")));
+        facts
+    }
+
+    fn member() -> Principal {
+        Principal {
+            id: DomainId::new("user-1"),
+            kind: PrincipalKind::User,
+            claimed_roles: Vec::new(),
+        }
+    }
+
+    fn project() -> DomainId {
+        DomainId::new(PROJECT)
+    }
+
+    /// 关一：没有入口就不列。
+    ///
+    /// 这是 7.8 之前 `allowed_actions` 恒空的**真实原因**：两条动作路由都还是 planned。
+    /// 断言它，是为了让「空」有解释——而不是让人以为判定坏了。
+    #[test]
+    fn no_entry_means_no_action_even_when_the_actor_may_do_it() {
+        let allowed = select_allowed(
+            &[ACTION_LINK_SOURCE, ACTION_DRAFT],
+            &[],
+            &facts(),
+            &member(),
+            Some(&project()),
+        );
+        assert!(allowed.is_empty(), "没有入口时不得宣称可做：{allowed:?}");
+    }
+
+    /// 关二：入口存在但需求没登记，也**不列**（fail-closed）。
+    ///
+    /// 合成的 `teleport` 码没有 `action_requirement`。这条用例挡的是「新加一个动作码、
+    /// 忘了想清楚谁能做」——那种情况下静默放行比少显示一个动作危险。
+    #[test]
+    fn entry_without_a_declared_requirement_is_never_advertised() {
+        let allowed = select_allowed(&["teleport"], &["teleport"], &facts(), &member(), None);
+        assert!(
+            allowed.is_empty(),
+            "需求未登记的动作必须 fail-closed，实际：{allowed:?}"
+        );
+    }
+
+    /// 关三与关四：有入口 + 需求已登记 + 当事人是项目成员 → 列。
+    ///
+    /// 反过来说，这条用例是「允许动作在接线之后真的会出现」的证明：
+    /// 只断言前两条（永远为空）会把一个坏掉的判定伪装成正确。
+    #[test]
+    fn entry_plus_membership_is_advertised() {
+        let allowed = select_allowed(
+            &[ACTION_LINK_SOURCE, ACTION_DRAFT],
+            &[ACTION_LINK_SOURCE, ACTION_DRAFT],
+            &facts(),
+            &member(),
+            Some(&project()),
+        );
+        assert_eq!(allowed, vec![ACTION_LINK_SOURCE, ACTION_DRAFT]);
+    }
+
+    /// 关四的反面：入口与需求都在，但当事人不是成员 → 不列。
+    #[test]
+    fn non_member_sees_nothing_even_with_an_entry() {
+        let stranger = Principal {
+            id: DomainId::new("user-9"),
+            kind: PrincipalKind::User,
+            claimed_roles: Vec::new(),
+        };
+        let allowed = select_allowed(
+            &[ACTION_LINK_SOURCE],
+            &[ACTION_LINK_SOURCE],
+            &facts(),
+            &stranger,
+            Some(&project()),
+        );
+        assert!(allowed.is_empty(), "非成员不得看到动作：{allowed:?}");
+    }
+
+    /// 项目不明时不猜：`Membership` 需要项目，缺项目一律不满足。
+    #[test]
+    fn membership_without_a_project_is_not_satisfied() {
+        let allowed = select_allowed(
+            &[ACTION_LINK_SOURCE],
+            &[ACTION_LINK_SOURCE],
+            &facts(),
+            &member(),
+            None,
+        );
+        assert!(allowed.is_empty(), "缺项目时不得默认满足：{allowed:?}");
+    }
+
+    /// CLI 面还没有入口；一旦有，读命令必须先装配主体事实。
+    ///
+    /// 这条是**待办哨兵**：给 `CLI_ENTRIES` 加条目的人会让它红。红了不要把它改成
+    /// 「允许非空」——要先把 `bod tracking` 的 `stage_facts` + 主体装配补上，
+    /// 否则 CLI 会静默地不列动作，看起来像「命令能跑但没权限」。
+    #[test]
+    fn cli_surface_stays_unwired_until_facts_are_assembled() {
+        assert!(
+            CLI_ENTRIES.is_empty(),
+            "CLI 入口已登记：先给读命令装配 stage_facts 与主体，再放开这条断言"
+        );
+        assert!(available_on(ActionSurface::Cli).is_empty());
+    }
+
+    /// HTTP 面目前也没有入口：两条动作路由都还是 planned。
+    ///
+    /// 与上面那条不同，这一条**转 served 时必须更新**：那时 `available_on(Http)`
+    /// 应当包含对应动作，本用例改成断言包含关系即证明「路由开了，视图就跟上」。
+    #[test]
+    fn http_surface_has_no_entry_while_both_action_routes_are_planned() {
+        assert_eq!(
+            available_on(ActionSurface::Http),
+            Vec::<&'static str>::new(),
+            "有动作路由转 served 了：请把本条改成断言对应动作出现，并补一条端到端"
+        );
     }
 }

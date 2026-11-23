@@ -630,6 +630,27 @@ pub enum RecordAccess {
     Invisible,
 }
 
+/// 「这个主体满足这个需求吗」——只判需求本身，不判可见性与修订：那两件由调用方先判过，
+/// 在这里重判会让「看不到」和「没权限」又混成一句。
+///
+/// 交付域动作（`link-source` / `draft`）只需要项目成员身份，所以目前只实现 `Membership`，
+/// 其余需求一律 `false`（**fail-closed**）。将来有动作需要批准权或发布权时，必须在这里
+/// 加分支；届时的代价是「少显示一个动作」，而不是「对所有人放行」——
+/// 静默放行会让门看起来装上了，这比少给一颗按钮危险得多。
+pub fn requirement_met(
+    facts: &StageFacts,
+    actor: &Principal,
+    requirement: StageRequirement,
+    project: Option<&DomainId>,
+) -> bool {
+    match requirement {
+        StageRequirement::Membership => {
+            project.is_some_and(|project| facts.is_member(&actor.id, Some(project)))
+        }
+        _ => false,
+    }
+}
+
 pub fn access_record(
     facts: &StageFacts,
     actor: &Principal,

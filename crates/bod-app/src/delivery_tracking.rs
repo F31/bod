@@ -340,7 +340,10 @@ impl TrackingView {
         set.into_iter().collect()
     }
 
-    /// 允许动作：先按状态算候选，再只保留**已实现**端点对应的动作。
+    /// 允许动作的**候选**：只按状态算「这件事此刻说不说得通」。
+    ///
+    /// 候选不等于能做。上有入口、需求、当事人三关（`delivery_api::select_allowed`），
+    /// 那三关与视图无关，所以不写在读模型里——读模型只回答「状态上合不合理」。
     ///
     /// 候选里有 `send` 的位置是刻意的：它要等草稿能审完之后才可能出现，
     /// 在那之前连候选都不该有——所以这里不写 `send`，而不是让它被过滤掉。
@@ -359,18 +362,17 @@ impl TrackingView {
         candidates
     }
 
-    pub fn allowed_actions(&self) -> Vec<&'static str> {
-        self.action_candidates()
-            .into_iter()
-            .filter(|code| delivery_api::is_served_action(code) == Some(true))
-            .collect()
-    }
-
     /// 投影成冻结契约里的响应体（`GET /api/v1/delivery-tracking/{id}`）。
     ///
+    /// `allowed_actions` 由调用方算好传进来：它是主体相对且调用面相对的结果，
+    /// 而读模型既不知道主体、也不知道这次是从 HTTP 还是 CLI 读的。
+    /// 让读模型自己算，等于把「谁」和「哪个面」硬编码成某一种。
     /// CLI 的 `--json` 直接输出它：同一形状只维护一份，避免「命令行看到的」
     /// 与「接口返回的」两套字段各自演进。
-    pub fn to_dto(&self) -> Result<DeliveryTrackingView, DeliveryError> {
+    pub fn to_dto(
+        &self,
+        allowed_actions: Vec<&'static str>,
+    ) -> Result<DeliveryTrackingView, DeliveryError> {
         let version = u64::try_from(self.tracking.resource_version)
             .map_err(|_| DeliveryError::InvalidVersion(self.tracking.resource_version))?;
         Ok(DeliveryTrackingView {
@@ -395,11 +397,7 @@ impl TrackingView {
                 .collect(),
             evidence: self.evidence.clone(),
             gaps: self.gaps().into_iter().map(str::to_string).collect(),
-            allowed_actions: self
-                .allowed_actions()
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+            allowed_actions: allowed_actions.into_iter().map(str::to_string).collect(),
         })
     }
 }
@@ -668,7 +666,7 @@ pub fn render_list(company_id: &str, rows: &[(TrackingRow, i64)]) -> String {
 }
 
 /// 详情渲染。逐目标给出结论、原因、决定该结论的证据与缺口。
-pub fn render_one(view: &TrackingView) -> String {
+pub fn render_one(view: &TrackingView, allowed: &[&'static str]) -> String {
     let tracking = &view.tracking;
     let mut out = format!(
         "跟踪项 {}（{}）\n  标题：{}\n  负责人：{}\n  版本：{}   状态：{}\n",
@@ -737,11 +735,10 @@ pub fn render_one(view: &TrackingView) -> String {
     } else {
         out.push_str(&format!("  缺口合计：{}\n", gaps.join(", ")));
     }
-    let actions = view.allowed_actions();
-    if actions.is_empty() {
-        out.push_str("  允许动作：无（相关端点尚未实现，视图不承诺做不到的事）\n");
+    if allowed.is_empty() {
+        out.push_str("  允许动作：无（这个调用面上没有可用入口，视图不承诺做不到的事）\n");
     } else {
-        out.push_str(&format!("  允许动作：{}\n", actions.join(", ")));
+        out.push_str(&format!("  允许动作：{}\n", allowed.join(", ")));
     }
     out
 }
@@ -1041,13 +1038,9 @@ mod tests {
                 "动作码 {code} 没有登记路由"
             );
         }
-        // 3.1 还没有任何产品端点落地：候选必须被全部过滤掉。
-        // 这条用例会在 3.5 起变红——届时要把实际可用的动作补进来，
-        // 而不是把断言改成空集通过。
-        assert!(
-            view.allowed_actions().is_empty(),
-            "端点尚未实现时不得给出允许动作"
-        );
+        // 「允许动作」不在这里判：它同时取决于调用面有没有入口、需求是否登记、
+        // 当事人是否满足需求——三件都不在读模型的知识范围里。规则与用例在
+        // `delivery_api` 的 `action_rules` 模块。读模型只回答「状态上说不说得通」。
     }
 
     /// 视图投影成契约响应体后，字段形状与 GET 的响应一致。
@@ -1073,7 +1066,7 @@ mod tests {
             }],
             work_packages: Vec::new(),
         };
-        let dto = view.to_dto().expect("版本 1 应可投影");
+        let dto = view.to_dto(Vec::new()).expect("版本 1 应可投影");
         let rendered = serde_json::to_value(&dto).expect("应可序列化");
         for key in [
             "tracking_id",
@@ -1105,7 +1098,7 @@ mod tests {
             evidence: Vec::new(),
             work_packages: Vec::new(),
         };
-        let dto = view.to_dto().expect("应可投影");
+        let dto = view.to_dto(Vec::new()).expect("应可投影");
         assert!(dto.owner.is_none());
     }
 
