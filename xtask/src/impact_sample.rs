@@ -698,7 +698,15 @@ mod tests {
     #[test]
     fn real_commit_sample_is_selective_and_keeps_unknown() {
         let root = crate::workspace_root();
-        let run = run(&root, "HEAD~1", "HEAD", 0).expect("应能读取真实提交");
+        // `HEAD~1` 要真实历史。CI 的 `actions/checkout` 默认浅克隆（depth 1），那时没有
+        // 父提交——这条用例会在 2026-11-21 之后一直红，而原因跟 impact 分析毫无关系。
+        // 报错要点名这一条，别让下一个人去翻判定逻辑。
+        let run = run(&root, "HEAD~1", "HEAD", 0).unwrap_or_else(|err| {
+            panic!(
+                "读不到 HEAD~1（{err}）：浅克隆没有父提交。这条用例要真实历史，\
+                 CI 的 actions/checkout 必须 fetch-depth: 0"
+            )
+        });
         assert!(run.stats.regions > 50);
         for (change, assessment) in &run.assessments {
             // 选择性：候选必须远小于已知区域，否则就是"全部重跑"。

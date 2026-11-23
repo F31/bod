@@ -23,7 +23,12 @@ jobs:
     name: rust (linux)
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 —— `xtask` 的 impact 用例要跑真实提交（`HEAD~1..HEAD`）。
+      # 默认浅克隆没有父提交，那条用例会红，而红的原因看起来像「impact 分析坏了」。
+      # 2026-11-23 查明：CI「全量测试」从 2026-11-21 起一直红的**唯一**原因就是它。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # 工具链由 rust-toolchain.toml 钉住；rustup show 会按该文件安装。
       - name: 安装钉住的工具链
         run: rustup show
@@ -76,7 +81,10 @@ jobs:
     name: rust (windows)
     runs-on: windows-latest
     steps:
+      # 同 linux job：impact 用例要 `HEAD~1`，浅克隆会红。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: 安装钉住的工具链
         run: rustup show
       - uses: Swatinem/rust-cache@v2
