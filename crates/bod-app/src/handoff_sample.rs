@@ -51,7 +51,14 @@ pub const WORK_PACKAGE_REVISION: &str = "wp.sample.resume/v1";
 
 // 观察窗口给足以躲开并行跑全量时的瞬时负载：poll 一旦集齐就返回，正常路径不额外等待。
 // 窗口太短会把「还没写出来」误判成「没有输出」，那是测试环境的错，不是被测事实。
-const SAMPLE_TIMEOUT: Duration = Duration::from_secs(15);
+//
+// 60 s 的依据（2026-11-23）：CI 的 windows runner 上 node 冷启动两次都**恰好**用满
+// 原来的 15 s（15152 ms / 15058 ms），而诊断带出的会话目录 `events.log` 是空的
+// ——不是写了半截在等。两件事合起来指向「进程还没开始写」，不是「写了没刷新」：
+// 同一份代码在 `a42e00a` 绿、在 `515b201`（纯文档提交）红，说明它是环境抖动。
+// 本机热启动只需几百毫秒，15 s 是本地标定值，不该当成跨环境上限。
+// **放宽窗口不动判定**：仍要真拿到两个检查点，失败时照样报实测耗时与现场。
+const SAMPLE_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_STEP: Duration = Duration::from_millis(20);
 const CHECKPOINT_ONE: &str = "sample: checkpoint 1";
 const CHECKPOINT_TWO: &str = "sample: checkpoint 2";
