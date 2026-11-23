@@ -961,10 +961,29 @@ fn case_signal(report: &bod_app::adapter_conformance::ConformanceReport, id: &st
         })
 }
 
+/// 读命令的库来源：**只读挂载一个已存在的库**（P8 7.7.3）。
+///
+/// 三个读命令（`observe` / `tracking` / `sources`）的 help 一直写着「只读」，
+/// 实现却走 `SqliteStore::open`——每次打开都把 20 个迁移跑一遍，目标路径不存在时
+/// 还会 `create_dir_all` 建库。后果有两个，都不是「反正幂等」能带过去的：
+/// 一是**改 schema 这种写操作悄悄发生在一次读取里**；二是路径写错被伪装成「库里没数据」，
+/// 读者会去查数据而不是查路径。
+///
+/// 换成只读挂载后，缺库当场报 `MissingDatabase`，库比代码旧时读列会失败而不是被静默升级。
+/// 代价是老库必须先跑一次写命令（或任意会迁移的命令）才能被读——这是有意的：
+/// 读命令不该替业务库决定 schema 版本。
+fn open_readonly_for(
+    db: &std::path::Path,
+    command: &str,
+) -> Result<bod_app::store::SqliteStore, String> {
+    bod_app::store::SqliteStore::open_existing_readonly(db, &BodConfig::default())
+        .map_err(|err| format!("{command} 打开数据库失败：{err}"))
+}
+
 /// `bod observe`：从既有表算 §9 的观测读数（CR-002 第 3 步）。
 ///
-/// 只读：打开数据库后只做 SELECT。算不出来的项在输出里单列（`not_measured`），
-/// 不填 0——报表里的 0 会被读成「测到了，且是零」。
+/// 只读：只读挂载 + 只做 SELECT（见 `open_readonly_for`）。算不出来的项在输出里单列
+/// （`not_measured`），不填 0——报表里的 0 会被读成「测到了，且是零」。
 fn observe(flags: &[String]) -> Result<String, String> {
     let mut db: Option<std::path::PathBuf> = None;
     let mut company = "company-default".to_string();
@@ -994,9 +1013,7 @@ fn observe(flags: &[String]) -> Result<String, String> {
         }
     }
     let db = db.ok_or_else(|| format!("observe 需要 --db <数据库路径>\n\n{USAGE}"))?;
-    // `open` 会执行幂等迁移（既有行为）：指向旧库时会把新表补齐，除此之外没有写入。
-    let store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
-        .map_err(|err| format!("打开数据库失败：{err}"))?;
+    let store = open_readonly_for(&db, "observe")?;
     let snapshot = bod_app::observability::snapshot(&store, &company, now_ms())
         .map_err(|err| format!("采集失败：{err}"))?;
     if json {
@@ -1124,9 +1141,7 @@ fn tracking(flags: &[String]) -> Result<String, String> {
         }
     }
     let db = db.ok_or_else(|| format!("tracking 需要 --db <数据库路径>\n\n{USAGE}"))?;
-    // `open` 会执行幂等迁移（既有行为）：指向旧库时补建新表，除此之外没有写入。
-    let store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
-        .map_err(|err| format!("打开数据库失败：{err}"))?;
+    let store = open_readonly_for(&db, "tracking")?;
 
     if let Some(tracking_id) = id {
         let view = store
@@ -1233,8 +1248,7 @@ fn sources(flags: &[String]) -> Result<String, String> {
         }
     }
     let db = db.ok_or_else(|| format!("sources 需要 --db <数据库路径>\n\n{USAGE}"))?;
-    let store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
-        .map_err(|err| format!("打开数据库失败：{err}"))?;
+    let store = open_readonly_for(&db, "sources")?;
 
     let rows = store
         .list_sources(&company, project.as_deref(), limit)

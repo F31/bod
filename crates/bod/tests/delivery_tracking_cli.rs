@@ -223,6 +223,28 @@ fn missing_db_flag_is_refused() {
     assert!(stderr.contains("--db"), "{stderr}");
 }
 
+/// 读命令不建库、不迁移：路径不存在就报错（P8 7.7.3）。
+///
+/// 三条断言各挡一件事：
+/// - **退出码非 0**：缺库不等于「库里没有记录」。用 0 退出，调用方会把空输出当成
+///   「确认了，什么都没有」，而这正是「路径写错」最常见的表现形式。
+/// - **报错里带路径**：否则用户不知道该改哪个参数。
+/// - **文件没被创建**：`SqliteStore::open` 会 `create_dir_all` 并建库跑迁移，
+///   于是一次读取会悄悄变成一次 schema 写入，还在错误的位置留下一份空库。
+#[test]
+fn read_commands_refuse_missing_db_instead_of_creating_it() {
+    for command in ["observe", "tracking", "sources"] {
+        let path = db_path();
+        assert!(!path.exists(), "{command}: 前置应为不存在的路径");
+        let db = path.to_string_lossy().to_string();
+        let (code, stdout, stderr) = run(&[command, "--db", &db]);
+        assert_ne!(code, 0, "{command} 缺库必须失败，实际 stdout：{stdout}");
+        assert!(stdout.is_empty(), "{command} 失败不该往 stdout 写半份结果：{stdout}");
+        assert!(stderr.contains("不存在"), "{command}: {stderr}");
+        assert!(!path.exists(), "{command} 不得创建库");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 后补的内部工作包（P8 3.4）
 // ---------------------------------------------------------------------------
