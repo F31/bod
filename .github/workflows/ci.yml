@@ -48,6 +48,19 @@ jobs:
           name: cargo-test-linux
           path: ${{ runner.temp }}/cargo-test.log
           if-no-files-found: warn
+      # artifact 要登录才能下载，日志本身也是 403——但**注解是公开可读的**
+      # （`/repos/{owner}/{repo}/check-runs/{id}/annotations`）。所以把失败用例名
+      # 顶到注解里，让这条红灯至少能被匿名诊断。
+      - name: 把失败用例名写进注解
+        if: failure()
+        shell: bash
+        run: |
+          names=$(grep -E '^    [A-Za-z0-9_]+(::[A-Za-z0-9_]+)+$' "$RUNNER_TEMP/cargo-test.log" \
+            | sed 's/^ *//' | sort -u | head -10 | paste -sd, -)
+          if [ -z "$names" ]; then
+            names="没能从日志里认出用例名（可能不是用例失败，而是编译/启动失败）"
+          fi
+          echo "::error title=cargo test 失败用例::${names}"
       - name: 门禁 G-1/G-50
         run: cargo run -q -p xtask -- verify --stage P0
       - name: 迁移检查
