@@ -540,13 +540,22 @@ pub fn payload_digest(payload: &CanonicalValue) -> Digest {
 /// `delivery_source`（导入时新建的 ID）用的是同一条规则，两份实现迟早会漂移，
 /// 而漂移的表现是「重试落不到同一行」——最难查的那种。
 pub fn length_prefixed_digest(parts: &[&str]) -> String {
+    Digest::of_bytes(length_prefixed_parts(parts).as_bytes()).value
+}
+
+/// 同一套长度前缀拼接，**不**求摘要。
+///
+/// 用途是把「一组字段」变成一个可比较的字符串（如载荷指纹里的目标身份）。
+/// 与 [`length_prefixed_digest`] 共用拼接规则：两处各写一遍的话，一边改了分隔方式，
+/// 另一边不会跟着变，于是「同一组字段」在 ID 与指纹里指向两个东西。
+pub fn length_prefixed_parts(parts: &[&str]) -> String {
     let mut material = String::new();
     for part in parts {
         material.push_str(&part.chars().count().to_string());
         material.push(':');
         material.push_str(part);
     }
-    Digest::of_bytes(material.as_bytes()).value
+    material
 }
 
 #[cfg(test)]

@@ -79,6 +79,17 @@ const USAGE: &str = "\
       --target <客户>:<环境>[:<部署单元>]   可重复；已有目标按身份命中，缺的才新建
       --correlation <id> / --decided-at <RFC3339>   审计用
       --json   机器可读（含 link_id、appended、version、created_targets）
+  bod tracking observe --db <path> --id <跟踪项> --key <幂等键>
+      登记一条观察（写命令）：--target <客户>:<环境>[:<部署单元>] 恰好一个
+      --kind deployment|rollback|manual-evidence   必填：部署与回滚是两件不同的事实
+      --observed-at <RFC3339>   必填，业务时间（来源时间）；不默认取现在——晚到补录不能记成今天
+      --source-kind connector|manual|internal   缺省：人工补证=manual，部署/回滚=connector
+      --source-revision <来源修订>   声称 connector 时必填，否则「连接器观察」只是自报
+      --source-ref <定位> / --revision <部署修订> / --digest <摘要> / --artifact-revision <制品修订>
+      --note <备注>   人工补证的授权范围与复验依据（空备注由写入原语拒绝）
+      本命令不写 authorized：授权范围由 §34.12 判定，未实现前一律 0
+      --correlation <id> / --decided-at <RFC3339>   审计用
+      --json   机器可读
   bod sources --db <path>          列已确认的来源身份与修订条数（只读；候选不计入）
   bod sources --db <path> --project <id>   只看某个项目的来源
   bod sources --db <path> --candidates     附上来源候选（pending 在前，未确认的不能支撑结论）
@@ -1114,6 +1125,7 @@ fn tracking(flags: &[String]) -> Result<String, String> {
     match flags.first().map(String::as_str) {
         Some("import") => return tracking_import(&flags[1..]),
         Some("link") => return tracking_link(&flags[1..]),
+        Some("observe") => return tracking_observe(&flags[1..]),
         _ => {}
     }
     let mut db: Option<std::path::PathBuf> = None;
@@ -1269,6 +1281,19 @@ fn flag_arg(flags: &[String], index: usize, name: &str) -> Result<String, String
         .ok_or_else(|| format!("{name} 需要一个值"))
 }
 
+/// 写命令失败的统一呈现：`StoreError` 的自述 + 稳定码（有的话）+ 命令给的下一步。
+///
+/// 不再叠一层「xxx 失败：」前缀——`StoreError` 的每个变体已经说清是哪一类失败，
+/// 叠一层只会输出「追加关联失败：关联追加失败: …」这种读起来像 bug 的句子。
+///
+/// 码放在自述之后而不是之前：终端里先看到的是「什么错了」，往下才是可以拿去搜文档的码。
+fn write_failure(err: &bod_app::store::StoreError, hint: String) -> String {
+    match err.as_code() {
+        Some(code) => format!("{err}（{code}）{hint}"),
+        None => format!("{err}{hint}"),
+    }
+}
+
 /// `bod tracking import`：登记一个外部来源并挂到跟踪项上（P8 7.5.3 第一条）。
 ///
 /// **谁在什么时候跑它**：本机操作者（项目成员）在收到一个外部交付信号之后跑——
@@ -1418,7 +1443,7 @@ fn tracking_import(flags: &[String]) -> Result<String, String> {
             .map_err(|err| format!("开启事务失败：{err}"))?;
         let outcome = uow
             .import_delivery_source(&command, now_ms())
-            .map_err(|err| format!("导入失败：{err}"))?;
+            .map_err(|err| write_failure(&err, String::new()))?;
         uow.commit().map_err(|err| format!("提交失败：{err}"))?;
         outcome
     };
@@ -1630,7 +1655,7 @@ fn tracking_link(flags: &[String]) -> Result<String, String> {
                 ),
                 _ => String::new(),
             };
-            format!("追加关联失败：{err}{hint}")
+            write_failure(&err, hint)
         })?;
         uow.commit().map_err(|err| format!("提交失败：{err}"))?;
         outcome
@@ -1682,6 +1707,304 @@ fn tracking_link(flags: &[String]) -> Result<String, String> {
         let _ = writeln!(
             out,
             "关系与目标本来就在，版本没有推进——这不是失败，重复上报不该让别人的期望版本过期。"
+        );
+    }
+    Ok(out)
+}
+
+/// `bod tracking observe`：给某个客户目标登记一条观察（P8 7.5.3.3 第三条写入口）。
+///
+/// **谁在什么时候跑它**：操作者在「客户那边确实发生了什么」确定之后跑——连接器报了
+/// 一次部署、现场把版本回滚了、离线安装的回执今天才拿到。它把「发生了什么」记到
+/// 时间轴上，与 `import`（这件事在哪）和 `link`（对应我们哪段工作）三件事分开：
+/// 三者常常不是同时知道的，合进一个命令就得逼操作者在一个还不知道的时刻填另一个。
+///
+/// 与 `bod observe` 的区别：那条读的是**宿主自身**的观测读数（队列、预算、交付计数），
+/// 只读；这条往**某条交付**的证据时间轴上追加一行。
+///
+/// 三个判断写在这里，因为它们在命令行上会直接被使用者撞到：
+///
+/// 1. **`--observed-at` 必填**。业务时间是来源时间，不是入库时间。默认「现在」会让
+///    晚到的补录把一周前的部署记成今天，于是「回滚是否晚于部署」翻结论，而且不报错。
+/// 2. **没有 `--expected-version`**，也不推进版本。追加事实不是「照着某个状态做的决定」：
+///    两个人同时各记一条，两条都该留下。`link` 要版本是因为它改关系集合，这里不改。
+/// 3. **没有 `--authorized`**。授权范围是 §34.12 的判定结果；写入口给这个开关，
+///    「授权」就变成被审者自己打的勾。未授权的人工补证不会让覆盖变成「已覆盖」，
+///    这是安全的一侧——输出里明写，免得操作者以为补证生效了。
+fn tracking_observe(flags: &[String]) -> Result<String, String> {
+    use bod_app::delivery_tracking::ObservationKind;
+
+    let mut db: Option<std::path::PathBuf> = None;
+    let mut company = "company-default".to_string();
+    let mut tracking_id: Option<String> = None;
+    let mut key: Option<String> = None;
+    let mut targets: Vec<bod_app::delivery_api::TargetRef> = Vec::new();
+    let mut kind: Option<ObservationKind> = None;
+    let mut observed_at_raw: Option<String> = None;
+    let mut source_kind: Option<&'static str> = None;
+    let mut source_ref = String::new();
+    let mut source_revision: Option<String> = None;
+    let mut artifact_revision: Option<String> = None;
+    let mut digest = String::new();
+    let mut revision = String::new();
+    let mut note = String::new();
+    let mut correlation: Option<String> = None;
+    let mut decided_at: Option<String> = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--db" => {
+                db = Some(std::path::PathBuf::from(flag_arg(flags, index, "--db")?));
+                index += 2;
+            }
+            "--company" => {
+                company = flag_arg(flags, index, "--company")?;
+                index += 2;
+            }
+            "--id" => {
+                tracking_id = Some(flag_arg(flags, index, "--id")?);
+                index += 2;
+            }
+            "--key" => {
+                key = Some(flag_arg(flags, index, "--key")?);
+                index += 2;
+            }
+            "--target" => {
+                targets.push(parse_target(&flag_arg(flags, index, "--target")?)?);
+                index += 2;
+            }
+            "--kind" => {
+                let raw = flag_arg(flags, index, "--kind")?;
+                kind = Some(
+                    ObservationKind::parse(&raw)
+                        .map_err(|err| format!("{}（{}）", err.explain(), err.code()))?,
+                );
+                index += 2;
+            }
+            "--observed-at" => {
+                observed_at_raw = Some(flag_arg(flags, index, "--observed-at")?);
+                index += 2;
+            }
+            "--source-kind" => {
+                let raw = flag_arg(flags, index, "--source-kind")?;
+                source_kind = Some(
+                    bod_app::delivery_tracking::parse_source_kind(&raw)
+                        .map_err(|err| format!("{}（{}）", err.explain(), err.code()))?,
+                );
+                index += 2;
+            }
+            "--source-ref" => {
+                source_ref = flag_arg(flags, index, "--source-ref")?;
+                index += 2;
+            }
+            "--source-revision" => {
+                source_revision = Some(flag_arg(flags, index, "--source-revision")?);
+                index += 2;
+            }
+            "--artifact-revision" => {
+                artifact_revision = Some(flag_arg(flags, index, "--artifact-revision")?);
+                index += 2;
+            }
+            "--digest" => {
+                digest = flag_arg(flags, index, "--digest")?;
+                index += 2;
+            }
+            "--revision" => {
+                revision = flag_arg(flags, index, "--revision")?;
+                index += 2;
+            }
+            "--note" => {
+                note = flag_arg(flags, index, "--note")?;
+                index += 2;
+            }
+            "--correlation" => {
+                correlation = Some(flag_arg(flags, index, "--correlation")?);
+                index += 2;
+            }
+            "--decided-at" => {
+                decided_at = Some(flag_arg(flags, index, "--decided-at")?);
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            // 同 `import` / `link`：主体由本机账户确定，命令行上不得自报。
+            "--as" => {
+                return Err(
+                    "tracking observe 不接受 --as：主体由本机账户确定，命令行上不得自报"
+                        .to_string(),
+                );
+            }
+            other => return Err(format!("tracking observe 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+
+    let db = db.ok_or_else(|| format!("tracking observe 需要 --db <数据库路径>\n\n{USAGE}"))?;
+    let tracking_id =
+        tracking_id.ok_or_else(|| format!("tracking observe 需要 --id <跟踪项>\n\n{USAGE}"))?;
+    let key = key.ok_or_else(|| {
+        format!("tracking observe 需要 --key <幂等键>（重试要落回同一条观察）\n\n{USAGE}")
+    })?;
+    let kind = kind.ok_or_else(|| {
+        format!(
+            "tracking observe 需要 --kind deployment|rollback|manual-evidence：\
+             部署与回滚是两件不同的事实，没有可以顶替的缺省\n\n{USAGE}"
+        )
+    })?;
+    let observed_at_raw = observed_at_raw.ok_or_else(|| {
+        format!(
+            "tracking observe 需要 --observed-at <RFC3339>：这条事实是**什么时候**发生的。\
+             不默认取现在——晚到的补录不能记成今天\n\n{USAGE}"
+        )
+    })?;
+    if targets.len() != 1 {
+        return Err(format!(
+            "tracking observe 需要恰好一个 --target（收到 {} 个）：一条事实落在多个客户目标上时，\
+             请分多条命令各自登记——按目标各有一份证据才能各自判定\n\n{USAGE}",
+            targets.len()
+        ));
+    }
+    let target = targets.remove(0);
+
+    let (observed_at, observed_at_ms) =
+        bod_app::delivery_observation::parse_observed_at(&observed_at_raw)
+            .map_err(|err| format!("{}（{}）", err.explain(), err.code()))?;
+
+    let principal = cli_principal()?;
+    let actor_id = principal.id.as_str().to_string();
+    let now = now_ms();
+
+    let command = bod_app::delivery_observation::RecordObservationCommand {
+        idempotency_key: key,
+        company_id: company.clone(),
+        tracking_id: tracking_id.clone(),
+        target: target.clone(),
+        kind,
+        source_kind: source_kind
+            .unwrap_or_else(|| bod_app::delivery_observation::default_source_kind(kind)),
+        source_ref,
+        source_revision_id: source_revision,
+        artifact_revision,
+        digest,
+        revision,
+        note,
+        actor_id,
+        observed_at,
+        observed_at_ms,
+        correlation_id: correlation
+            .unwrap_or_else(|| format!("cli-{}-{}", std::process::id(), now)),
+        decided_at: decided_at.unwrap_or_else(|| bod_app::conformance_report::utc_stamp(now)),
+    };
+
+    let mut store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
+        .map_err(|err| format!("tracking observe 打开数据库失败：{err}"))?;
+    let outcome = {
+        let uow = store
+            .transaction()
+            .map_err(|err| format!("开启事务失败：{err}"))?;
+        let outcome = uow
+            .record_delivery_observation(&command, now)
+            .map_err(|err| {
+                // 三种拒绝各给一条可照抄的下一步。它们的处置完全不同：
+                // 改请求（补时间）、先建目标、或补来源修订——不写出来就会被当成系统坏了。
+                let hint = match &err {
+                    bod_app::store::StoreError::Delivery(
+                        bod_app::delivery_tracking::DeliveryError::TargetNotInTracking { .. },
+                    ) => format!(
+                        "\n下一步：先把这个目标挂到跟踪项上——`bod tracking link --db {} --id {} \
+                         --key <新键> --expected-version <版本> --target {}{}`。\
+                         本命令不会替你建目标：凭一条观察建客户记录，会把笔误变成承诺。",
+                        db.display(),
+                        tracking_id,
+                        target.customer_id,
+                        match target.deployment_unit.as_deref() {
+                            Some(unit) => format!(":{}:{unit}", target.environment),
+                            None => format!(":{}", target.environment),
+                        }
+                    ),
+                    bod_app::store::StoreError::Delivery(
+                        bod_app::delivery_tracking::DeliveryError::EmptyManualEvidenceNote,
+                    ) => "\n下一步：人工补证要写清授权范围与复验依据，用 --note 给出。\
+                           空备注的补证不构成证据。"
+                        .to_string(),
+                    bod_app::store::StoreError::Observation(
+                        bod_app::delivery_observation::ObservationError::ConnectorRequiresSourceRevision,
+                    ) => "\n下一步：要么给 --source-revision <来源修订>（先 `bod sources --db <库>` 找到它），\
+                           要么用 --source-kind manual 声明这是人工观察。"
+                        .to_string(),
+                    _ => String::new(),
+                };
+                write_failure(&err, hint)
+            })?;
+        uow.commit().map_err(|err| format!("提交失败：{err}"))?;
+        outcome
+    };
+
+    if json {
+        let mut value =
+            serde_json::to_value(&outcome).map_err(|err| format!("序列化失败：{err}"))?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "company_id".to_string(),
+                serde_json::Value::String(company.clone()),
+            );
+            object.insert(
+                "target".to_string(),
+                serde_json::json!({
+                    "customer_id": target.customer_id,
+                    "environment": target.environment,
+                    "deployment_unit": target.deployment_unit,
+                }),
+            );
+        }
+        let rendered = serde_json::to_string(&value).map_err(|err| format!("序列化失败：{err}"))?;
+        return Ok(format!("{rendered}\n"));
+    }
+
+    let unit_label = target
+        .deployment_unit
+        .as_deref()
+        .filter(|unit| !unit.is_empty())
+        .unwrap_or("整个环境");
+    let mut out = String::new();
+    let _ = writeln!(out, "公司 {company}  库 {}", db.display());
+    let _ = writeln!(
+        out,
+        "跟踪项 {tracking_id}  目标 {}（{} / {} / {}）",
+        outcome.target_id, target.customer_id, target.environment, unit_label
+    );
+    let _ = writeln!(
+        out,
+        "观察 {}（{}，来源 {}）业务时间 {}",
+        outcome.observation_id, outcome.kind, outcome.source_kind, outcome.observed_at
+    );
+    if outcome.recorded {
+        let _ = writeln!(out, "已写入时间轴。");
+    } else {
+        let _ = writeln!(
+            out,
+            "同一事实已在库里（同一条观察 ID），本次没有重复写入——\
+             重复上报不该让时间线多出一行。"
+        );
+    }
+    if outcome.replayed {
+        let _ = writeln!(
+            out,
+            "本次是重放：同一幂等键的命令已经执行过，返回的是当时的结果。"
+        );
+    }
+    let _ = writeln!(
+        out,
+        "版本：{}（未推进——追加事实不需要乐观并发闸门，所以也没有 --expected-version）",
+        outcome.version
+    );
+    if kind == ObservationKind::ManualEvidence {
+        let _ = writeln!(
+            out,
+            "授权：authorized=0。授权范围由 §34.12 的主体与目标判定给出，当前未实现；\
+             这条补证只会留下 install-receipt-unauthorized，不会让覆盖变成「已覆盖」。"
         );
     }
     Ok(out)

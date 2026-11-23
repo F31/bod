@@ -955,3 +955,337 @@ fn link_creates_missing_targets_by_identity() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("环境 staging"), "新目标要看得见：{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// 观察登记的写入口（P8 7.5.3.3）
+// ---------------------------------------------------------------------------
+//
+// `bod tracking observe` 是第三条真实写入口。它与 `link` 的方向相反：`link` 改跟踪项的
+// **关系**，要期望版本；观察只往**时间轴**追加，所以不接受版本——两件事实之间没有
+// 「照着旧状态做决定」这层关系，硬加一个闸门只会让并发记录互相把对方判过期。
+// 这一组用例钉的是入口语义，不是 3.1 的写入原语（后者在 store 用例里）。
+
+fn observe_args<'a>(db: &'a str, key: &'a str, kind: &'a str, at: &'a str) -> Vec<&'a str> {
+    vec![
+        "tracking",
+        "observe",
+        "--db",
+        db,
+        "--id",
+        "dt-1",
+        "--key",
+        key,
+        "--kind",
+        kind,
+        "--target",
+        "acme:prod:web",
+        "--observed-at",
+        at,
+        "--source-kind",
+        "manual",
+        "--json",
+    ]
+}
+
+fn evidence_len(db: &str) -> usize {
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &["tracking", "--db", db, "--id", "dt-1", "--json"],
+    );
+    assert_eq!(code, 0, "读回失败，stderr: {stderr}");
+    let view: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    view["evidence"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0)
+}
+
+/// 写进去、看得见、版本不动。
+///
+/// 「版本不动」不是省了一步，而是这条命令**不能**有期望版本的理由：版本若 +1，
+/// 两个操作者同时各记一条部署，后一条会以「照着旧状态做决定」为由被拒——
+/// 而两条都是事实，丢哪条都是丢证据。
+#[test]
+fn observe_records_a_deployment_without_bumping_the_version() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+    let before = evidence_len(&db);
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &observe_args(&db, "k-obs-1", "deployment", "2026-11-21T12:00:00Z"),
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let outcome: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(outcome["recorded"], serde_json::json!(true), "{stdout}");
+    assert_eq!(outcome["replayed"], serde_json::json!(false), "{stdout}");
+    assert_eq!(
+        outcome["version"],
+        serde_json::json!(1),
+        "追加事实不推进版本：{stdout}"
+    );
+    assert_eq!(
+        outcome["authorized"],
+        serde_json::json!(false),
+        "写入口不产生授权：{stdout}"
+    );
+    let observation_id = outcome["observation_id"]
+        .as_str()
+        .expect("observation_id 是字符串")
+        .to_string();
+    assert!(observation_id.starts_with("obs-"), "{stdout}");
+
+    // 与读入口指向同一份事实：证据时间线上多了一条，且引用就是这条观察。
+    assert_eq!(evidence_len(&db), before + 1, "时间线要多一条");
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &["tracking", "--db", &db, "--id", "dt-1", "--json"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let view: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert!(
+        view["evidence"]
+            .as_array()
+            .expect("evidence 是数组")
+            .iter()
+            .any(|item| item["revision"] == serde_json::json!(observation_id)),
+        "证据引用要是这条观察：{stdout}"
+    );
+}
+
+/// 缺 `--observed-at` 就失败，并说清为什么不替人填「现在」。
+///
+/// 这条是这条命令与 `import` / `link` 最大的不同：那两条的时间由入口取当前时刻就够了，
+/// 观察的时间是**来源时间**。默认取现在会让晚到的补录把旧事件记成今天，
+/// 而且不会报错——所以必须在入口就把「没写」与「写了」分开。
+#[test]
+fn observe_requires_the_business_time() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "observe",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-obs-1",
+            "--kind",
+            "deployment",
+            "--target",
+            "acme:prod:web",
+            "--source-kind",
+            "manual",
+        ],
+    );
+    assert_ne!(code, 0, "缺业务时间必须失败，实际 stdout：{stdout}");
+    assert!(stdout.is_empty(), "失败不该往 stdout 写半份结果：{stdout}");
+    assert!(
+        stderr.contains("晚到的补录"),
+        "要说明为什么不默认取现在：{stderr}"
+    );
+}
+
+/// 时间不是 RFC 3339：拒绝，不猜。
+#[test]
+fn observe_refuses_a_time_it_cannot_read() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &observe_args(&db, "k-obs-1", "deployment", "2026-11-21 12:00"),
+    );
+    assert_ne!(code, 0, "坏时间必须失败，实际 stdout：{stdout}");
+    assert!(stderr.contains("RFC 3339"), "错误要指向正确形态：{stderr}");
+    assert!(
+        stderr.contains("OBSERVATION_MALFORMED_TIME"),
+        "稳定错误码要带出来：{stderr}"
+    );
+}
+
+/// 声称连接器却给不出来源修订：拒绝，并把两条正当出路都写出来。
+///
+/// 不拦的话 `connector` 就只是一个谁都能写的词，「连接器观察」与「人眼看到后
+/// 自称连接器」在库里长得一模一样，而证据等级正是按 `source_kind` 投影的。
+#[test]
+fn observe_refuses_a_connector_claim_without_a_source_revision() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+    let before = evidence_len(&db);
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "observe",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-obs-1",
+            "--kind",
+            "deployment",
+            "--target",
+            "acme:prod:web",
+            "--observed-at",
+            "2026-11-21T12:00:00Z",
+        ],
+    );
+    assert_ne!(code, 0, "缺来源修订必须失败，实际 stdout：{stdout}");
+    assert!(
+        stderr.contains("OBSERVATION_CONNECTOR_WITHOUT_SOURCE"),
+        "稳定错误码要带出来：{stderr}"
+    );
+    assert!(
+        stderr.contains("--source-revision") && stderr.contains("--source-kind manual"),
+        "两条正当出路都要写出来，否则只剩「换个词蒙过去」：{stderr}"
+    );
+    assert_eq!(evidence_len(&db), before, "被拒的命令不写时间线");
+}
+
+/// 目标没挂到跟踪项上：拒绝，并给出可照抄的 `link` 命令。
+///
+/// 观察不建目标。凭一条可能打错客户名的观察建出客户记录，会把一次笔误变成
+/// 一份对外承诺——而承诺一旦在库里，覆盖结论就会去追一个不存在的客户。
+#[test]
+fn observe_refuses_an_unlinked_target_and_names_the_fix() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "observe",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-obs-1",
+            "--kind",
+            "deployment",
+            "--target",
+            "acme:staging",
+            "--observed-at",
+            "2026-11-21T12:00:00Z",
+            "--source-kind",
+            "manual",
+        ],
+    );
+    assert_ne!(code, 0, "未挂目标必须失败，实际 stdout：{stdout}");
+    assert!(
+        stderr.contains("DELIVERY_TARGET_NOT_IN_TRACKING"),
+        "稳定错误码要带出来：{stderr}"
+    );
+    assert!(
+        stderr.contains("bod tracking link") && stderr.contains("acme:staging"),
+        "下一步命令要可照抄，且带上操作者刚给的目标：{stderr}"
+    );
+}
+
+/// 一条事实落在多个目标上：拒绝，要求分条登记。
+///
+/// 允许一条命令写多个目标会让「按目标各有一份证据」失效：一条打错的目标会被
+/// 同一条事实顺带覆盖，而判定是按目标做的。
+#[test]
+fn observe_takes_exactly_one_target() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "observe",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-obs-1",
+            "--kind",
+            "deployment",
+            "--target",
+            "acme:prod:web",
+            "--target",
+            "acme:prod",
+            "--observed-at",
+            "2026-11-21T12:00:00Z",
+            "--source-kind",
+            "manual",
+        ],
+    );
+    assert_ne!(code, 0, "两个目标必须失败，实际 stdout：{stdout}");
+    assert!(
+        stderr.contains("恰好一个"),
+        "提示要指向「分条登记」：{stderr}"
+    );
+}
+
+/// 人工补证缺备注：由写入原语拒绝，入口只负责把下一步说清。
+#[test]
+fn observe_manual_evidence_needs_a_note() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+    let before = evidence_len(&db);
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &observe_args(&db, "k-obs-1", "manual-evidence", "2026-11-21T12:00:00Z"),
+    );
+    assert_ne!(code, 0, "空备注必须失败，实际 stdout：{stdout}");
+    assert!(
+        stderr.contains("DELIVERY_MANUAL_EVIDENCE_WITHOUT_NOTE"),
+        "错误码来自写入原语，不是入口另编一个：{stderr}"
+    );
+    assert!(stderr.contains("--note"), "要指向补什么：{stderr}");
+    assert_eq!(evidence_len(&db), before, "被拒的补证不写时间线");
+}
+
+/// 同键重放：不重复写时间线。
+#[test]
+fn observe_replays_without_duplicating_the_timeline() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+    let args = observe_args(&db, "k-obs-1", "rollback", "2026-11-21T13:00:00Z");
+
+    let (code, stdout, stderr) = run_as(CLI_USER, &args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let first: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    let after_first = evidence_len(&db);
+
+    let (code, stdout, stderr) = run_as(CLI_USER, &args);
+    assert_eq!(code, 0, "重放不是错误，stderr: {stderr}");
+    let replay: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(replay["replayed"], serde_json::json!(true), "{stdout}");
+    assert_eq!(
+        replay["observation_id"], first["observation_id"],
+        "重放回答的是「那条命令当时写了什么」：{stdout}"
+    );
+    assert_eq!(evidence_len(&db), after_first, "重放不新增时间线");
+
+    // 换一个键、同样的内容：同一事实，仍然只有一行（连接器轮询是常态）。
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &observe_args(&db, "k-obs-2", "rollback", "2026-11-21T13:00:00Z"),
+    );
+    assert_eq!(code, 0, "重复上报不是错误，stderr: {stderr}");
+    let repeated: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(repeated["recorded"], serde_json::json!(false), "{stdout}");
+    assert_eq!(evidence_len(&db), after_first, "重复上报不刷屏时间线");
+}

@@ -68,6 +68,12 @@ pub enum AuditAction {
     ImportSource,
     /// 给跟踪项追加来源或内部工作包关联。
     AppendLink,
+    /// 给某个客户目标登记一条观察（部署、回滚、人工补证）。
+    ///
+    /// 三类观察共用一个动作词：审计要回答的是「谁登记了一条证据」，
+    /// 而证据类别已经写在业务行的 `kind` 上——词表里再分三种，
+    /// 只是把同一件事说三遍，且新增类别时又要改一次词表。
+    RecordObservation,
     /// 撤销某个主体在本公司的全部生效授权。
     ///
     /// 它不是阶段动作：撤权不改变任何交付目标的状态，也不回答「改这件事需要什么凭据」
@@ -90,6 +96,7 @@ impl AuditAction {
             Self::Reopen => "reopen",
             Self::ImportSource => "import-source",
             Self::AppendLink => "append-link",
+            Self::RecordObservation => "record-observation",
             Self::RevokeAuthorization => "revoke-authorization",
         }
     }
@@ -109,6 +116,7 @@ impl AuditAction {
             "reopen" => Some(Self::Reopen),
             "import-source" => Some(Self::ImportSource),
             "append-link" => Some(Self::AppendLink),
+            "record-observation" => Some(Self::RecordObservation),
             "revoke-authorization" => Some(Self::RevokeAuthorization),
             _ => None,
         }
@@ -521,6 +529,7 @@ mod tests {
             AuditAction::Reopen,
             AuditAction::ImportSource,
             AuditAction::AppendLink,
+            AuditAction::RecordObservation,
         ] {
             assert_eq!(AuditAction::parse(action.as_str()), Some(action));
         }
@@ -552,6 +561,7 @@ mod tests {
         for action in [
             AuditAction::ImportSource,
             AuditAction::AppendLink,
+            AuditAction::RecordObservation,
             AuditAction::RevokeAuthorization,
         ] {
             assert!(!action.is_stage(), "{} 不是阶段动作", action.as_str());
@@ -563,6 +573,7 @@ mod tests {
         for action in [
             AuditAction::ImportSource,
             AuditAction::AppendLink,
+            AuditAction::RecordObservation,
             AuditAction::RevokeAuthorization,
         ] {
             assert!(

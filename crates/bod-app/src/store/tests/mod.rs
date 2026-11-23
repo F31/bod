@@ -10,6 +10,7 @@ mod audit;
 mod delivery;
 mod import;
 mod link;
+mod observation;
 mod source;
 mod store_core;
 

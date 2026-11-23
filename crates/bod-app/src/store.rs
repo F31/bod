@@ -187,6 +187,11 @@ pub enum StoreError {
     /// 与 `Delivery` 分开：这些错误的处置是「改请求」或「按当前版本重提」，
     /// 而不是去补证据。
     Link(crate::delivery_link::LinkError),
+    /// 观察登记的拒绝原因（7.5.3.3）：缺业务时间、时间不是 RFC 3339、
+    /// 声称连接器却不给来源修订。
+    /// 与 `Delivery` 分开：这几条都是**入口层**的规则，处置是「改请求」，
+    /// 而 `Delivery` 那一档多半指向库里的数据或判定。
+    Observation(crate::delivery_observation::ObservationError),
     /// 授权事实取不到（3.6 B1/B2）。**单独一档**：它的处置是「报故障」，
     /// 不是「当成没有事实」——降级为全可见或全不可见都是把故障伪装成权限。
     Facts(facts::StageFactsError),
@@ -199,6 +204,31 @@ pub enum StoreError {
     /// 于是「路径写错」看起来像「库里没数据」——控制面读到的将是空事实，
     /// 每个请求都变成 404，而运维会去查权限。代价是把这类配置错误变成启动失败。
     MissingDatabase(PathBuf),
+}
+
+impl StoreError {
+    /// 稳定错误码。**只对「请求被拒」这类变体有码**，故障类（IO/SQL/pragma）返回 `None`。
+    ///
+    /// 不给故障编一个看起来可分支的码：一旦 `SQLITE_BUSY` 也有稳定码，调用方就会
+    /// 按码分支，把「重试可能有用」和「改请求才有用」混成一件事。
+    pub fn as_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Delivery(err) => Some(err.code()),
+            Self::Source(err) => Some(err.code()),
+            Self::Idempotency(err) => Some(err.code()),
+            Self::Link(err) => Some(err.code()),
+            Self::Observation(err) => Some(err.code()),
+            Self::Facts(err) => Some(err.as_code()),
+            Self::Io(_)
+            | Self::Sql(_)
+            | Self::Pragma(_)
+            | Self::VersionConflict { .. }
+            | Self::DuplicateUsageKey { .. }
+            | Self::Audit(_)
+            | Self::Revocation(_)
+            | Self::MissingDatabase(_) => None,
+        }
+    }
 }
 
 impl fmt::Display for StoreError {
@@ -218,6 +248,7 @@ impl fmt::Display for StoreError {
             Self::Source(err) => write!(f, "来源身份失败: {}", err.explain()),
             Self::Idempotency(err) => write!(f, "幂等键冲突: {}", err.explain()),
             Self::Link(err) => write!(f, "关联追加失败: {}", err.explain()),
+            Self::Observation(err) => write!(f, "观察登记失败: {}", err.explain()),
             Self::Facts(err) => write!(f, "授权事实装配失败: {}", err.explain()),
             Self::Revocation(err) => write!(f, "撤权命令不成立: {}", err.explain()),
             Self::MissingDatabase(path) => write!(
@@ -264,6 +295,12 @@ impl From<IdempotencyError> for StoreError {
 impl From<crate::delivery_link::LinkError> for StoreError {
     fn from(value: crate::delivery_link::LinkError) -> Self {
         Self::Link(value)
+    }
+}
+
+impl From<crate::delivery_observation::ObservationError> for StoreError {
+    fn from(value: crate::delivery_observation::ObservationError) -> Self {
+        Self::Observation(value)
     }
 }
 

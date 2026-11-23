@@ -1506,6 +1506,189 @@ impl<'a> UnitOfWork<'a> {
         }
     }
 
+    /// 登记一条观察（P8 7.5.3.3）：部署、回滚、人工补证。
+    ///
+    /// 与 `append_delivery_link` 的三处不同，都是语义决定的，不是风格：
+    ///
+    /// 1. **不推进版本、不读期望版本**。观察往时间轴上追加，没有「照着某个状态做的
+    ///    决定」可被覆盖；两个写入者同时各记一条，两条都该留下。若照 `link` 的样子
+    ///    也 +1，并发记录会互相把对方判过期，而事实不该因为撞车被丢掉一条。
+    /// 2. **不建目标**。目标不存在就报 `TargetNotInTracking`，让调用方先 `link`。
+    ///    凭一条可能打错客户名的观察建客户记录，会把一次笔误变成一份对外承诺。
+    /// 3. **已关闭的跟踪项仍接受观察**。与 `link` 相反，因为关闭表达的是「承诺结清」，
+    ///    不是「事实停止发生」：离线安装的回执常常在承诺关闭之后才到，而回滚本身就是
+    ///    新的观察。「委任到期/撤权后停止新增观察」是 7.3 主动观察的约束，不该由这条
+    ///    命令代劳——真到那一步，拦的东西是委任，不是跟踪项状态。
+    ///
+    /// 顺序：校验 → 读回执 → 定位目标 → 写观察（同 ID 已存在则视为重复上报）→
+    /// 只在真写入时记审计 → 写回执，整段在 `SAVEPOINT` 里。
+    pub fn record_delivery_observation(
+        &self,
+        command: &crate::delivery_observation::RecordObservationCommand,
+        now_ms: i64,
+    ) -> Result<crate::delivery_observation::RecordObservationOutcome, StoreError> {
+        use crate::delivery_observation::{COMMAND_RECORD_OBSERVATION, RecordObservationOutcome};
+
+        command.validate()?;
+        let key = crate::delivery_idempotency::validate_key(&command.idempotency_key)?;
+        let owned = command.payload_fields();
+        let borrowed: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        let fingerprint = crate::delivery_idempotency::payload_fingerprint(&borrowed)?;
+
+        if let Replay::Replayed(receipt) = classify(
+            find_receipt(self.conn, &command.company_id, key)?,
+            COMMAND_RECORD_OBSERVATION,
+            &fingerprint,
+        )? {
+            return RecordObservationOutcome::replayed_from(&receipt.result_detail).map_err(
+                |detail| {
+                    IdempotencyError::UnreadableReceipt {
+                        key: key.to_string(),
+                        detail,
+                    }
+                    .into()
+                },
+            );
+        }
+
+        self.conn
+            .execute_batch("SAVEPOINT record_delivery_observation")?;
+        let outcome = (|| -> Result<RecordObservationOutcome, StoreError> {
+            let (current, _state, project_id) =
+                self.delivery_tracking_gate(&command.company_id, &command.tracking_id)?;
+            // 按**身份四段**定位目标，不按派生 ID：库里可能已有手工 ID 的目标
+            // （用例夹具里就有 `t-1`），身份才是「同一个客户目标」的判据。
+            let unit = command.target.deployment_unit.as_deref().unwrap_or("");
+            let existing: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT target_id FROM delivery_targets
+                     WHERE company_id = ?1 AND tracking_id = ?2 AND customer_id = ?3
+                       AND environment = ?4 AND deployment_unit = ?5",
+                    params![
+                        command.company_id,
+                        command.tracking_id,
+                        command.target.customer_id,
+                        command.target.environment,
+                        unit
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(target_id) = existing else {
+                // 错误里给的是**按身份派生的** target_id：库里没有这一行，
+                // 但它能让操作者看出「你说的是哪个目标」。
+                return Err(DeliveryError::TargetNotInTracking {
+                    target_id: crate::delivery_link::target_id(
+                        &command.company_id,
+                        &command.tracking_id,
+                        &command.target,
+                    ),
+                    tracking_id: command.tracking_id.clone(),
+                }
+                .into());
+            };
+
+            let row = command.to_row(&target_id, now_ms);
+            let recorded = self.insert_observation_if_absent(&row)?;
+            let version =
+                u64::try_from(current).map_err(|_| DeliveryError::InvalidVersion(current))?;
+
+            // 只在真写入时记审计：同 ID 已存在说明这是一次重复上报，什么都没改。
+            // 记一条「登记了观察」会让审计里凭空多出一次事实。
+            if recorded {
+                let event = crate::audit_log::AuditEvent::for_write(
+                    command.company_id.as_str(),
+                    command.correlation_id.as_str(),
+                    crate::domain::DomainId::new(command.actor_id.as_str()),
+                    AuditAction::RecordObservation,
+                    crate::domain::Scope {
+                        company_id: crate::domain::DomainId::new(command.company_id.as_str()),
+                        project_id: Some(crate::domain::DomainId::new(project_id.as_str())),
+                        issue_id: None,
+                    },
+                    command.kind.as_str(),
+                    command.decided_at.as_str(),
+                )
+                .map_err(StoreError::Audit)?;
+                self.append_audit_event(&event, now_ms)?;
+            }
+
+            let outcome = RecordObservationOutcome {
+                tracking_id: command.tracking_id.clone(),
+                target_id: target_id.clone(),
+                observation_id: row.observation_id.clone(),
+                kind: command.kind.as_str().to_string(),
+                source_kind: command.source_kind.to_string(),
+                observed_at: command.observed_at.clone(),
+                recorded,
+                replayed: false,
+                authorized: false,
+                version,
+            };
+            let detail = serde_json::to_string(&outcome).map_err(|err| {
+                IdempotencyError::ResultNotRecordable(format!("结果体无法编码为 JSON：{err}"))
+            })?;
+            // 结果种类记 `tracking`：观察是跟踪项的证据，回执要回答的是「哪条跟踪项被改了」。
+            self.conn.execute(
+                "INSERT INTO delivery_command_receipts (
+                    company_id, idempotency_key, command, payload_fingerprint,
+                    result_kind, result_id, result_detail, recorded_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    command.company_id,
+                    key,
+                    COMMAND_RECORD_OBSERVATION,
+                    fingerprint,
+                    ResultKind::Tracking.as_str(),
+                    command.tracking_id,
+                    detail,
+                    now_ms,
+                ],
+            )?;
+            Ok(outcome)
+        })();
+        match outcome {
+            Ok(value) => {
+                self.conn
+                    .execute_batch("RELEASE record_delivery_observation")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO record_delivery_observation; \
+                     RELEASE record_delivery_observation",
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// 观察行已存在则返回 `false`（重复上报），否则写入并返回 `true`。
+    ///
+    /// 写入仍走 3.1 的原语 `append_delivery_observation`：人工补证的空备注、目标归属、
+    /// 来源跨项目这三条校验在那一处，入口不重写一遍——多一份规则就多一处会漂移的地方。
+    fn insert_observation_if_absent(&self, row: &ObservationRow) -> Result<bool, StoreError> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM delivery_observations
+             WHERE company_id = ?1 AND observation_id = ?2",
+            params![row.company_id, row.observation_id],
+            |line| line.get(0),
+        )?;
+        if exists > 0 {
+            return Ok(false);
+        }
+        match self.append_delivery_observation(row) {
+            Ok(()) => Ok(true),
+            // 并发下另一写入者刚插入同一行：按已有处理，不把唯一约束错误抛给调用方。
+            Err(StoreError::Sql(err)) if is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     /// 推进跟踪项版本。带上 `resource_version = 当前值` 的条件：
     /// 读与写之间若有别的写入，这里会写 0 行，按版本冲突报出去而不是覆盖。
     fn bump_delivery_version(
