@@ -14,3 +14,9 @@ bod-core = { path = "../bod-core" }
 bod-app = { path = "../bod-app" }
 # serve --json 输出一行机器可读就绪信息；与 bod-app 使用同一 serde_json 版本。
 serde_json = "1.0.154"
+
+[dev-dependencies]
+# 用例要造「本机主体是项目成员」这个事实。`project_members` 至今**没有生产写入者**
+# （B3 之后才有入口），所以只能直接写 SQL——用库层 API 假装有写入者会掩盖这个缺口。
+# 版本与 bod-app 的 rusqlite 保持一致，避免同一个进程里链两份 sqlite。
+rusqlite = { version = "0.43.0", features = ["bundled"] }

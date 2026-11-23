@@ -413,12 +413,17 @@ pub enum ActionSurface {
 
 /// CLI 入口表：动作码 → 承载它的子命令。
 ///
-/// **空表不是忘了填**：ADR-0009 选定「写入只走 CLI」，但第一条写命令
-/// （`bod tracking import`）还没落地，所以现在确实一个入口都没有。
-/// 加条目时必须同时把读命令的主体事实装配上（`store.stage_facts`），
-/// 否则 `select_allowed` 拿不到事实、一律不列——用例
-/// `cli_surface_stays_unwired_until_facts_are_assembled` 会先红。
-pub const CLI_ENTRIES: &[(&str, &str)] = &[];
+/// 第一条条目随 `bod tracking import` 落地（P8 7.5.3）。加条目要同时满足两件事，
+/// 否则视图会宣称一个跑不起来的动作：
+///
+/// 1. 子命令真的存在且真的写库（`bod` crate 的用例
+///    `the_command_named_in_the_entry_table_actually_exists` 拿 `--help` 对照这张表）；
+/// 2. 读命令装配了主体事实（`store.stage_facts`），否则 `select_allowed` 拿不到事实、
+///    一律不列——那会表现成「命令能跑但永远说没权限」。
+///
+/// 表里写子命令全文而不只写名字：将来出现 `bod tracking import --dry-run` 这类
+/// 只在特定形态下可用的入口时，「有这个码」与「这个码在哪个命令上」不能含糊。
+pub const CLI_ENTRIES: &[(&str, &str)] = &[(ACTION_LINK_SOURCE, "bod tracking import")];
 
 /// 该调用面上真有入口的动作码。
 pub fn available_on(surface: ActionSurface) -> Vec<&'static str> {
@@ -1302,18 +1307,48 @@ mod action_rules {
         assert!(allowed.is_empty(), "缺项目时不得默认满足：{allowed:?}");
     }
 
-    /// CLI 面还没有入口；一旦有，读命令必须先装配主体事实。
+    /// CLI 面已接线（7.5.3 第一条 `bod tracking import` 落地后由哨兵转正向断言）。
     ///
-    /// 这条是**待办哨兵**：给 `CLI_ENTRIES` 加条目的人会让它红。红了不要把它改成
-    /// 「允许非空」——要先把 `bod tracking` 的 `stage_facts` + 主体装配补上，
-    /// 否则 CLI 会静默地不列动作，看起来像「命令能跑但没权限」。
+    /// 原来这条断言「`CLI_ENTRIES` 必须为空」，作用是提醒加条目的人先装配事实。
+    /// 现在事实装配已经在 `bod tracking --id` 里做了，所以它换成正向断言：
+    /// 表里每个条目都必须（a）有登记的需求、（b）指向一个非空命令全文、
+    /// （c）真的出现在 `available_on(Cli)` 里。三条缺一条，视图就会宣称一个坏动作。
     #[test]
-    fn cli_surface_stays_unwired_until_facts_are_assembled() {
+    fn every_cli_entry_is_wired_to_a_registered_requirement() {
         assert!(
-            CLI_ENTRIES.is_empty(),
-            "CLI 入口已登记：先给读命令装配 stage_facts 与主体，再放开这条断言"
+            !CLI_ENTRIES.is_empty(),
+            "CLI 入口表被清空了：ADR-0009 选 B（写入只走 CLI），空表意味着没有任何写入路径"
         );
-        assert!(available_on(ActionSurface::Cli).is_empty());
+        for (code, command) in CLI_ENTRIES {
+            assert!(
+                super::action_requirement(code).is_some(),
+                "CLI 入口 {code} 没有登记需求：未登记的动作一律不列，这条命令会被静默隐藏"
+            );
+            assert!(
+                command.starts_with("bod "),
+                "CLI 入口 {code} 的子命令写成 {command:?}：要写命令全文，便于与 --help 对照"
+            );
+            assert!(
+                available_on(ActionSurface::Cli).contains(code),
+                "CLI 入口 {code} 在表里却不在 available_on(Cli) 里，说明两处口径分叉"
+            );
+        }
+    }
+
+    /// 端到端的一步：CLI 面非空 + 当事人是成员 → 动作真的出现。
+    ///
+    /// 这条是「允许动作不是永远为空」的证明。没有它，上面那些断言全绿也可能只是
+    /// 一个恒定返回空集的判定。
+    #[test]
+    fn the_cli_surface_advertises_link_source_to_a_member() {
+        let allowed = select_allowed(
+            &[ACTION_LINK_SOURCE],
+            &available_on(ActionSurface::Cli),
+            &facts(),
+            &member(),
+            Some(&project()),
+        );
+        assert_eq!(allowed, vec![ACTION_LINK_SOURCE]);
     }
 
     /// HTTP 面目前也没有入口：两条动作路由都还是 planned。

@@ -530,6 +530,25 @@ pub fn payload_digest(payload: &CanonicalValue) -> Digest {
     payload.digest()
 }
 
+/// 若干字符串按**长度前缀**拼接后求 sha256（64 位 hex，不带算法前缀）。
+///
+/// 用途只有一个：把「一组字段」压成一个可复现的 ID 原料。长度前缀不是讲究，
+/// 是必需的——直接拼接时 `("a","bc")` 与 `("ab","c")` 会得到同一段字节，
+/// 于是两件不同的事派生出同一个 ID。
+///
+/// 放在这里而不是各模块各写一份：`delivery_link`（目标与关系 ID）与
+/// `delivery_source`（导入时新建的 ID）用的是同一条规则，两份实现迟早会漂移，
+/// 而漂移的表现是「重试落不到同一行」——最难查的那种。
+pub fn length_prefixed_digest(parts: &[&str]) -> String {
+    let mut material = String::new();
+    for part in parts {
+        material.push_str(&part.chars().count().to_string());
+        material.push(':');
+        material.push_str(part);
+    }
+    Digest::of_bytes(material.as_bytes()).value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

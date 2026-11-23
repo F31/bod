@@ -417,3 +417,257 @@ fn sources_can_be_scoped_to_one_project() {
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
     assert_eq!(value["sources"], serde_json::json!([]), "{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// 写入入口（P8 7.5.3 第一条）：`bod tracking import`
+// ---------------------------------------------------------------------------
+//
+// ADR-0009 选 B（写入只走 CLI）之后，这是交付域**第一条真实的写入口**：
+// HTTP 的五条 POST 仍是 planned，`serve` 依旧只读挂载。所以这些用例跑真实二进制、
+// 跑真实库——参数解析、退出码、幂等语义与「写进去读得到」都是契约的一部分。
+
+/// 用例里的本机账户。真实部署读的是同一个环境变量，改不了，也不需要改。
+const CLI_USER: &str = "cli-actor";
+
+/// 以指定本机账户跑命令。
+///
+/// 主体由宿主按本地身份装配（ADR-0007 第 6 条），命令行上没有覆盖开关——
+/// 所以用例要控制主体只能改子进程环境。这本身也是一次验证：`--as` 不存在。
+fn run_as(user: &str, args: &[&str]) -> (i32, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_bod"))
+        .args(args)
+        .env("USERNAME", user)
+        .env("USER", user)
+        .env("LOGNAME", user)
+        .output()
+        .expect("应能启动 bod 二进制");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// 造一条「本机主体是本项目成员」的事实。
+///
+/// `project_members` 至今**没有生产写入者**（B3 之后才有入口），所以只能直接写 SQL。
+/// 用库层 API 假装有写入者会把那个缺口掩盖掉——而「允许动作判定读不到事实」
+/// 与「这个人没有权限」在界面上长得一样，正是最容易糊过去的地方。
+fn seed_project_member(path: &Path, principal: &str, project: &str) {
+    let conn = rusqlite::Connection::open(path).expect("应能打开库");
+    conn.execute(
+        "INSERT INTO project_members
+             (company_id, project_id, principal_id, kind, revision, active, updated_at_ms)
+         VALUES ('company-default', ?1, ?2, 'user', 1, 1, 1)",
+        rusqlite::params![project, principal],
+    )
+    .expect("成员资格应可写入");
+}
+
+fn import_args<'a>(db: &'a str, key: &'a str, locator: &'a str) -> Vec<&'a str> {
+    vec![
+        "tracking",
+        "import",
+        "--db",
+        db,
+        "--key",
+        key,
+        "--project",
+        "project-1",
+        "--connection",
+        "gh-1",
+        "--object-type",
+        "pull-request",
+        "--provider-object-id",
+        "PR_kw318",
+        "--locator",
+        locator,
+        "--title",
+        "客户 A 登录失败",
+        "--json",
+    ]
+}
+
+/// 写进去 → 读得到；同一键重试是重放；换键导同一对象不建第二项。
+#[test]
+fn import_creates_a_tracked_source_and_replays_on_retry() {
+    let path = db_path();
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(CLI_USER, &import_args(&db, "k-1", "acme/web#318"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let first: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(
+        first["created_tracking"],
+        serde_json::json!(true),
+        "{stdout}"
+    );
+    assert_eq!(first["created_source"], serde_json::json!(true), "{stdout}");
+    assert_eq!(first["replayed"], serde_json::json!(false), "{stdout}");
+    let tracking_id = first["tracking_id"]
+        .as_str()
+        .expect("导入应给出跟踪项")
+        .to_string();
+    assert!(
+        tracking_id.starts_with("dt-"),
+        "跟踪项 ID 由身份派生：{stdout}"
+    );
+
+    // 重试：同键同载荷 → 重放。`created_*` 保留首次执行的事实，`replayed` 说本次。
+    let (code, stdout, stderr) = run_as(CLI_USER, &import_args(&db, "k-1", "acme/web#318"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let replay: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(replay["replayed"], serde_json::json!(true), "{stdout}");
+    assert_eq!(replay["tracking_id"].as_str(), Some(tracking_id.as_str()));
+    assert_eq!(
+        replay["created_tracking"],
+        serde_json::json!(true),
+        "重放回答的是「那条命令当时做了什么」：{stdout}"
+    );
+
+    // 换键导同一个对象（同一五元组）：命中已有来源与跟踪关系，不建第二项。
+    let (code, stdout, stderr) = run_as(CLI_USER, &import_args(&db, "k-2", "acme/web#318"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let second: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(
+        second["created_tracking"],
+        serde_json::json!(false),
+        "{stdout}"
+    );
+    assert_eq!(
+        second["created_source"],
+        serde_json::json!(false),
+        "{stdout}"
+    );
+    assert_eq!(
+        second["tracking_id"].as_str(),
+        Some(tracking_id.as_str()),
+        "同一来源身份只承载一条跟踪关系：{stdout}"
+    );
+
+    // 写进去的东西必须读得到：写入口与读入口指向同一份事实。
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &["tracking", "--db", &db, "--id", &tracking_id, "--json"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let view: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(
+        view["tracking_id"],
+        serde_json::json!(tracking_id),
+        "{stdout}"
+    );
+    assert_eq!(
+        view["project_id"],
+        serde_json::json!("project-1"),
+        "{stdout}"
+    );
+}
+
+/// 同键异载荷：拒绝，且不留下半条写入。
+#[test]
+fn import_with_a_different_payload_under_the_same_key_is_refused() {
+    let path = db_path();
+    let db = path.to_string_lossy().to_string();
+    let (code, _, stderr) = run_as(CLI_USER, &import_args(&db, "k-1", "acme/web#318"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let (code, stdout, stderr) = run_as(CLI_USER, &import_args(&db, "k-1", "acme/web#319"));
+    assert_ne!(code, 0, "同键换载荷必须失败，实际 stdout：{stdout}");
+    assert!(stdout.is_empty(), "失败不该往 stdout 写半份结果：{stdout}");
+    assert!(
+        stderr.contains("同一个幂等键"),
+        "错误要说清是键的问题而不是数据的问题：{stderr}"
+    );
+
+    // 第一次导入仍然在：拒绝的是第二条命令，不是回滚第一条。
+    let (code, stdout, stderr) = run_as(CLI_USER, &["sources", "--db", &db, "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(
+        value["sources"].as_array().map(Vec::len),
+        Some(1),
+        "被拒绝的导入不得影响已登记的来源：{stdout}"
+    );
+}
+
+/// `--as` 被明确拒绝，而不是「不认识」——它看起来太合理了，静默忽略更危险。
+#[test]
+fn import_refuses_a_self_reported_subject() {
+    let path = db_path();
+    let db = path.to_string_lossy().to_string();
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "import",
+            "--db",
+            &db,
+            "--key",
+            "k-1",
+            "--project",
+            "project-1",
+            "--locator",
+            "acme/web#318",
+            "--as",
+            "mallory",
+        ],
+    );
+    assert_ne!(code, 0, "自报主体必须失败，实际 stdout：{stdout}");
+    assert!(stderr.contains("不得自报"), "{stderr}");
+    assert!(!path.exists(), "取主体就该在碰库之前失败，不得建库");
+}
+
+/// 允许动作：成员看得到 `link-source`，非成员看不到；判定依据是真实装配的事实。
+///
+/// 这条用例同时钉住两件事：`CLI_ENTRIES` 非空之后视图不再恒空（判定不是坏的），
+/// 以及「主体从哪来」——换 `USERNAME` 就换人，命令行上没有别的办法。
+#[test]
+fn tracking_detail_advertises_link_source_only_to_a_project_member() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let detail = |user: &str| {
+        let (code, stdout, stderr) =
+            run_as(user, &["tracking", "--db", &db, "--id", "dt-1", "--json"]);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        serde_json::from_str::<serde_json::Value>(&stdout).expect("应输出合法 JSON")
+    };
+
+    let outsider = detail("nobody");
+    assert_eq!(
+        outsider["allowed_actions"],
+        serde_json::json!([]),
+        "非成员不得看到动作：{outsider}"
+    );
+
+    seed_project_member(&path, CLI_USER, "project-1");
+    let member = detail(CLI_USER);
+    let actions = member["allowed_actions"]
+        .as_array()
+        .expect("allowed_actions 是数组");
+    assert!(
+        actions
+            .iter()
+            .any(|item| item.as_str() == Some("link-source")),
+        "成员应看到 link-source（CLI 面已有 `bod tracking import`）：{member}"
+    );
+}
+
+/// 入口表里写的子命令必须真的存在：表是数据，数据要有对应的行为。
+#[test]
+fn the_command_named_in_the_entry_table_actually_exists() {
+    let (code, stdout, stderr) = run(&["--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !bod_app::delivery_api::CLI_ENTRIES.is_empty(),
+        "ADR-0009 选 B 之后 CLI 是唯一写入面，入口表不得为空"
+    );
+    for (action, command) in bod_app::delivery_api::CLI_ENTRIES {
+        assert!(
+            stdout.contains(command),
+            "入口表写着 {action} 由 `{command}` 承载，但 --help 里没有这条命令"
+        );
+    }
+}

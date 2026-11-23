@@ -548,6 +548,33 @@ pub struct ImportSourceCommand {
 }
 
 impl ImportSourceCommand {
+    /// 用来源身份派生的三个「新建对象 ID」填上 `new_tracking_id` / `new_source_id` /
+    /// `new_candidate_id`。
+    ///
+    /// **为什么入口层不该自己随手生成这三个 ID**：它们参与载荷指纹（见 `payload_fields`）。
+    /// 同一条命令重试时若每次 ID 都不同，指纹就跟着变，幂等键会撞上「同键异载荷」——
+    /// 重试从「幂等」变成「冲突」，而这恰好是导入路径最需要的东西反过来咬人。
+    /// 派生后「同一次导入」与「同一个 ID」绑在一起，重试才真的落到同一行。
+    ///
+    /// 派生输入是五元组 + 定位，**不含标题与负责人**：那两项在命中已有对象时会被忽略
+    /// （`import_identity` 只在新建时用它们），把它们放进 ID 会让「改个标题重试」
+    /// 变成另一条命令——而它其实指向同一个对象。
+    pub fn with_derived_ids(mut self) -> Self {
+        let parts: [&str; 6] = [
+            self.company_id.as_str(),
+            self.project_id.as_str(),
+            self.connection_id.as_str(),
+            self.object_type.as_deref().unwrap_or(""),
+            self.provider_object_id.as_deref().unwrap_or(""),
+            self.locator.as_str(),
+        ];
+        let digest = crate::canonical_json::length_prefixed_digest(&parts);
+        self.new_tracking_id = format!("dt-{digest}");
+        self.new_source_id = format!("ds-{digest}");
+        self.new_candidate_id = format!("dsc-{digest}");
+        self
+    }
+
     /// 载荷指纹的输入：**所有影响结果或影响责任归属的字段**。
     ///
     /// 刻意不含 `idempotency_key`：含了的话换一个键就等于换一份载荷，
@@ -964,6 +991,44 @@ mod tests {
         assert_ne!(
             crate::delivery_idempotency::payload_fingerprint(&retitled.payload_fields()).unwrap(),
             baseline
+        );
+    }
+
+    /// 派生 ID 的三条性质：同一身份稳定、不同身份分开、标题与负责人不影响 ID。
+    ///
+    /// 第三条是这条用例存在的主要理由：ID 参与载荷指纹，若它随标题变化，
+    /// 「改标题重试」会变成另一条命令，而它其实指向同一个对象。
+    #[test]
+    fn derived_ids_follow_the_identity_not_the_wording() {
+        let base = import_command().with_derived_ids();
+        assert_eq!(
+            base.new_tracking_id,
+            import_command().with_derived_ids().new_tracking_id,
+            "同一身份两次派生必须一致，否则重试会被判成换载荷"
+        );
+        assert!(base.new_tracking_id.starts_with("dt-"));
+        assert!(base.new_source_id.starts_with("ds-"));
+        assert!(base.new_candidate_id.starts_with("dsc-"));
+        assert_ne!(
+            base.new_tracking_id, base.new_source_id,
+            "三种对象不能共用一个 ID"
+        );
+
+        let mut retitled = import_command();
+        retitled.title = "另一个标题".to_string();
+        retitled.owner_id = "bob".to_string();
+        assert_eq!(
+            retitled.clone().with_derived_ids().new_tracking_id,
+            base.new_tracking_id,
+            "标题与负责人只影响新建后的内容，不该影响身份"
+        );
+
+        let mut elsewhere = import_command();
+        elsewhere.locator = "acme/web#319".to_string();
+        assert_ne!(
+            elsewhere.with_derived_ids().new_tracking_id,
+            base.new_tracking_id,
+            "换了定位就是另一个对象"
         );
     }
 

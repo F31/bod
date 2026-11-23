@@ -318,9 +318,42 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 - [ ] 7.5.3 B 之下的等价物：为每条写入给出 **CLI 子命令**，顺序不变
       （imports → links → observations → drafts → send），每条都要有：
       子命令 + 真实库上的端到端用例 + 「谁调用它」的一句话（哪类角色、在什么场合跑）。
-      第一条是 `bod tracking import`——它同时是 `allowed_actions` 在 CLI 面上第一次非空的
-      触发点，所以做它时要一起补 `stage_facts` 与主体装配（见 7.8 的哨兵用例）。
-      一条没做完之前不开下一条。
+      一条没做完之前不开下一条。拆成五条子项，是因为这条总项「做完」之前
+      看起来会一直像没动——而它实际上是一条一条长出来的。
+- [x] 7.5.3.1 `bod tracking import`（第一条）。**已落（2026-11-23）**：
+      - 子命令：`bod tracking import --db <path> --key <幂等键> --project <项目>
+        --locator <定位> [--connection / --object-type / --provider-object-id]
+        [--title / --requirement / --owner] [--correlation / --decided-at] [--json]`。
+      - **谁在什么时候跑它**：本机操作者（项目成员）收到一个外部交付信号之后——
+        客户报了一个缺陷、某个 PR 合进了客户分支——把「这件事发生在哪」变成可跟踪的来源。
+        它是 ADR-0009 选 B 之后交付写入的第一条真实入口：HTTP 五条 `POST` 仍 `planned`，
+        `serve` 仍只读挂载。
+      - 三个 `new_*_id` 由来源身份派生（`ImportSourceCommand::with_derived_ids`）：
+        它们进载荷指纹，随机生成会让「同键重试」变成「同键异载荷」。派生所用的
+        「长度前缀摘要」从 `delivery_link` 上移到 `canonical_json::length_prefixed_digest`，
+        两份实现不再各写一遍。
+      - `imported_by` 取本机账户（`local_principal_id`），`--as` **明确拒绝**而不是
+        「不认识」；取不到主体就在碰库之前失败，不建库。
+      - 写库走事务：`store.transaction()` → `uow.import_delivery_source` → `commit`。
+        回执、业务写入与审计同生共死（3.5 的 SAVEPOINT 在里层），外层不提交等于什么都没发生。
+      - CLI 面第一次非空：`CLI_ENTRIES = [(link-source, "bod tracking import")]`，
+        `bod tracking --id` 改为真实装配事实（`cli_allowed_actions`），
+        哨兵用例转正向断言（见 7.8.5）。
+      - 证据：`delivery_tracking_cli` 15 passed（+5：导入→重放→换键不重复建项、
+        同键异载荷拒绝且不影响首次导入、`--as` 拒绝且不建库、
+        允许动作只给成员、入口表与 `--help` 对照）；`delivery_source` 新增一条派生 ID 用例。
+      - **已知缺口（写在这里而不是藏起来）**：写入侧**不判项目成员资格**。
+        `allowed_actions` 会按成员资格决定要不要推荐 `link-source`，但 `import` 不拦——
+        因为 `project_members` 至今没有生产写入者，加闸门会让所有人都导不进来（包括该导的人）。
+        等 `project_members` 有入口（B3）再收紧。**不得**因此说「写入口已按权限放行」。
+- [ ] 7.5.3.2 `bod tracking link`（原 links）：追加工作包关联，复用
+      `UnitOfWork::append_delivery_link` 与 `expected_version` 语义；谁调用它＝
+      操作者在「这条交付对应哪个工作包/PR」确定之后补挂。
+- [ ] 7.5.3.3 `bod tracking observe`（原 observations）：登记部署/回滚/人工补证；
+      乱序按来源序列处理，人工补证的空备注由写入原语拒绝。
+- [ ] 7.5.3.4 `bod tracking draft`（原 drafts）：装配草稿，**不外发**；无模型路径同结论。
+- [ ] 7.5.3.5 `bod tracking send`（原 send）：两处重验 + 发送结果未知的对账。
+      这一条的 `action_requirement` 不得沿用 `Membership`——它有对外后果。
 
 ### 7.6 主体模型（唯一硬分叉点）
 
@@ -373,21 +406,30 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
 - [x] 7.8.2 判定改为四道关：候选 → 该调用面有入口（`available_on(ActionSurface)`：
       HTTP 看 `served`、CLI 看 `CLI_ENTRIES`）→ 需求已登记（`action_requirement`，
       未登记即 fail-closed）→ 当事人满足需求（`authorization::requirement_met`，目前只实现
-      `Membership`，其余需求一律 false）。`CLI_ENTRIES` **是空表**且有哨兵用例。
+      `Membership`，其余需求一律 false）。`CLI_ENTRIES` 当时是**空表**，用哨兵用例钉住；
+      7.5.3.1 落地后转正向断言（见 7.8.5）。
 - [x] 7.8.3 投影不再自己判：`TrackingView::to_dto(allowed_actions)` 只渲染，
       判定在 `delivery_api::select_allowed` + `authorization`。`evaluate_read` 把
-      facts 与 actor 一起传下去（此前手里有 actor 却不往下传）。CLI 的 `--json` 传空
-      并注明原因（CLI 面无入口），不假装「这个主体什么都不能做」。
+      facts 与 actor 一起传下去（此前手里有 actor 却不往下传）。CLI 的 `--json` 当时传空
+      并注明原因（CLI 面无入口），不假装「这个主体什么都不能做」；
+      7.5.3.1 之后 CLI 改为真实装配（`cli_allowed_actions`）。
 - [x] 7.8.4 反例记录：`readonly_api`（912 行，仅测试可达）有 `ReadonlyAction` /
       `authorize_readonly` / `button_hint`，看着像动作授权，实际只判项目级可达，注释明写
       「界面提示只用于显示，不参与放行判定」。**不得**当作现成实现复用；
       与 `evidence_publication` ≠ V05 属同一类命名坑。
-- [x] 7.8.5 用例（`delivery_api::action_rules`，六条）：
+- [x] 7.8.5 用例（`delivery_api::action_rules`，原六条，现七条）：
       （a）没入口 → 不列（即使当事人确实有权限）；
       （b）有入口但需求未登记 → 不列（合成的 `teleport` 码）；
       （c）有入口 + 是成员 → 列；非成员 → 不列；缺项目 → 不列；
-      外加两条**哨兵**：`CLI_ENTRIES` 变非空时红（要求先装配 facts），
-      `available_on(Http)` 变非空时红（要求把该动作补进断言并加端到端）。
+      （d）`CLI_ENTRIES` **原为哨兵**（变非空即红），7.5.3.1 落地后转正向断言
+      `every_cli_entry_is_wired_to_a_registered_requirement`（每条目的要么有登记需求、
+      要么有子命令全文、要么出现在 `available_on(Cli)`，缺一即红）+
+      `the_cli_surface_advertises_link_source_to_a_member`（面非空时动作真的出现）；
+      （e）`available_on(Http)` **仍是哨兵**：两条动作路由仍是 planned，变非空即要求
+      补断言与端到端。
+      另有 `bod` crate 的 `the_command_named_in_the_entry_table_actually_exists`：
+      拿 `--help` 对照入口表，挡住「表里写着、命令不存在」。
+
 
 ### 7.9 防复发门禁
 

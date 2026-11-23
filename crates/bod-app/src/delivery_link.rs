@@ -21,7 +21,6 @@
 //! 结论仍只由 `coverage_receipt::judge_coverage` 在读时算出（design D1）。
 
 use crate::delivery_api::{DeliveryLinkResponse, TargetRef};
-use crate::domain::artifact::Digest;
 
 // ---------------------------------------------------------------------------
 // 错误
@@ -227,15 +226,10 @@ pub fn link_id(company_id: &str, kind: &str, tracking_id: &str, reference: &str)
     format!("dl-{digest}")
 }
 
-/// 长度前缀拼接后求 sha256，返回 64 位 hex（算法前缀由调用方决定要不要）。
+/// 长度前缀拼接后求 sha256。实现上移到 `canonical_json`：导入路径也要用同一条规则，
+/// 两份实现漂移的表现是「重试落不到同一行」。
 fn digest_of_parts(parts: &[&str]) -> String {
-    let mut material = String::new();
-    for part in parts {
-        material.push_str(&part.chars().count().to_string());
-        material.push(':');
-        material.push_str(part);
-    }
-    Digest::of_bytes(material.as_bytes()).value
+    crate::canonical_json::length_prefixed_digest(parts)
 }
 
 // ---------------------------------------------------------------------------

@@ -66,6 +66,12 @@ const USAGE: &str = "\
   bod tracking --db <path>         列交付跟踪项与目标数（只读；结论不在列表里给）
   bod tracking --db <path> --id <跟踪项>   看单个跟踪项的逐目标结论、证据与缺口
   bod tracking --db <path> --json [--id <跟踪项>]   机器可读；带 --id 时与 GET 的响应体同形
+  bod tracking import --db <path> --key <幂等键> --project <项目> --locator <定位>
+      登记一个外部来源并挂到跟踪项上（写命令：会建库、跑迁移）
+      --connection <id> / --object-type <类型> / --provider-object-id <稳定 ID>  连接器来源的身份
+      --title <标题> / --requirement <用户要求> / --owner <负责人>   缺省：标题取定位、负责人取导入者
+      --correlation <id> / --decided-at <RFC3339>   审计用；缺省取本进程与当前时刻
+      --json   机器可读；与重复执行时的重放结果同形
   bod sources --db <path>          列已确认的来源身份与修订条数（只读；候选不计入）
   bod sources --db <path> --project <id>   只看某个项目的来源
   bod sources --db <path> --candidates     附上来源候选（pending 在前，未确认的不能支撑结论）
@@ -1095,6 +1101,12 @@ fn snapshot_json(snapshot: &bod_app::observability::ObservationSnapshot) -> serd
 /// 现在开放就是把不该给的客户给出去。命令行是同一台机器上的操作者视图，
 /// 不涉及跨主体过滤，也没有把未实现的判定说成已实现。
 fn tracking(flags: &[String]) -> Result<String, String> {
+    // `bod tracking import` 是另**一个**命令：它写库，而 `tracking` 只读。
+    // 分派放在这里而不是 main 的 `match`，是因为两者共用 `tracking` 这个词根，
+    // 拆成两个 `match` 分支会让「读/写」的差别看起来像两个无关的命令。
+    if flags.first().map(String::as_str) == Some("import") {
+        return tracking_import(&flags[1..]);
+    }
     let mut db: Option<std::path::PathBuf> = None;
     let mut company = "company-default".to_string();
     let mut id: Option<String> = None;
@@ -1148,19 +1160,20 @@ fn tracking(flags: &[String]) -> Result<String, String> {
             .delivery_tracking_view(&company, &tracking_id)
             .map_err(|err| format!("读取失败：{err}"))?
             .ok_or_else(|| format!("{company} 下没有跟踪项 {tracking_id}"))?;
+        // 主体与事实在这里装配（P8 7.5.3）：CLI 面从 `bod tracking import` 起真的有入口了，
+        // 所以「允许动作」不能再用一个固定的空切片敷衍过去。
+        let (principal, allowed) = cli_allowed_actions(&store, &company, &view)?;
         if json {
-            // CLI 面上还没有任何动作入口（`delivery_api::CLI_ENTRIES` 是空表），
-            // 所以这里不列动作，也不需要装配主体事实。加第一条 CLI 写命令时要一起补
-            // `stage_facts` 与主体；用例外 `cli_surface_stays_unwired_until_facts_are_assembled`
-            // 会先红，比运行期静默返回空集更早发现问题。
             let dto = view
-                .to_dto(Vec::new())
+                .to_dto(allowed)
                 .map_err(|err| format!("投影失败：{err}"))?;
             let rendered =
                 serde_json::to_string(&dto).map_err(|err| format!("序列化失败：{err}"))?;
             return Ok(format!("{rendered}\n"));
         }
-        return Ok(bod_app::delivery_tracking::render_one(&view, &[]));
+        let mut out = bod_app::delivery_tracking::render_one(&view, &allowed);
+        let _ = writeln!(out, "\n允许动作按本机主体 {principal} 判定（CLI 面）。");
+        return Ok(out);
     }
 
     let rows = store
@@ -1194,6 +1207,274 @@ fn tracking(flags: &[String]) -> Result<String, String> {
         return Ok(format!("{rendered}\n"));
     }
     Ok(bod_app::delivery_tracking::render_list(&company, &rows))
+}
+
+/// CLI 面的主体：本机账户名，与 `serve` 读同一个来源（ADR-0007 第 6 条）。
+///
+/// **不提供 `--as`**：命令行上能改写主体，等于把审计归属交给调用方。取不到就报错，
+/// 不编一个 `local-user` 之类的占位主体——占位主体会让每次判定都去查一个不存在的成员，
+/// 把「装不上主体」写成「没有权限」。
+fn cli_principal() -> Result<bod_app::authorization::Principal, String> {
+    let id = bod_app::host_handshake::local_principal_id().ok_or_else(|| {
+        "无法确定本机主体：USERNAME / USER / LOGNAME 都不存在。\
+         交付写入与允许动作判定都要记到具体主体上，不猜。"
+            .to_string()
+    })?;
+    Ok(bod_app::authorization::Principal {
+        id: bod_app::domain::DomainId::new(id),
+        kind: bod_app::authorization::PrincipalKind::User,
+        claimed_roles: Vec::new(),
+    })
+}
+
+/// 装配主体事实并按 CLI 面算「允许动作」（P8 7.5.3 / 7.8）。
+///
+/// 事实装不上就报错，不退回空集：空事实的表现是「什么都不能做」，
+/// 而那与「你没权限」在界面上长得一模一样（`StageFactsError` 的模块注释）。
+fn cli_allowed_actions(
+    store: &bod_app::store::SqliteStore,
+    company: &str,
+    view: &bod_app::delivery_tracking::TrackingView,
+) -> Result<(String, Vec<&'static str>), String> {
+    let principal = cli_principal()?;
+    let facts = store
+        .stage_facts(company, &principal.id)
+        .map_err(|err| format!("授权事实装配失败（{}）：{}", err.as_code(), err.explain()))?;
+    let project = bod_app::domain::DomainId::new(view.tracking.project_id.clone());
+    let allowed = bod_app::delivery_api::select_allowed(
+        &view.action_candidates(),
+        &bod_app::delivery_api::available_on(bod_app::delivery_api::ActionSurface::Cli),
+        &facts,
+        &principal,
+        Some(&project),
+    );
+    Ok((principal.id.as_str().to_string(), allowed))
+}
+
+/// 取 `--flag` 后面那个值。`tracking import` 的参数多，逐个写 `get(index + 1)` 会把
+/// 「缺值」的报错文案散成十几份。
+fn flag_arg(flags: &[String], index: usize, name: &str) -> Result<String, String> {
+    flags
+        .get(index + 1)
+        .cloned()
+        .ok_or_else(|| format!("{name} 需要一个值"))
+}
+
+/// `bod tracking import`：登记一个外部来源并挂到跟踪项上（P8 7.5.3 第一条）。
+///
+/// **谁在什么时候跑它**：本机操作者（项目成员）在收到一个外部交付信号之后跑——
+/// 例如客户报了一个缺陷、某个 PR 合进了客户分支——把「这件事发生在哪」变成可跟踪的来源。
+/// 它是 ADR-0009 选 B 之后交付写入的第一条真实入口：HTTP 的五条 `POST` 仍是 `planned`，
+/// 写入只在命令行上发生，`serve` 依旧只读挂载。
+///
+/// 为什么这是**写**命令，与前三个读命令相反：它调 `SqliteStore::open`，会建库、会跑迁移。
+/// 读命令缺库当场失败（`open_readonly_for`），这里缺库就该建——不然一台新机器上
+/// 第一条交付记录永远写不进去。
+///
+/// 判定边界（**已知缺口，写在这里比藏起来好**）：本命令**不判项目成员资格**。
+/// `allowed_actions` 会在读取时按成员资格决定要不要推荐 `link-source`，
+/// 但写入侧没有对应的闸门——因为 `project_members` 至今没有生产写入者，
+/// 加上闸门会让所有人都导不进来（包括该导的人）。这条与「CLI 是同一台机器上的操作者视图」
+/// 是同一立场，等 `project_members` 有入口（7.5.3 后续与 B3）再收紧。
+fn tracking_import(flags: &[String]) -> Result<String, String> {
+    let mut db: Option<std::path::PathBuf> = None;
+    let mut company = "company-default".to_string();
+    let mut key: Option<String> = None;
+    let mut project: Option<String> = None;
+    let mut locator: Option<String> = None;
+    let mut connection_id = String::new();
+    let mut object_type: Option<String> = None;
+    let mut provider_object_id: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut requirement = String::new();
+    let mut owner: Option<String> = None;
+    let mut correlation: Option<String> = None;
+    let mut decided_at: Option<String> = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--db" => {
+                db = Some(std::path::PathBuf::from(flag_arg(flags, index, "--db")?));
+                index += 2;
+            }
+            "--company" => {
+                company = flag_arg(flags, index, "--company")?;
+                index += 2;
+            }
+            "--key" => {
+                key = Some(flag_arg(flags, index, "--key")?);
+                index += 2;
+            }
+            "--project" => {
+                project = Some(flag_arg(flags, index, "--project")?);
+                index += 2;
+            }
+            "--locator" => {
+                locator = Some(flag_arg(flags, index, "--locator")?);
+                index += 2;
+            }
+            "--connection" => {
+                connection_id = flag_arg(flags, index, "--connection")?;
+                index += 2;
+            }
+            "--object-type" => {
+                object_type = Some(flag_arg(flags, index, "--object-type")?);
+                index += 2;
+            }
+            "--provider-object-id" => {
+                provider_object_id = Some(flag_arg(flags, index, "--provider-object-id")?);
+                index += 2;
+            }
+            "--title" => {
+                title = Some(flag_arg(flags, index, "--title")?);
+                index += 2;
+            }
+            "--requirement" => {
+                requirement = flag_arg(flags, index, "--requirement")?;
+                index += 2;
+            }
+            "--owner" => {
+                owner = Some(flag_arg(flags, index, "--owner")?);
+                index += 2;
+            }
+            "--correlation" => {
+                correlation = Some(flag_arg(flags, index, "--correlation")?);
+                index += 2;
+            }
+            "--decided-at" => {
+                decided_at = Some(flag_arg(flags, index, "--decided-at")?);
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            // `--as` 明确拒绝而不是「不认识」：这个参数看起来太合理了，
+            // 静默忽略会让调用方以为归属被改了。
+            "--as" => {
+                return Err(
+                    "tracking import 不接受 --as：主体由本机账户确定，命令行上不得自报".to_string(),
+                );
+            }
+            other => return Err(format!("tracking import 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+
+    let db = db.ok_or_else(|| format!("tracking import 需要 --db <数据库路径>\n\n{USAGE}"))?;
+    let key = key.ok_or_else(|| {
+        format!("tracking import 需要 --key <幂等键>（重试要落回同一次导入）\n\n{USAGE}")
+    })?;
+    let project =
+        project.ok_or_else(|| format!("tracking import 需要 --project <项目>\n\n{USAGE}"))?;
+    let locator =
+        locator.ok_or_else(|| format!("tracking import 需要 --locator <定位>\n\n{USAGE}"))?;
+    // 主体先取：取不到就根本不该碰库。`imported_by` 与审计归属都来自它。
+    let principal = cli_principal()?;
+    let imported_by = principal.id.as_str().to_string();
+
+    let command = bod_app::delivery_source::ImportSourceCommand {
+        idempotency_key: key,
+        company_id: company.clone(),
+        project_id: project,
+        connection_id,
+        object_type,
+        provider_object_id,
+        // 标题缺省取定位：空标题会让列表里出现一行空白，编一个名字又比定位更难核对。
+        title: title.unwrap_or_else(|| locator.clone()),
+        requirement,
+        // 负责人缺省是导入者本身：导入的人先兜着，之后由 `--owner` 指定或另行指派。
+        owner_id: owner.unwrap_or_else(|| imported_by.clone()),
+        // 三个 ID 由来源身份派生（`with_derived_ids`）：它们进载荷指纹，
+        // 每次随机生成会让「同键重试」变成「同键异载荷」。
+        new_tracking_id: String::new(),
+        new_source_id: String::new(),
+        new_candidate_id: String::new(),
+        imported_by,
+        correlation_id: correlation
+            .unwrap_or_else(|| format!("cli-{}-{}", std::process::id(), now_ms())),
+        decided_at: decided_at.unwrap_or_else(|| bod_app::conformance_report::utc_stamp(now_ms())),
+        locator,
+    }
+    .with_derived_ids();
+
+    let mut store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
+        .map_err(|err| format!("tracking import 打开数据库失败：{err}"))?;
+    // 写入走事务而不是直连：`import_delivery_source` 内部用 SAVEPOINT 保证
+    // 「业务写入 + 回执 + 审计」同生共死，但外层事务仍要由调用方开——回执与审计
+    // 的可见性以提交为准，半途失败不许留下「命令已生效」的印象。
+    let outcome = {
+        let uow = store
+            .transaction()
+            .map_err(|err| format!("开启事务失败：{err}"))?;
+        let outcome = uow
+            .import_delivery_source(&command, now_ms())
+            .map_err(|err| format!("导入失败：{err}"))?;
+        uow.commit().map_err(|err| format!("提交失败：{err}"))?;
+        outcome
+    };
+
+    if json {
+        let mut value =
+            serde_json::to_value(&outcome).map_err(|err| format!("序列化失败：{err}"))?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "company_id".to_string(),
+                serde_json::Value::String(company.clone()),
+            );
+        }
+        let rendered = serde_json::to_string(&value).map_err(|err| format!("序列化失败：{err}"))?;
+        return Ok(format!("{rendered}\n"));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "公司 {company}  库 {}", db.display());
+    match (&outcome.tracking_id, &outcome.candidate_id) {
+        (Some(tracking_id), _) => {
+            let _ = writeln!(
+                out,
+                "跟踪项 {tracking_id}（{}）",
+                if outcome.created_tracking {
+                    "新建"
+                } else {
+                    "已有，未新建"
+                }
+            );
+            let _ = writeln!(
+                out,
+                "来源 {}（{}）",
+                outcome.source_id.as_deref().unwrap_or("—"),
+                if outcome.created_source {
+                    "新建"
+                } else {
+                    "已有，未新建"
+                }
+            );
+        }
+        (None, Some(candidate_id)) => {
+            // 只有定位时进候选：它不是身份，也就撑不起结论。这一支必须说清楚，
+            // 否则调用方会以为「命令成功 = 已经能跟踪了」。
+            let _ = writeln!(
+                out,
+                "候选 {candidate_id}（{}）：只有定位，还不是来源身份，需负责人确认",
+                if outcome.created_candidate {
+                    "新建"
+                } else {
+                    "已有"
+                }
+            );
+        }
+        (None, None) => {
+            let _ = writeln!(out, "导入完成，但既没有跟踪项也没有候选——这不该发生");
+        }
+    }
+    if outcome.replayed {
+        let _ = writeln!(
+            out,
+            "本次是重放：同一幂等键的载荷已经执行过，没有再次写入。"
+        );
+    }
+    Ok(out)
 }
 
 /// `bod sources`：只读列出已确认的来源身份、修订条数与待确认候选（P8 3.2）。

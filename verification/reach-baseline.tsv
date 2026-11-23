@@ -1,4 +1,4 @@
-# bod-reach-baseline v1 crate=bod-app modules=94 lines=109005
+# bod-reach-baseline v1 crate=bod-app modules=94 lines=109351
 # name	lines	reach
 store	10538	live
 manager_transfer	2678	live
@@ -6,7 +6,7 @@ rebuild_precheck	2418	live
 context_handoff	2360	live
 takeover_review	2332	live
 staff_continuation	2297	orphan
-authorization	2044	live
+authorization	2065	live
 stage_manifest	1981	live
 catalog_upgrade	1911	orphan
 takeover_intent	1866	live
@@ -26,6 +26,7 @@ handoff_event	1440	live
 continuation_card	1439	orphan
 handoff_snapshot	1425	live
 workspace_safety	1373	live
+delivery_api	1366	live
 host_handshake	1322	live
 feedback_knowledge	1309	test_only
 impact_revalidation	1308	live
@@ -37,16 +38,15 @@ scope_boundary	1278	orphan
 durable_process	1263	live
 remote_delegation	1262	live
 extension_sdk	1234	test_only
-delivery_tracking	1231	live
+delivery_tracking	1224	live
 isolation_check	1196	live
 effect_reconciliation	1151	orphan
 handoff_manifest	1149	live
 mobile_control	1137	test_only
 workbench_projection	1126	live
-delivery_api	1112	live
 handoff_drill	1064	live
+delivery_source	1048	live
 budget_admission	1034	live
-delivery_source	983	live
 handoff_facts	950	live
 http_router	946	live
 conformance_report	916	live
@@ -60,14 +60,14 @@ lifecycle_recovery	827	live
 local_process	819	live
 desktop_lifecycle	810	orphan
 capability_dispatch	785	live
+canonical_json	776	live
 event_stream	765	live
 invocation	760	live
-canonical_json	757	live
 migration_safety	747	live
 config	731	live
-delivery_link	680	live
 audit_log	678	live
 cancel_reconciliation	678	live
+delivery_link	674	live
 verification_registry	653	live
 drill	649	live
 cas	637	live
