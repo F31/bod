@@ -33,8 +33,21 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       # --no-fail-fast：任一测试二进制失败时仍跑完其余，避免总数骤降掩盖第二条红灯。
+      #
+      # 为什么要 `tee` 一份日志：这条步骤从 2026-11-21 起一直红，而匿名访问
+      # `/actions/jobs/{id}/logs` 是 403，失败用例名根本拿不到——红灯就成了一条
+      # 无法处置的红灯。日志只在失败时上传（见下一步），正常跑不受影响。
+      # GitHub 的 bash 默认带 `-eo pipefail`，所以 `| tee` 不会吞掉 cargo 的退出码。
       - name: 全量测试
-        run: cargo test --workspace --no-fail-fast
+        shell: bash
+        run: cargo test --workspace --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+      - name: 上传失败日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-test-linux
+          path: ${{ runner.temp }}/cargo-test.log
+          if-no-files-found: warn
       - name: 门禁 G-1/G-50
         run: cargo run -q -p xtask -- verify --stage P0
       - name: 迁移检查
