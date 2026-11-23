@@ -2230,6 +2230,20 @@ fn delivery_wiring(path: &std::path::Path, company: &str) -> Result<DeliveryWiri
     })
 }
 
+/// 退出时撤掉描述文件（正常停止与启动中途失败都走这条路径）。
+///
+/// `HostServer` 自己的 `Drop` 也会删一次，重复删除无害；这里管的是**还没走到 `run`
+/// 就失败**的那些路径：装配产品接口、打印就绪行。
+struct DescriptorCleanup {
+    path: std::path::PathBuf,
+}
+
+impl Drop for DescriptorCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// `bod serve`：起本地控制面，阻塞到收到带会话密钥的停止请求。
 ///
 /// P0 的控制面只做握手与生命周期，不承载业务命令；业务库的**写入**仍由命令层独占。
@@ -2303,6 +2317,13 @@ fn serve(flags: &[String]) -> Result<String, String> {
     let feed = std::sync::Arc::new(bod_app::event_stream::MemoryFeed::with_capacity(1024));
     let mut server = HostServer::bind_with_feed(&listen, &descriptor_path, now_ms(), feed.clone())
         .map_err(|err| format!("宿主启动失败：{err}"))?;
+    // 描述文件是**就绪凭证**：写出之后任何启动步骤失败，都必须把它撤掉。
+    // 留在盘上就等于对外声称「这个地址在服务」，而实际连接会被拒（Windows 上是 10061）——
+    // 消费方（spawner、测试、别的守护进程）只能看到一个说谎的文件。
+    // 用 RAII 而不是在每个 `?` 前手工删：漏一处就又留下一个说谎的文件。
+    let _descriptor_cleanup = DescriptorCleanup {
+        path: descriptor_path.clone(),
+    };
     // 产品接口装配（P8 7.6.2）：主体在**这里**定一次，请求无权改。
     let product_api = match &database {
         Some(path) => {
