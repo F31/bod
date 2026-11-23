@@ -545,3 +545,21 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
       读数来源：`GET /repos/F31/bod/actions/runs` 过滤 `70eb8e7`，再取
       `/actions/runs/{id}/jobs` 的 step 级 conclusion。
       **这之后才可以说「CI 绿」**——而它只覆盖到这一刻的 `70eb8e7`，不是永久状态。
+- [x] 7.10.9 **又一次新红（`2e57e54`）**：`rust (windows)` 的「全量测试」失败，唯一用例
+      `handoff_sample::tests::two_real_runtimes_reach_an_evidenced_l2_claim`——
+      第二个运行时（node `v22.23.5`）`fail@produce/produce_no_output`，用时 15152 ms，
+      正好压着 `SAMPLE_TIMEOUT`（15 s）。与 7.5.3.2 的改动无关（`handoff_sample` 未触碰）。
+      本机不可复现：本机 node `v22.22.2` / Python `3.13.14` 全绿，CI 是 node `v22.23.5` /
+      Python `3.12.10`。**不猜**，只做两件不依赖复现的事：
+      （a）**让现场可读**：`SampleConfig` 加默认方法 `diagnostic_tail()`，
+      `DurableSampleConfig` 覆写为「会话目录 `events.log` 尾部原文」（每会话 5 行、
+      总长截到 800 字符）。此前 `produce_no_output` 只说「读到 0 条观察」，分不清
+      「进程崩了（stderr 有报错）」「活着但什么都没写（文件空）」「写到别处」——
+      三者处置完全不同，而 CI 上不可复现，现场只能靠这段原文带出来。
+      用例 `failed_sample_carries_the_session_log_tail` 钉住它（含「空目录返回 None，
+      不编一段现场」）。
+      （b）**抹平一处实现不一致**：Python 分支一直显式 `flush=True`，node 分支靠
+      `console.log` 的运行时默认。样本按「行落进会话文件」判断有没有产出，刷新时机
+      不该由运行时决定 → node 改成 `fs.writeSync(1, …)`。
+      **没有**加超时余量、**没有**改成 skip：那两种都是让红灯消失，不是让原因消失。
+      下一次 CI 若仍红，注解里会带出 node 自己的输出，那时再判。

@@ -92,6 +92,16 @@ pub trait SampleConfig {
         phase: Phase,
         snapshot: Option<&Path>,
     ) -> Result<Box<dyn StartTransport>, String>;
+
+    /// 失败时能读到的现场：子进程自己往会话目录里写了什么。
+    ///
+    /// 默认没有——样本配置不一定把子进程输出留在盘上。`DurableSampleConfig` 覆写它：
+    /// 它的 stdout/stderr 都追加进会话目录的 `events.log`，而 `produce_no_output`
+    /// 这类失败原本只报「读到 0 条观察」，不带这段文本就分不清三件事：
+    /// 进程崩了、进程活着但什么都没写、写到了别处。
+    fn diagnostic_tail(&self) -> Option<String> {
+        None
+    }
 }
 
 /// 人工介入的实测值。
@@ -273,6 +283,10 @@ impl SampleConfig for DurableSampleConfig {
         self.profile.clone()
     }
 
+    fn diagnostic_tail(&self) -> Option<String> {
+        diagnostic_of_events(&self.config.root)
+    }
+
     fn open(
         &self,
         phase: Phase,
@@ -386,6 +400,9 @@ fn phase_args(
     phase: Phase,
     snapshot: Option<&Path>,
 ) -> Result<Vec<String>, String> {
+    // node 分支用 `fs.writeSync(1, …)` 而不是 `console.log`：样本按「行落进会话文件」
+    // 判断有没有产出，而 `console.log` 往重定向句柄写时的刷新时机由运行时决定。
+    // Python 那边一直显式 `flush=True`——同一件事两个实现不该不一样。
     let script = match (is_node(executable), phase) {
         (false, Phase::Produce) | (false, Phase::Replay) => {
             "import time\nprint('sample: checkpoint 1', flush=True)\nprint('sample: checkpoint 2', flush=True)\ntime.sleep(20)"
@@ -394,10 +411,10 @@ fn phase_args(
             "import json,sys,time\nsnap=json.load(open(sys.argv[1]))\nprint('sample: resume from %d' % snap['last_sequence'], flush=True)\nprint('sample: checkpoint 3', flush=True)\ntime.sleep(5)"
         }
         (true, Phase::Produce) | (true, Phase::Replay) => {
-            "console.log('sample: checkpoint 1');console.log('sample: checkpoint 2');setTimeout(()=>{},20000);"
+            "const fs=require('fs');const say=(t)=>{fs.writeSync(1,t+'\\n')};say('sample: checkpoint 1');say('sample: checkpoint 2');setTimeout(()=>{},20000);"
         }
         (true, Phase::Resume) => {
-            "const fs=require('fs');const s=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log('sample: resume from '+s.last_sequence);console.log('sample: checkpoint 3');setTimeout(()=>{},5000);"
+            "const fs=require('fs');const s=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const say=(t)=>{fs.writeSync(1,t+'\\n')};say('sample: resume from '+s.last_sequence);say('sample: checkpoint 3');setTimeout(()=>{},5000);"
         }
     };
     let mut args = if is_node(executable) {
@@ -528,7 +545,11 @@ fn sample_steps(
         return StepOutcome::Failed(StepFailure::new(
             SampleStep::Produce,
             "produce_no_output",
-            format!("只读到 {} 条观察，期望两个检查点", produced.len()),
+            format!(
+                "只读到 {} 条观察，期望两个检查点{}",
+                produced.len(),
+                diagnostic_suffix(config)
+            ),
         ));
     }
     let payloads: Vec<&str> = produced.iter().map(|item| item.payload.as_str()).collect();
@@ -606,7 +627,7 @@ fn sample_steps(
         return StepOutcome::Failed(StepFailure::new(
             SampleStep::Resume,
             "resume_no_output",
-            "续跑没有任何输出".to_string(),
+            format!("续跑没有任何输出{}", diagnostic_suffix(config)),
         ));
     }
     let first = resumed[0].payload.clone();
@@ -742,6 +763,66 @@ fn replay_check(
         ));
     }
     Ok(4)
+}
+
+/// 失败信息里的现场尾巴。没有就返回空串，不写「无」——那是另一种噪音。
+fn diagnostic_suffix(config: &dyn SampleConfig) -> String {
+    match config.diagnostic_tail() {
+        Some(tail) if !tail.trim().is_empty() => {
+            format!("\n现场（会话目录 events.log）：\n{tail}")
+        }
+        _ => String::new(),
+    }
+}
+
+/// 会话目录里 `events.log` 的尾部原文。只读，不解析、不判定。
+///
+/// 为什么需要它：`produce_no_output` 原本只说「读到 0 条观察」。同一条报错背后可能是
+/// 进程崩了（stderr 里有报错）、进程活着但什么都没写（文件是空的）、或者写到别处。
+/// 这三种的处置完全不同，而 CI 上又不可复现——现场只能靠这段原文带出来。
+///
+/// 每个会话目录取最后 `TAIL_LINES` 行，总长截到 `TAIL_LIMIT` 字符：
+/// 失败信息要能贴进 CI 注解，太长反而看不到重点。
+fn diagnostic_of_events(root: &Path) -> Option<String> {
+    const TAIL_LINES: usize = 5;
+    const TAIL_LIMIT: usize = 800;
+    let mut sessions: Vec<PathBuf> = fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    if sessions.is_empty() {
+        return None;
+    }
+    sessions.sort();
+    let mut out = String::new();
+    for dir in sessions {
+        let name = dir
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let text = fs::read_to_string(dir.join("events.log")).unwrap_or_default();
+        if text.trim().is_empty() {
+            out.push_str(&format!("{name}/events.log: （空或不存在）\n"));
+            continue;
+        }
+        let mut tail: Vec<&str> = text.lines().rev().take(TAIL_LINES).collect();
+        tail.reverse();
+        out.push_str(&format!("{name}/events.log 末 {} 行:\n", tail.len()));
+        for line in tail {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    if out.len() > TAIL_LIMIT {
+        // 按字符截断会切开中文：退到最近的 char 边界。
+        let mut end = TAIL_LIMIT;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push_str("…（已截断）\n");
+    }
+    Some(out)
 }
 
 fn poll(
@@ -1126,6 +1207,41 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 失败现场：会话目录里的 `events.log` 要被带出来。
+    ///
+    /// 这是给「CI 上不可复现」准备的。没有这段原文，`produce_no_output` 只能说
+    /// 「读到 0 条观察」，而进程崩了（stderr 有报错）、进程活着但什么都没写（文件是空的）、
+    /// 写到别处，这三件事的处置完全不同。
+    #[test]
+    fn failed_sample_carries_the_session_log_tail() {
+        let base = temp_root("diag");
+        fs::create_dir_all(base.join("inv-sample-1")).expect("建会话目录");
+        fs::write(
+            base.join("inv-sample-1").join("events.log"),
+            "第一行\n第二行\nbootstrap failed: cannot find module\n",
+        )
+        .expect("写事件文件");
+        let tail = durable(&base, "python3", 1_763_600_000_000)
+            .diagnostic_tail()
+            .expect("应能读到现场");
+        assert!(tail.contains("bootstrap failed"), "{tail}");
+        assert!(tail.contains("inv-sample-1"), "{tail}");
+        assert!(tail.contains("末 3 行"), "要说清带出的是几行：{tail}");
+
+        // 空会话根目录不是错误：返回 None，失败信息里就不会多一段空壳。
+        let empty = temp_root("diag-empty");
+        fs::create_dir_all(&empty).expect("建空目录");
+        assert!(
+            durable(&empty, "python3", 1_763_600_000_000)
+                .diagnostic_tail()
+                .is_none(),
+            "没有会话目录时不该编一段现场出来"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&empty);
     }
 
     /// 样本确实验了「接续」而不是「重来」：产出的序号被续跑端回声。
