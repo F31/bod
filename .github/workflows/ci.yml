@@ -65,8 +65,15 @@ jobs:
         run: |
           set +e
           log="$RUNNER_TEMP/cargo-test.log"
-          names=$(grep -E '^    [A-Za-z0-9_]+(::[A-Za-z0-9_]+)+$' "$log" 2>/dev/null \
-            | sed 's/^ *//' | sort -u | head -10 | paste -sd, -)
+          # 用例名有两种形态：`mod::test`（模块内）与 `test`（测试二进制根上，比如
+          # `every_cited_target_exists_on_disk`）。上一版正则要求至少一个 `::`，把
+          # 根上的名字整个丢掉，注解写着「没认出用例名」——那比不给名字更误导：
+          # 会让人以为失败不在断言上。只在 `failures:` 之后的缩进清单里取。
+          names=$(awk '
+            /^failures:$/ { inblk = 1; next }
+            inblk && /^    [A-Za-z0-9_]+(::[A-Za-z0-9_]+)*$/ { sub(/^    /, ""); print; next }
+            inblk { inblk = 0 }
+          ' "$log" 2>/dev/null | sort -u | head -10 | paste -sd, -)
           [ -z "$names" ] && names="（没认出用例名：可能不是断言失败，见下一条注解）"
           echo "::error title=cargo test 失败用例::${names}"
           body=$(awk '/^failures:$/{flag=1} flag' "$log" 2>/dev/null | head -120 | cut -c1-200 | tr '\n' '~')
@@ -95,8 +102,35 @@ jobs:
       - name: 安装钉住的工具链
         run: rustup show
       - uses: Swatinem/rust-cache@v2
+      # 与 linux job 同一套：保留日志 + 失败时把用例名顶成注解。
+      # 两个平台都红过，只诊断一边等于把另一半留在黑暗里。
       - name: 全量测试
-        run: cargo test --workspace --no-fail-fast
+        shell: bash
+        run: cargo test --workspace --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+      - name: 上传失败日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-test-windows
+          path: ${{ runner.temp }}/cargo-test.log
+          if-no-files-found: warn
+      - name: 把失败摘要写进注解
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          log="$RUNNER_TEMP/cargo-test.log"
+          names=$(awk '
+            /^failures:$/ { inblk = 1; next }
+            inblk && /^    [A-Za-z0-9_]+(::[A-Za-z0-9_]+)*$/ { sub(/^    /, ""); print; next }
+            inblk { inblk = 0 }
+          ' "$log" 2>/dev/null | sort -u | head -10 | paste -sd, -)
+          [ -z "$names" ] && names="（没认出用例名：可能不是断言失败，见下一条注解）"
+          echo "::error title=cargo test 失败用例::${names}"
+          body=$(awk '/^failures:$/{flag=1} flag' "$log" 2>/dev/null | head -120 | cut -c1-200 | tr '\n' '~')
+          [ -z "$body" ] && body=$(tail -40 "$log" 2>/dev/null | cut -c1-200 | tr '\n' '~')
+          echo "::error title=cargo test 失败段::$(printf '%s' "$body" | cut -c1-6000)"
+          exit 0
 
   openspec:
     name: openspec (linux)
