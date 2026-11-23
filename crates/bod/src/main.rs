@@ -72,6 +72,13 @@ const USAGE: &str = "\
       --title <标题> / --requirement <用户要求> / --owner <负责人>   缺省：标题取定位、负责人取导入者
       --correlation <id> / --decided-at <RFC3339>   审计用；缺省取本进程与当前时刻
       --json   机器可读；与重复执行时的重放结果同形
+  bod tracking link --db <path> --id <跟踪项> --key <幂等键> --expected-version <版本>
+      追加一条关联（写命令）：--source <来源 ID> 或 --work-package <工作包修订>，二选一
+      --expected-version 取自 `bod tracking --id <跟踪项> --json` 的 version；
+      版本不一致会拒绝（带当前版本），重读后带上新版本重试即可
+      --target <客户>:<环境>[:<部署单元>]   可重复；已有目标按身份命中，缺的才新建
+      --correlation <id> / --decided-at <RFC3339>   审计用
+      --json   机器可读（含 link_id、appended、version、created_targets）
   bod sources --db <path>          列已确认的来源身份与修订条数（只读；候选不计入）
   bod sources --db <path> --project <id>   只看某个项目的来源
   bod sources --db <path> --candidates     附上来源候选（pending 在前，未确认的不能支撑结论）
@@ -1101,11 +1108,13 @@ fn snapshot_json(snapshot: &bod_app::observability::ObservationSnapshot) -> serd
 /// 现在开放就是把不该给的客户给出去。命令行是同一台机器上的操作者视图，
 /// 不涉及跨主体过滤，也没有把未实现的判定说成已实现。
 fn tracking(flags: &[String]) -> Result<String, String> {
-    // `bod tracking import` 是另**一个**命令：它写库，而 `tracking` 只读。
-    // 分派放在这里而不是 main 的 `match`，是因为两者共用 `tracking` 这个词根，
-    // 拆成两个 `match` 分支会让「读/写」的差别看起来像两个无关的命令。
-    if flags.first().map(String::as_str) == Some("import") {
-        return tracking_import(&flags[1..]);
+    // `tracking import` / `tracking link` 是另**一些**命令：它们写库，而 `tracking` 只读。
+    // 分派放在这里而不是 main 的 `match`，是因为它们共用 `tracking` 这个词根，
+    // 拆成多个 `match` 分支会让「读/写」的差别看起来像几个无关的命令。
+    match flags.first().map(String::as_str) {
+        Some("import") => return tracking_import(&flags[1..]),
+        Some("link") => return tracking_link(&flags[1..]),
+        _ => {}
     }
     let mut db: Option<std::path::PathBuf> = None;
     let mut company = "company-default".to_string();
@@ -1475,6 +1484,229 @@ fn tracking_import(flags: &[String]) -> Result<String, String> {
         );
     }
     Ok(out)
+}
+
+/// `bod tracking link`：给跟踪项补挂一个来源身份或内部工作包（P8 7.5.3 第二条）。
+///
+/// **谁在什么时候跑它**：操作者在「这条交付对应哪个工作包 / 哪个外部 PR」确定之后补挂。
+/// 导入只回答「这件事发生在哪」，`link` 回答「它对应我们哪一段工作」——
+/// 两者分开是因为它们常常不是同时知道的：缺陷先到，归属后定。
+///
+/// **`--expected-version` 必填，不从库里自动读**。这一条看着不友好，但它就是 3.4 的全部：
+/// 命令行的「读一次再写」没有原子性，若让本命令自己读当前版本，读和写之间那段窗口里
+/// 别人的写入会被静默吞进本次决定——闸门 100% 不会触发，等于把期望版本删了。
+/// 所以操作流程是两步：先 `bod tracking --id <跟踪项> --json` 读 `version`，再带上来写。
+/// 版本过期是**正常结果**，不是 bug：它的含义是「你按旧状态下的决定在写」。
+/// 冲突时错误信息带当前版本，重读一次再提交即可。
+///
+/// 与前两条命令一样：主体取本机账户（`--as` 明确拒绝），写库走
+/// `transaction → append_delivery_link → commit`（`SAVEPOINT` 在里层）。
+fn tracking_link(flags: &[String]) -> Result<String, String> {
+    let mut db: Option<std::path::PathBuf> = None;
+    let mut company = "company-default".to_string();
+    let mut tracking_id: Option<String> = None;
+    let mut key: Option<String> = None;
+    let mut source: Option<String> = None;
+    let mut work_package: Option<String> = None;
+    let mut expected_version: Option<u64> = None;
+    let mut targets: Vec<bod_app::delivery_api::TargetRef> = Vec::new();
+    let mut correlation: Option<String> = None;
+    let mut decided_at: Option<String> = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--db" => {
+                db = Some(std::path::PathBuf::from(flag_arg(flags, index, "--db")?));
+                index += 2;
+            }
+            "--company" => {
+                company = flag_arg(flags, index, "--company")?;
+                index += 2;
+            }
+            "--id" => {
+                tracking_id = Some(flag_arg(flags, index, "--id")?);
+                index += 2;
+            }
+            "--key" => {
+                key = Some(flag_arg(flags, index, "--key")?);
+                index += 2;
+            }
+            "--source" => {
+                source = Some(flag_arg(flags, index, "--source")?);
+                index += 2;
+            }
+            "--work-package" => {
+                work_package = Some(flag_arg(flags, index, "--work-package")?);
+                index += 2;
+            }
+            "--expected-version" => {
+                let raw = flag_arg(flags, index, "--expected-version")?;
+                // 自增版本号从 1 开始：收到 0 说明调用方在拿「没读过」当默认值。
+                let parsed = raw.parse::<u64>().map_err(|_| {
+                    format!("--expected-version 需要正整数（当前跟踪项版本），收到 {raw}")
+                })?;
+                expected_version = Some(parsed);
+                index += 2;
+            }
+            "--target" => {
+                targets.push(parse_target(&flag_arg(flags, index, "--target")?)?);
+                index += 2;
+            }
+            "--correlation" => {
+                correlation = Some(flag_arg(flags, index, "--correlation")?);
+                index += 2;
+            }
+            "--decided-at" => {
+                decided_at = Some(flag_arg(flags, index, "--decided-at")?);
+                index += 2;
+            }
+            "--json" => {
+                json = true;
+                index += 1;
+            }
+            // 同 `import`：`--as` 看起来合理，静默忽略会让调用方以为归属改了。
+            "--as" => {
+                return Err(
+                    "tracking link 不接受 --as：主体由本机账户确定，命令行上不得自报".to_string(),
+                );
+            }
+            other => return Err(format!("tracking link 不支持参数 {other}\n\n{USAGE}")),
+        }
+    }
+
+    let db = db.ok_or_else(|| format!("tracking link 需要 --db <数据库路径>\n\n{USAGE}"))?;
+    let tracking_id =
+        tracking_id.ok_or_else(|| format!("tracking link 需要 --id <跟踪项>\n\n{USAGE}"))?;
+    let key = key.ok_or_else(|| {
+        format!("tracking link 需要 --key <幂等键>（重试要落回同一次追加）\n\n{USAGE}")
+    })?;
+    let expected_version = expected_version.ok_or_else(|| {
+        format!(
+            "tracking link 需要 --expected-version <当前版本>：\
+             先跑 `bod tracking --id <跟踪项> --json` 读 version。\
+             本命令不会替你读——那样读与写之间的写入会被静默吞掉\n\n{USAGE}"
+        )
+    })?;
+    // 二选一交给 `LinkRef::from_options`：它已经区分「都没给」与「都给了」，
+    // 在这里重写一遍判断，就等于多一处会与它漂移的规则。
+    let link = bod_app::delivery_link::LinkRef::from_options(source, work_package)
+        .map_err(|err| format!("{}（{}）", err.explain(), err.code()))?;
+
+    let principal = cli_principal()?;
+    let linked_by = principal.id.as_str().to_string();
+    let now = now_ms();
+
+    let command = bod_app::delivery_link::AppendLinkCommand {
+        idempotency_key: key,
+        company_id: company.clone(),
+        tracking_id: tracking_id.clone(),
+        link,
+        targets,
+        expected_version,
+        linked_by,
+        correlation_id: correlation
+            .unwrap_or_else(|| format!("cli-{}-{}", std::process::id(), now)),
+        decided_at: decided_at.unwrap_or_else(|| bod_app::conformance_report::utc_stamp(now)),
+    };
+
+    let mut store = bod_app::store::SqliteStore::open(&db, &BodConfig::default())
+        .map_err(|err| format!("tracking link 打开数据库失败：{err}"))?;
+    let outcome = {
+        let uow = store
+            .transaction()
+            .map_err(|err| format!("开启事务失败：{err}"))?;
+        let outcome = uow.append_delivery_link(&command, now).map_err(|err| {
+            // 版本冲突是这条命令**预期会**给出的答案，不是「系统坏了」：
+            // 把下一步动作写进提示里，否则它会被当成 bug 报上来。
+            let hint = match &err {
+                bod_app::store::StoreError::Link(
+                    bod_app::delivery_link::LinkError::VersionConflict { current, .. },
+                ) => format!(
+                    "\n当前版本是 {current}。下一步：重跑 `bod tracking --db {} --id {}` \
+                     确认状态仍是你以为的那样，再带 --expected-version {current} 重试。",
+                    db.display(),
+                    tracking_id
+                ),
+                _ => String::new(),
+            };
+            format!("追加关联失败：{err}{hint}")
+        })?;
+        uow.commit().map_err(|err| format!("提交失败：{err}"))?;
+        outcome
+    };
+
+    if json {
+        let mut value =
+            serde_json::to_value(&outcome).map_err(|err| format!("序列化失败：{err}"))?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "company_id".to_string(),
+                serde_json::Value::String(company.clone()),
+            );
+        }
+        let rendered = serde_json::to_string(&value).map_err(|err| format!("序列化失败：{err}"))?;
+        return Ok(format!("{rendered}\n"));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "公司 {company}  库 {}", db.display());
+    let _ = writeln!(
+        out,
+        "跟踪项 {tracking_id}  关联 {}（{}）",
+        outcome.link_id,
+        if outcome.appended {
+            "已追加"
+        } else {
+            "已存在，未重复写"
+        }
+    );
+    if !outcome.created_targets.is_empty() {
+        let _ = writeln!(
+            out,
+            "新建目标 {} 个：{}",
+            outcome.created_targets.len(),
+            outcome.created_targets.join(", ")
+        );
+    }
+    let _ = writeln!(out, "版本：{}", outcome.version);
+    if outcome.replayed {
+        let _ = writeln!(
+            out,
+            "本次是重放：同一幂等键的命令已经执行过，没有再次写入。\
+             版本是当时的版本（{0}），不是现在读到的版本。",
+            outcome.version
+        );
+    } else if !outcome.appended {
+        // 纯重复不推进版本（3.4 第 1 条）：说清楚，否则「版本没变」看起来像没生效。
+        let _ = writeln!(
+            out,
+            "关系与目标本来就在，版本没有推进——这不是失败，重复上报不该让别人的期望版本过期。"
+        );
+    }
+    Ok(out)
+}
+
+/// `--target <客户>:<环境>[:<部署单元>]` → 一个目标。
+///
+/// 分隔符选 `:` 而不是空白：目标身份三段里没有一段允许空格（`environment` 空白即拒绝），
+/// 而 shell 里 `--target acme:prod` 不用引号。第三段缺省与空串都表示「整个环境」，
+/// 与存储层只有一种写法这件事对齐（`NormalizedTarget` 的注释）。
+fn parse_target(raw: &str) -> Result<bod_app::delivery_api::TargetRef, String> {
+    let mut parts = raw.splitn(3, ':');
+    let customer_id = parts.next().unwrap_or_default().to_string();
+    let environment = parts.next().ok_or_else(|| {
+        format!("--target 需要 <客户>:<环境>[:<部署单元>]，收到 {raw}（缺环境就不知道是哪个目标）")
+    })?;
+    let unit = parts.next();
+    Ok(bod_app::delivery_api::TargetRef {
+        customer_id,
+        environment: environment.to_string(),
+        deployment_unit: match unit {
+            None | Some("") => None,
+            Some(value) => Some(value.to_string()),
+        },
+    })
 }
 
 /// `bod sources`：只读列出已确认的来源身份、修订条数与待确认候选（P8 3.2）。

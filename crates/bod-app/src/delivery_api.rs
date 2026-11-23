@@ -413,7 +413,8 @@ pub enum ActionSurface {
 
 /// CLI 入口表：动作码 → 承载它的子命令。
 ///
-/// 第一条条目随 `bod tracking import` 落地（P8 7.5.3）。加条目要同时满足两件事，
+/// 第一条条目随 `bod tracking import` 落地（P8 7.5.3），7.5.3.2 起指向真正承载
+/// `link-source` 的子命令 `bod tracking link`。加条目要同时满足两件事，
 /// 否则视图会宣称一个跑不起来的动作：
 ///
 /// 1. 子命令真的存在且真的写库（`bod` crate 的用例
@@ -423,7 +424,12 @@ pub enum ActionSurface {
 ///
 /// 表里写子命令全文而不只写名字：将来出现 `bod tracking import --dry-run` 这类
 /// 只在特定形态下可用的入口时，「有这个码」与「这个码在哪个命令上」不能含糊。
-pub const CLI_ENTRIES: &[(&str, &str)] = &[(ACTION_LINK_SOURCE, "bod tracking import")];
+///
+/// **`bod tracking import` 不登记动作码**（7.5.3.2 纠正）。`allowed_actions` 回答的是
+/// 「对这条**已有**跟踪项能做什么」，而 import 是创建跟踪项的入口——它甚至可能在
+/// 一条跟踪项都还没有的时候跑。上一轮为了让 CLI 面非空把它登记成 `link-source`，
+/// 那是权宜：视图说「你能 link」而命令在 import，两边指的都不是同一件事。
+pub const CLI_ENTRIES: &[(&str, &str)] = &[(ACTION_LINK_SOURCE, "bod tracking link")];
 
 /// 该调用面上真有入口的动作码。
 pub fn available_on(surface: ActionSurface) -> Vec<&'static str> {

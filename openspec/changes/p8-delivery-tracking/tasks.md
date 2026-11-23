@@ -346,9 +346,39 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
         `allowed_actions` 会按成员资格决定要不要推荐 `link-source`，但 `import` 不拦——
         因为 `project_members` 至今没有生产写入者，加闸门会让所有人都导不进来（包括该导的人）。
         等 `project_members` 有入口（B3）再收紧。**不得**因此说「写入口已按权限放行」。
-- [ ] 7.5.3.2 `bod tracking link`（原 links）：追加工作包关联，复用
+- [x] 7.5.3.2 `bod tracking link`（原 links）：追加工作包关联，复用
       `UnitOfWork::append_delivery_link` 与 `expected_version` 语义；谁调用它＝
-      操作者在「这条交付对应哪个工作包/PR」确定之后补挂。
+      操作者在「这条交付对应哪个工作包/PR」确定之后补挂。**已落（2026-11-23）**：
+      - 子命令：`bod tracking link --db <path> --id <跟踪项> --key <幂等键>
+        --expected-version <n> (--source <来源 ID> | --work-package <工作包修订>)
+        [--target <客户>:<环境>[:<部署单元>]]… [--correlation / --decided-at] [--json]`。
+      - **谁在什么时候跑它**：操作者在「这条交付对应我们哪一段工作」确定之后补挂。
+        导入回答「这件事发生在哪」，`link` 回答「它对应哪个工作包 / 哪个外部 PR」——
+        两者分开是因为它们常常不是同时知道的：缺陷先到，归属后定。
+      - **`--expected-version` 必填，命令自己不读当前版本**。这是本轮唯一的判断点。
+        HTTP 上版本由请求体携带；命令行上若让命令自己「读一次再写」，读与写之间那段
+        窗口里别人的写入会被静默吞进本次决定——闸门 100% 不会触发，等于把 3.4 的期望版本
+        删掉。因此流程是两步：先 `bod tracking --id <跟踪项> --json` 读 `version`，再带上来写。
+        代价是交互式使用时多一步；**收益是「过期」这个答案真的存在**——它有测试
+        （`link_refuses_a_stale_expected_version_and_names_the_current_one`），
+        而且冲突时错误里直接给当前版本与可照抄的下一步命令，避免被当成 bug 报上来。
+      - 二选一（`--source` / `--work-package`）交给 `LinkRef::from_options`：它已经区分
+        「都没给」与「都给了」，CLI 不重写一遍判断——多一处规则就多一处会漂移的地方。
+      - `--target` 按 `<客户>:<环境>[:<部署单元>]` 解析，可重复；**已有目标按身份四段命中**
+        （不是按 `target_id`），缺的才新建。新建目标没有验收条件与开关状态，
+        所以补挂一个未验收目标会把结论从「全覆盖」退回「有缺口」——那不是副作用，是事实。
+      - **`CLI_ENTRIES` 语义纠正**：`link-source` 现在指向 `bod tracking link`。
+        7.5.3.1 为了让 CLI 面非空，曾把它登记到 `bod tracking import`；那是权宜——
+        视图说「你能 link」而命令在 import，两边指的不是同一件事。
+        `import` 是创建跟踪项的入口（可能在任何跟踪项都还没有时跑），不在
+        「对这条**已有**跟踪项能做什么」的值域里，所以它不占动作码。
+      - 已知缺口与 7.5.3.1 同一条：写入侧**不判项目成员资格**（`project_members` 仍无
+        生产写入者）。`allowed_actions` 会在读取时按成员资格决定是否推荐 `link-source`，
+        但 `link` 不拦。**不得**因此说「写入口已按权限放行」。
+      - 证据：`delivery_tracking_cli` 21 passed（+6：追加工作包并推进版本、
+        过期版本拒绝且指出当前版本与下一步、同键重放返回首次结果里的版本而非今天的、
+        引用「都不给」与「都给」分别报错、缺期望版本时说明为何不代读、
+        按身份补目标只建缺的那个）。
 - [ ] 7.5.3.3 `bod tracking observe`（原 observations）：登记部署/回滚/人工补证；
       乱序按来源序列处理，人工补证的空备注由写入原语拒绝。
 - [ ] 7.5.3.4 `bod tracking draft`（原 drafts）：装配草稿，**不外发**；无模型路径同结论。
@@ -425,6 +455,9 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
       `every_cli_entry_is_wired_to_a_registered_requirement`（每条目的要么有登记需求、
       要么有子命令全文、要么出现在 `available_on(Cli)`，缺一即红）+
       `the_cli_surface_advertises_link_source_to_a_member`（面非空时动作真的出现）；
+      7.5.3.2 起表里那条指向 `bod tracking link`——真正承载 `link-source` 的子命令；
+      `bod tracking import` 不再占码（它创建跟踪项，不在「对已有跟踪项能做什么」的
+      值域里，理由见 7.5.3.2）；
       （e）`available_on(Http)` **仍是哨兵**：两条动作路由仍是 planned，变非空即要求
       补断言与端到端。
       另有 `bod` crate 的 `the_command_named_in_the_entry_table_actually_exists`：

@@ -651,7 +651,7 @@ fn tracking_detail_advertises_link_source_only_to_a_project_member() {
         actions
             .iter()
             .any(|item| item.as_str() == Some("link-source")),
-        "成员应看到 link-source（CLI 面已有 `bod tracking import`）：{member}"
+        "成员应看到 link-source（CLI 面已有 `bod tracking link`）：{member}"
     );
 }
 
@@ -670,4 +670,288 @@ fn the_command_named_in_the_entry_table_actually_exists() {
             "入口表写着 {action} 由 `{command}` 承载，但 --help 里没有这条命令"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 关联追加的写入口（P8 7.5.3.2）
+// ---------------------------------------------------------------------------
+//
+// `bod tracking link` 是第二条真实写入口。3.4 的写原语早就在，缺的只是操作者手上有
+// 一个能跑的命令——以及 `expected_version` 到底由谁给出这件事，在命令行上没有 HTTP
+// 请求体可以携带。这一组用例钉住的是**入口的语义**，不是写原语（后者在 store 用例里）。
+
+fn link_args<'a>(
+    db: &'a str,
+    key: &'a str,
+    flag: &'a str,
+    value: &'a str,
+    expected_version: &'a str,
+) -> Vec<&'a str> {
+    vec![
+        "tracking",
+        "link",
+        "--db",
+        db,
+        "--id",
+        "dt-1",
+        "--key",
+        key,
+        "--expected-version",
+        expected_version,
+        flag,
+        value,
+        "--json",
+    ]
+}
+
+/// 补挂内部工作包：写进去、版本推进、读得到。
+///
+/// 这是「导入之后再定归属」的常用顺序：缺陷先到，工作包后挂。两条命令分开的代价是
+/// 要带版本；收益是导入不必等归属确定。
+#[test]
+fn link_appends_a_work_package_and_bumps_the_version() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &link_args(&db, "k-1", "--work-package", "wp-17", "1"),
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let outcome: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(
+        outcome["tracking_id"],
+        serde_json::json!("dt-1"),
+        "{stdout}"
+    );
+    assert_eq!(outcome["appended"], serde_json::json!(true), "{stdout}");
+    assert_eq!(outcome["replayed"], serde_json::json!(false), "{stdout}");
+    assert_eq!(outcome["version"], serde_json::json!(2), "{stdout}");
+    assert!(
+        outcome["link_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("dl-")),
+        "关系 ID 由身份派生：{stdout}"
+    );
+
+    // 写入口与读入口指向同一份事实：追加的东西必须看得见。
+    let (code, stdout, stderr) = run_as(CLI_USER, &["tracking", "--db", &db, "--id", "dt-1"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("内部工作包：1 个"), "{stdout}");
+    assert!(stdout.contains("wp-17"), "{stdout}");
+    assert!(stdout.contains("版本：2"), "{stdout}");
+}
+
+/// 期望版本过期：拒绝、什么都不写、并把当前版本直接告诉操作者。
+///
+/// 这条用例是这个命令存在的理由。若 `--expected-version` 改成「自己读当前版本」，
+/// 它会永远绿——因为读和写之间那段窗口被命令自己填平了，闸门不再有机会触发。
+#[test]
+fn link_refuses_a_stale_expected_version_and_names_the_current_one() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, _, stderr) = run_as(
+        CLI_USER,
+        &link_args(&db, "k-1", "--work-package", "wp-17", "1"),
+    );
+    assert_eq!(code, 0, "第一次追加应成功，stderr: {stderr}");
+
+    // 拿旧版本再追加另一条：版本已经变成 2，这条命令是照着 v1 的状态做的决定。
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &link_args(&db, "k-2", "--work-package", "wp-99", "1"),
+    );
+    assert_ne!(code, 0, "过期版本必须拒绝，实际 stdout：{stdout}");
+    assert!(stdout.is_empty(), "失败不该往 stdout 写半份结果：{stdout}");
+    assert!(
+        stderr.contains("当前版本是 2"),
+        "错误要直接给出当前版本，别让人再去猜：{stderr}"
+    );
+    assert!(
+        stderr.contains("--expected-version 2"),
+        "还要给出可照抄的下一步命令：{stderr}"
+    );
+
+    // 拒绝的那条没有留下半条写入：工作包仍是 1 个，版本仍是 2。
+    let (code, stdout, stderr) = run_as(CLI_USER, &["tracking", "--db", &db, "--id", "dt-1"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("内部工作包：1 个"), "{stdout}");
+    assert!(!stdout.contains("wp-99"), "{stdout}");
+    assert!(stdout.contains("版本：2"), "{stdout}");
+}
+
+/// 同键重放：返回**首次**结果里的版本，不回今天读到的版本。
+///
+/// 两件事都重要：重放不该再写一次；重放也不该把「现在能做什么」混进「那条命令当时
+/// 做了什么」——客户端拿今天的版本去追加，会得到冲突而不是静默覆盖，那是安全的一侧。
+#[test]
+fn link_replays_the_first_result_not_todays_version() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, _, stderr) = run_as(
+        CLI_USER,
+        &link_args(&db, "k-1", "--work-package", "wp-17", "1"),
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // 再追加一条，把当前版本推到 3。
+    let (code, _, stderr) = run_as(
+        CLI_USER,
+        &link_args(&db, "k-2", "--work-package", "wp-18", "2"),
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &link_args(&db, "k-1", "--work-package", "wp-17", "1"),
+    );
+    assert_eq!(code, 0, "重放不是错误，stderr: {stderr}");
+    let replay: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    assert_eq!(replay["replayed"], serde_json::json!(true), "{stdout}");
+    assert_eq!(
+        replay["appended"],
+        serde_json::json!(true),
+        "重放回答的是「那条命令当时做了什么」：{stdout}"
+    );
+    assert_eq!(
+        replay["version"],
+        serde_json::json!(2),
+        "重放不许把今天的版本塞回历史结果：{stdout}"
+    );
+}
+
+/// 引用必须恰好给一个：都不给与都给，修法不同，报错也不能合成一档。
+#[test]
+fn link_requires_exactly_one_reference() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "link",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-1",
+            "--expected-version",
+            "1",
+        ],
+    );
+    assert_ne!(code, 0, "两个引用都不给必须失败，实际 stdout：{stdout}");
+    assert!(
+        stderr.contains("必须给一个"),
+        "缺字段的提示要指向补什么：{stderr}"
+    );
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "link",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-2",
+            "--expected-version",
+            "1",
+            "--source",
+            "ds-abc",
+            "--work-package",
+            "wp-17",
+        ],
+    );
+    assert_ne!(code, 0, "两个引用都给必须失败，实际 stdout：{stdout}");
+    assert!(
+        stderr.contains("只能给一个"),
+        "多余字段的提示要指向删什么：{stderr}"
+    );
+}
+
+/// 不给期望版本就失败，并说清为什么不去替调用方读。
+#[test]
+fn link_refuses_to_guess_the_expected_version() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "link",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-1",
+            "--work-package",
+            "wp-17",
+        ],
+    );
+    assert_ne!(code, 0, "缺期望版本必须失败，实际 stdout：{stdout}");
+    assert!(
+        stderr.contains("不会替你读"),
+        "要说明为什么不自动读，否则这看起来是个可以补的默认值：{stderr}"
+    );
+}
+
+/// 按身份补目标：已有的不重建（seed 里的 `t-1` 就是 acme/prod/web），缺的才新建。
+///
+/// 新建的目标没有验收条件与开关状态（`acceptance=''`、`switch_state=unknown`），
+/// 因此补挂一个未验收目标会让这条跟踪项的结论从「全覆盖」退回「有缺口」——
+/// 这不是副作用，是事实：多一个客户目标就多一份没被证明的东西。
+#[test]
+fn link_creates_missing_targets_by_identity() {
+    let path = db_path();
+    seed(&path);
+    let db = path.to_string_lossy().to_string();
+
+    let (code, stdout, stderr) = run_as(
+        CLI_USER,
+        &[
+            "tracking",
+            "link",
+            "--db",
+            &db,
+            "--id",
+            "dt-1",
+            "--key",
+            "k-1",
+            "--expected-version",
+            "1",
+            "--work-package",
+            "wp-17",
+            "--target",
+            "acme:prod:web",
+            "--target",
+            "acme:staging",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let outcome: serde_json::Value = serde_json::from_str(&stdout).expect("应输出合法 JSON");
+    let created = outcome["created_targets"]
+        .as_array()
+        .expect("created_targets 是数组");
+    assert_eq!(
+        created.len(),
+        1,
+        "只有 acme:staging 是新的，acme:prod:web 按身份命中 seed 里的 t-1：{stdout}"
+    );
+
+    let (code, stdout, stderr) = run_as(CLI_USER, &["tracking", "--db", &db, "--id", "dt-1"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("环境 staging"), "新目标要看得见：{stdout}");
 }
