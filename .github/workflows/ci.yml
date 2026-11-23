@@ -39,6 +39,10 @@ jobs:
         run: cargo run -q -p xtask -- verify --stage P0
       - name: 迁移检查
         run: cargo run -q -p xtask -- migration-check
+      # 防新增孤岛。**这是弱门禁**：只比模块归属（live/orphan/test_only），不比行数；
+      # 既有模块膨胀它看不出来。别把它当成「不可达比例不会上升」的保证。
+      - name: 不可达基线
+        run: cargo run -q -p xtask -- reach --check verification/reach-baseline.tsv
       - name: 规格索引
         run: cargo run -q -p bod -- verify-index
 
