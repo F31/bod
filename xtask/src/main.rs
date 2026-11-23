@@ -378,6 +378,46 @@ const MIGRATION_TABLES: &[(&str, &[&str])] = &[
     ),
     // 014 只加 trigger，不改表结构，因此必需表清单为空；登记它只为让「未登记脚本」检查放行。
     ("014_history_triggers.sql", &[]),
+    // 015—020 是 P8 期间加的，登记表没跟着补。这个缺口一直没人发现，是因为 CI 里
+    // `migration-check` 排在「全量测试」之后，而后者从 2026-11-21 起一直红（浅克隆 +
+    // docs/ 不在仓库里），于是这条步骤在 CI 上**从来没跑过**；本机也很少单独跑它。
+    // 补登记不是放宽检查：`inspect_migration_tables` 的逻辑一个字没改，只是把这些
+    // 文件真正纳入「必需表在不在、有没有破坏性 DDL」的检查范围。
+    ("015_audit.sql", &["audit_events"]),
+    (
+        "016_delivery_tracking.sql",
+        &[
+            "delivery_tracking",
+            "delivery_targets",
+            "delivery_observations",
+        ],
+    ),
+    (
+        "017_delivery_sources.sql",
+        &[
+            "delivery_sources",
+            "delivery_source_candidates",
+            "delivery_source_revisions",
+            "delivery_observation_sources",
+        ],
+    ),
+    (
+        "018_delivery_idempotency.sql",
+        &["delivery_command_receipts", "delivery_tracking_sources"],
+    ),
+    (
+        "019_delivery_links.sql",
+        &["delivery_tracking_work_packages"],
+    ),
+    (
+        "020_stage_facts.sql",
+        &[
+            "project_members",
+            "customer_bindings",
+            "release_operators",
+            "authorization_revocations",
+        ],
+    ),
 ];
 
 fn inspect_migration_tables<'a>(sql: &str, required: &'a [&str]) -> (Vec<&'a str>, Vec<String>) {

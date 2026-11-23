@@ -487,8 +487,23 @@ v1.0 技术规格 §8 明确要求**复用** `authorization::access_record` 与
       1450/0——红灯只有在「只有 tracked 文件」的树里才现形。
       复现命令：`git archive HEAD | tar -x -C <dir>`，在那棵树里跑测试。
       另外，`docs/` 连重命名都不行（目录删除同样被拦），别指望用「临时藏起来」验证。
-- [ ] 7.10.6 等下一次 CI 结论。**在注解/结论出来之前不许写「CI 已绿」**：两个成因都已
-      定位并修复，但「修好了」与「CI 绿了」是两件事，后者要读数。
-      连带要知道：`全量测试` 一红，后面的 G-1/G-50、迁移检查、`reach --check`、
-      `verify-index` 全部 skipped——7.9 那条弱门禁在 CI 上**从来没跑过**。7.10.6 不解决，
-      任何「CI 绿了」都只覆盖到测试这一步。
+- [x] 7.10.6 **结论（`b9aafe8`）**：`rust (windows)` 整条绿；`rust (linux)` 的
+      「全量测试」也绿了——**红了五天的测试步骤到此为止**，两个成因（浅克隆、
+      `docs/` 不在仓库里）都确认修掉。windows 侧从没绿过，这是第一次。
+      唯一还红的是第 11 步「迁移检查」——它过去一直被前一步的红挡住，**这是它
+      第一次真正在 CI 上跑**，见 7.10.7。
+- [x] 7.10.7 迁移检查一跑就红：`[migration-check] FAIL 未登记的迁移脚本:
+      015_audit.sql, 016_delivery_tracking.sql, 017_delivery_sources.sql,
+      018_delivery_idempotency.sql, 019_delivery_links.sql, 020_stage_facts.sql`
+      ——P8 期间加的六个迁移从没登记进 `xtask` 的 `MIGRATION_TABLES`，
+      而那个表的作用正是「新增迁移必须被检查覆盖，否则失败而不是静默放过」。
+      本机复现：`cargo run -q -p xtask -- migration-check`。
+      补登记（`inspect_migration_tables` 逻辑一字未改，只是把这六个文件真正纳入
+      「必需表在不在、有没有破坏性 DDL」的范围）→
+      `PASS 20 个迁移脚本含 64 张必需表且无破坏性 DDL`。
+      另记一条洞（**没修，只写下来**）：检查只验「登记的表在不在」，
+      **不验「文件里有没有没登记的表」**，所以多建表不会被拦。
+- [ ] 7.10.8 等迁移检查修完那一轮的结论。在此之前仍不许写「CI 全绿」：
+      `不可达基线` 与 `规格索引` 这两步自建库以来在 CI 上**也没跑过**
+      （一直被前面的红挡住）。本机预跑都 PASS（`xtask reach --check` 0/0/0/0、
+      `bod verify-index` → `[G-50] PASS`），但那是本机。
